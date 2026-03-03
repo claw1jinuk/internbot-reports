@@ -1,0 +1,120 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{natbib}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Large Language Models and Reinforcement Learning:\\Recent Advances (Feb--Mar 2026)}
+\author{Internbot Research Assistant}
+\date{March 3, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We survey recent papers (late February--early March 2026) at the intersection of large language models (LLMs) and reinforcement learning (RL). The dominant theme is the rapid evolution of Group Relative Policy Optimization (GRPO) and its variants for improving reasoning, alongside growing interest in efficient chain-of-thought generation and multimodal RL alignment.
+\end{abstract}
+
+\section{GRPO and Its Variants}
+
+Group Relative Policy Optimization (GRPO) has become a widely adopted RL method for LLM post-training, eliminating the need for a separate critic network by computing advantages relative to a group of sampled outputs. Several recent papers address its limitations.
+
+\textbf{DIVA-GRPO} \citep{gao2026diva} targets multimodal LLMs, where standard GRPO suffers from sparse rewards on difficult problems. The method introduces a difficulty-adaptive advantage signal: easier problems receive smaller bonuses while harder problems get amplified gradients, preventing the model from ignoring challenging reasoning tasks during training.
+
+\textbf{Group Distributionally Robust GRPO} \citep{panaganti2026grpo} observes that standard GRPO treats all problem categories uniformly, causing the model to neglect harder domains (e.g., geometry vs.\ arithmetic). Their fix applies distributionally robust optimization to reweight problem groups, ensuring worst-case category performance improves alongside average performance.
+
+\textbf{Scaf-GRPO} \citep{zhang2025scaf} addresses the ``learning cliff''---the failure of RL-based training when problems far exceed the model's current ability. By providing scaffolded intermediate reasoning steps, the method bridges the difficulty gap and enables gradual capability growth.
+
+\section{Efficient Reasoning via RL}
+
+\citet{wu2026efficient} survey the emerging problem of \emph{efficient reasoning}: LLMs with chain-of-thought (CoT) produce better answers but at high token cost. Their framework organizes solutions along three axes:
+\begin{itemize}
+    \item \textbf{Data}: Curating training examples with concise-but-correct reasoning traces.
+    \item \textbf{Reward}: Shaping reward functions to penalize excessive length while preserving accuracy.
+    \item \textbf{Optimization}: RL algorithms (GRPO, PPO variants) that explicitly balance quality and brevity.
+\end{itemize}
+The key finding is that naive length penalties degrade accuracy; effective methods must jointly optimize correctness and efficiency.
+
+\section{Self-Reward and Reward-Free Approaches}
+
+\textbf{Self-Rewarding PPO} \citep{zhang2025selfrewarding} eliminates the separate reward model by having the LLM evaluate its own outputs, then applying PPO on these self-generated rewards. This avoids reward model staleness and distribution mismatch, outperforming standard SFT on out-of-domain generalization while using only demonstration data.
+
+\textbf{SwS (Self-aware Weakness-driven Synthesis)} \citep{liang2025sws} takes a complementary approach: instead of improving the reward signal, it improves the \emph{training data} by having the model identify its own weaknesses and synthesize targeted practice problems. This self-aware curriculum generation significantly boosts RL with verifiable rewards (RLVR) on math reasoning.
+
+\section{Multimodal and Non-Standard Settings}
+
+RL for LLMs is expanding beyond text:
+\begin{itemize}
+    \item \textbf{Multimodal reasoning}: Both DIVA-GRPO and GRPO-CARE \citep{chen2025care} extend GRPO to vision-language models, addressing the unique challenge of grounding reasoning in visual inputs.
+    \item \textbf{Audio reasoning}: The Interspeech 2026 Audio Reasoning Challenge \citep{ma2026interspeech} introduces the first shared task for evaluating CoT quality in audio language models, signaling that RL-driven reasoning is moving beyond text and vision.
+    \item \textbf{Robustness}: \citet{tian2025robustness} evaluate RL-fine-tuned LLMs under non-ideal conditions (noisy inputs, distribution shift), finding that RL improves reasoning but can amplify brittleness to perturbations.
+\end{itemize}
+
+\section{Key Takeaways}
+
+\begin{enumerate}
+    \item \textbf{GRPO is the dominant paradigm}, but vanilla GRPO has clear failure modes (sparse rewards, uniform difficulty treatment, learning cliffs) that are being actively patched.
+    \item \textbf{Efficient reasoning} is a growing priority---the field is shifting from ``think longer'' to ``think smarter.''
+    \item \textbf{Self-supervised reward signals} (self-rewarding, self-aware synthesis) are reducing dependence on external reward models.
+    \item \textbf{Modality expansion}: RL alignment is no longer text-only; vision and audio are active frontiers.
+    \item \textbf{Robustness concerns} are emerging as RL-tuned models deploy in noisy real-world settings.
+\end{enumerate}
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+
+\bibitem[Chen et~al.(2025)]{chen2025care}
+Y.~Chen, Y.~Ge, R.~Wang, Y.~Ge, J.~Cheng, Y.~Shan, and X.~Liu.
+\newblock GRPO-CARE: Consistency-aware reinforcement learning for multimodal reasoning.
+\newblock \emph{arXiv:2506.16141}, 2025.
+
+\bibitem[Gao et~al.(2026)]{gao2026diva}
+H.~Gao, Z.~Zhang, L.~Pang, F.~Guo, H.~Dou, G.~Lv, S.~Liu, T.~Gao, H.~Shen, and X.~Cheng.
+\newblock DIVA-GRPO: Enhancing multimodal reasoning through difficulty-adaptive variant advantage.
+\newblock \emph{arXiv:2603.01106}, 2026.
+
+\bibitem[Liang et~al.(2025)]{liang2025sws}
+X.~Liang, Z.~Li, Y.~Gong, Y.~Wang, H.~Zhang, Y.~Shen, Y.~Wu, and W.~Chen.
+\newblock SwS: Self-aware weakness-driven problem synthesis in RL for LLM reasoning.
+\newblock \emph{arXiv:2506.08989}, 2025.
+
+\bibitem[Ma et~al.(2026)]{ma2026interspeech}
+Z.~Ma, R.~Xu, Y.~Ma, C.~Yang, B.~Li, J.~Kim, J.~Xu, J.~Li, C.~Busso, K.~Yu, E.~Chng, and X.~Chen.
+\newblock The Interspeech 2026 audio reasoning challenge.
+\newblock \emph{arXiv:2602.14224}, 2026.
+
+\bibitem[Panaganti et~al.(2026)]{panaganti2026grpo}
+K.~Panaganti, Z.~Liang, W.~Yu, H.~Mi, and D.~Yu.
+\newblock Group distributionally robust optimization-driven RL for LLM reasoning.
+\newblock \emph{arXiv:2601.19280}, 2026.
+
+\bibitem[Tian et~al.(2025)]{tian2025robustness}
+C.~Tian, M.~Blaschko, M.~Xing, X.~Li, Y.~Yue, and M.~Moens.
+\newblock LLM reasoning under non-ideal conditions after RL-fine-tuning.
+\newblock \emph{arXiv:2508.04848}, 2025.
+
+\bibitem[Wu et~al.(2026)]{wu2026efficient}
+T.~Wu, Z.~Xu, B.~Zhou, and N.~Wong.
+\newblock The art of efficient reasoning: Data, reward, and optimization.
+\newblock \emph{arXiv:2602.20945}, 2026.
+
+\bibitem[Zhang et~al.(2025a)]{zhang2025scaf}
+X.~Zhang, S.~Wu, Y.~Zhu, H.~Tan, S.~Yu, Z.~He, and J.~Jia.
+\newblock Scaf-GRPO: Scaffolded GRPO for enhancing LLM reasoning.
+\newblock \emph{arXiv:2510.19807}, 2025.
+
+\bibitem[Zhang et~al.(2025b)]{zhang2025selfrewarding}
+Q.~Zhang, L.~Qiu, I.~Hong, Z.~Xu, T.~Liu, S.~Li, R.~Zhang, Z.~Li, L.~Li, B.~Yin, C.~Zhang, J.~Chen, H.~Jiang, and T.~Zhao.
+\newblock Self-rewarding PPO: Aligning LLMs with demonstrations only.
+\newblock \emph{arXiv:2510.21090}, 2025.
+
+\end{thebibliography}
+
+\end{document}
