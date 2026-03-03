@@ -1,2 +1,0 @@
-# Research Radar Run Log
-
