@@ -1,0 +1,220 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{On-Policy Distillation and Memory-Augmented Architectures\\for Continual Learning: A Literature Survey}
+\author{Internbot Research Assistant}
+\date{March 3, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Continual learning (CL) aims to enable models to learn sequentially from non-stationary data streams without catastrophic forgetting of previously acquired knowledge.
+Two complementary research directions have emerged as particularly promising: (1)~knowledge distillation-based methods that transfer cumulative knowledge across task boundaries, and (2)~memory-augmented architectures that explicitly store and retrieve past experiences.
+This report surveys recent advances in both areas, covering dense distillation strategies, on-policy knowledge transfer, episodic memory management, and the emerging paradigm of modular memory for foundation model agents.
+We highlight key findings from eight representative papers and discuss open challenges and future directions.
+\end{abstract}
+
+\section{Introduction}
+
+Catastrophic forgetting---the tendency of neural networks to lose previously learned knowledge when trained on new tasks---remains a central obstacle in continual learning~\citep{mccloskey1989catastrophic}.
+The problem is especially acute in real-world deployment scenarios where models must adapt to evolving data distributions while retaining prior capabilities.
+
+Two broad families of solutions have gained traction.
+\textbf{Distillation-based methods} use a teacher--student framework to regularize learning: the model's outputs on old-task data (or synthetic proxies) are distilled into the updated model, preserving knowledge without storing raw data.
+\textbf{Memory-based methods} maintain an explicit buffer of past samples (episodic memory) or learned representations to replay during new-task training.
+
+This report surveys recent work along both axes, with a focus on on-policy distillation techniques and memory-layer architectures.
+Section~\ref{sec:distillation} covers distillation approaches, Section~\ref{sec:memory} discusses memory-based methods, Section~\ref{sec:modular} presents the emerging modular-memory paradigm, and Section~\ref{sec:discussion} synthesizes key themes and open questions.
+
+\section{Knowledge Distillation for Continual Learning}
+\label{sec:distillation}
+
+Knowledge distillation~\citep{hinton2015distilling} was originally proposed for model compression but has become a cornerstone of continual learning.
+The core idea is simple: when learning task $t+1$, the model (student) is regularized to match the outputs of a snapshot of itself from task $t$ (teacher) on representative inputs.
+
+\subsection{Densely Distilling Cumulative Knowledge}
+
+\citet{shi2024densely} identify a key limitation of standard distillation-based CL methods: they typically only distill knowledge from the immediately preceding task model, creating a ``single-hop'' bottleneck.
+As the number of tasks grows, knowledge from early tasks is progressively diluted through successive distillation steps.
+
+Their proposed method, \textbf{Densely Distilling Cumulative Knowledge (DDCK)}, addresses this by maintaining distillation connections to multiple prior task models rather than just the most recent one.
+The approach draws inspiration from DenseNet-style skip connections, applying them in the temporal (task-sequence) dimension.
+Formally, when learning task $t$, the loss includes distillation terms against models from tasks $1, 2, \ldots, t-1$, weighted to balance recency and cumulative coverage:
+\begin{equation}
+    \mathcal{L}_{\text{DDCK}} = \mathcal{L}_{\text{CE}}(x_t, y_t) + \sum_{i=1}^{t-1} \lambda_i \, \text{KL}\!\left(f_{\theta_i}(x) \,\|\, f_{\theta_t}(x)\right)
+\end{equation}
+where $\lambda_i$ controls the contribution of each prior model.
+Experiments show consistent improvements over single-hop distillation baselines across CIFAR-100, ImageNet-subset, and TinyImageNet benchmarks.
+
+\subsection{On-Policy Distillation in Continual RL}
+
+In the reinforcement learning setting, \citet{traore2019continual} propose using \textbf{policy distillation} to consolidate knowledge across sequential robot manipulation tasks.
+The key distinction from supervised CL is that the distillation must be \emph{on-policy}: the student must generate its own trajectories and align its policy with the teacher's action distribution in those states, rather than replaying stored transitions.
+
+Their Sim2Real framework trains policies in simulation for each task, distills them into a single multi-task policy, and then transfers to physical robots.
+The on-policy nature of the distillation is critical because off-policy replay of stored transitions leads to distributional shift in the RL setting.
+This work demonstrates that policy distillation can serve as an effective knowledge consolidation mechanism for continual RL agents.
+
+\subsection{Federated Continual Learning via Distillation}
+
+\citet{usmanova2022federated} extend distillation-based CL to the \textbf{federated learning} setting, where multiple edge devices learn continually from local data streams.
+Each device uses knowledge distillation to consolidate local knowledge, and the distilled models are aggregated at a central server.
+This avoids sharing raw data (preserving privacy) while mitigating forgetting across both the temporal (task sequence) and spatial (device) dimensions.
+
+\section{Memory-Based Approaches}
+\label{sec:memory}
+
+\subsection{Carousel Memory}
+
+\citet{lee2021carousel} address a fundamental constraint of episodic memory (EM) systems: bounded buffer size.
+In standard EM-based CL, when the buffer is full, evicted samples are permanently lost.
+\textbf{Carousel Memory (CarM)} introduces a hierarchical memory management strategy that exploits the storage hierarchy of edge devices.
+
+The key insight is that mobile and IoT devices have both fast RAM (small capacity) and slower internal storage (large capacity).
+CarM maintains a small active buffer in RAM for training and a larger archive in storage.
+Samples are efficiently migrated between the two tiers using a carousel scheduling policy that ensures diverse replay without being bottlenecked by slow storage access.
+Experiments across seven CL methods show that CarM consistently improves accuracy by large margins, demonstrating that \emph{how} memory is managed matters as much as \emph{what} is stored.
+
+\subsection{Meta-Learning Representations for Memory Efficiency}
+
+\citet{javed2019meta} take a complementary approach: rather than optimizing the memory buffer, they optimize the \textbf{learned representation} to be amenable to continual learning.
+Using meta-learning (specifically, an OML-based objective), they learn feature extractors that produce representations which are both transferable to new tasks and resistant to forgetting.
+This reduces the reliance on large episodic memories because the representation itself encodes inductive biases for continual learning.
+
+\subsection{Routing Networks for Task-Specific Memory}
+
+\citet{collier2020routing} use \textbf{routing networks with co-training} to allocate different subnetworks to different tasks.
+This implicitly creates task-specific ``memory'' within the network's parameters: knowledge for each task is stored in its assigned routing path, reducing interference between dissimilar tasks.
+The co-training mechanism ensures that shared components remain useful across tasks while specialized paths preserve task-specific knowledge.
+
+\section{Modular Memory for Foundation Model Agents}
+\label{sec:modular}
+
+The most recent and arguably most forward-looking contribution is the position paper by \citet{dorovatas2026modular}, stemming from a Dagstuhl seminar on continual learning in the era of foundation models.
+
+\subsection{The IWL--ICL Dichotomy}
+
+The paper argues that foundation models have introduced a fundamental dichotomy between two forms of learning:
+\begin{itemize}
+    \item \textbf{In-Weight Learning (IWL)}: Traditional parameter updates via gradient descent. Stable but slow; the source of catastrophic forgetting.
+    \item \textbf{In-Context Learning (ICL)}: Leveraging the context window to condition on examples without parameter updates. Fast and flexible but transient; limited by context length.
+\end{itemize}
+
+The central thesis is that neither IWL nor ICL alone is sufficient for continual learning agents.
+Instead, \textbf{modular memory} architectures that combine both are needed.
+
+\subsection{A Framework for Modular Memory}
+
+The proposed framework organizes memory into modules with different temporal scales and access patterns:
+\begin{itemize}
+    \item \textbf{Working memory}: The context window, enabling rapid in-context adaptation.
+    \item \textbf{Episodic memory}: Retrieval-augmented stores of past experiences, bridging the gap between transient context and permanent weights.
+    \item \textbf{Semantic memory}: Consolidated knowledge encoded in model parameters via selective fine-tuning or adapter modules.
+\end{itemize}
+
+This modular design mirrors the memory systems described in cognitive neuroscience and offers a principled architecture for agents that must operate continuously, accumulate experience, and personalize to user needs.
+
+\subsection{Implications for Agent Design}
+
+The paper outlines a roadmap where continual learning moves from the narrow ``task-incremental'' benchmarks of the past decade toward \textbf{open-ended agent learning}.
+Key challenges include: (1)~deciding when and what to consolidate from working memory to long-term storage, (2)~efficient retrieval mechanisms for episodic memory at scale, and (3)~preventing semantic drift during IWL updates.
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Convergence of Distillation and Memory}
+
+A recurring theme across the surveyed works is the \textbf{complementarity of distillation and memory}.
+Distillation provides a mechanism for knowledge consolidation---compressing what has been learned into a compact form.
+Memory provides the raw material for distillation---the exemplars or experiences from which knowledge can be extracted.
+Methods that combine both (e.g., using episodic memory to provide replay data for distillation losses) consistently outperform those using either technique in isolation.
+
+\subsection{From Buffers to Architectures}
+
+The field is evolving from treating memory as an external buffer (a bag of stored samples) toward \textbf{architectural integration} of memory mechanisms.
+Carousel Memory's hierarchical storage, routing networks' implicit parameter-space memory, and the modular memory framework all point in this direction.
+The trend suggests that future CL systems will embed memory as a first-class architectural component rather than an auxiliary training trick.
+
+\subsection{Open Questions}
+
+Several challenges remain:
+\begin{enumerate}
+    \item \textbf{Scalability of dense distillation}: Methods like DDCK require maintaining or accessing multiple prior models. How to scale this to hundreds of tasks remains unclear.
+    \item \textbf{Memory--compute tradeoffs}: Richer memory systems (hierarchical, retrieval-augmented) introduce latency and compute overhead that may conflict with real-time deployment constraints.
+    \item \textbf{Evaluation beyond benchmarks}: Most CL research uses closed-set benchmarks (split CIFAR, split ImageNet). Evaluating modular memory systems for open-ended agent learning requires new protocols.
+    \item \textbf{Privacy and memory}: Episodic memory stores raw data, raising privacy concerns in federated or multi-user settings. Distillation offers a partial solution by abstracting knowledge away from raw samples.
+\end{enumerate}
+
+\section{Conclusion}
+
+This survey has examined two converging threads in continual learning: knowledge distillation and memory-augmented architectures.
+Distillation-based methods have matured from single-hop teacher--student transfer to dense cumulative distillation and on-policy RL variants.
+Memory-based methods have evolved from simple replay buffers to hierarchical storage systems and meta-learned representations.
+The emerging modular memory paradigm, combining in-weight and in-context learning through structured memory modules, offers a compelling vision for the next generation of continual learning agents.
+
+For practitioners, the key takeaway is that effective continual learning increasingly requires \emph{both} mechanisms: distillation for knowledge consolidation and structured memory for experience preservation and retrieval.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Collier et~al.(2020)]{collier2020routing}
+Mark Collier, Efi Kokiopoulou, Andrea Gesmundo, and Jesse Berent.
+\newblock Routing networks with co-training for continual learning.
+\newblock \emph{arXiv preprint arXiv:2009.04381}, 2020.
+
+\bibitem[Dorovatas et~al.(2026)]{dorovatas2026modular}
+Vaggelis Dorovatas, Malte Schwerin, Andrew~D. Bagdanov, Lucas Caccia, Antonio Carta, Laurent Charlin, Barbara Hammer, Tyler~L. Hayes, Timm Hess, Christopher Kanan, et~al.
+\newblock Modular memory is the key to continual learning agents.
+\newblock \emph{arXiv preprint arXiv:2603.01761}, 2026.
+
+\bibitem[Hinton et~al.(2015)]{hinton2015distilling}
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean.
+\newblock Distilling the knowledge in a neural network.
+\newblock \emph{arXiv preprint arXiv:1503.02531}, 2015.
+
+\bibitem[Javed and White(2019)]{javed2019meta}
+Khurram Javed and Martha White.
+\newblock Meta-learning representations for continual learning.
+\newblock In \emph{NeurIPS}, 2019.
+
+\bibitem[Lee et~al.(2021)]{lee2021carousel}
+Soobee Lee, Minindu Weerakoon, Jonghyun Choi, Minjia Zhang, Di~Wang, and Myeongjae Jeon.
+\newblock Carousel memory: Rethinking the design of episodic memory for continual learning.
+\newblock \emph{arXiv preprint arXiv:2110.07276}, 2021.
+
+\bibitem[McCloskey and Cohen(1989)]{mccloskey1989catastrophic}
+Michael McCloskey and Neal~J. Cohen.
+\newblock Catastrophic interference in connectionist networks: The sequential learning problem.
+\newblock In \emph{Psychology of Learning and Motivation}, volume~24, pages 109--165. Academic Press, 1989.
+
+\bibitem[Shi et~al.(2024)]{shi2024densely}
+Zenglin Shi, Pei Liu, Tong Su, Yunpeng Wu, Kuien Liu, Yu~Song, and Meng Wang.
+\newblock Densely distilling cumulative knowledge for continual learning.
+\newblock \emph{arXiv preprint arXiv:2405.09820}, 2024.
+
+\bibitem[Traor\'e et~al.(2019)]{traore2019continual}
+Ren\'e Traor\'e, Hugo Caselles-Dupr\'e, Timoth\'ee Lesort, Te~Sun, Guanghang Cai, Natalia~D\'iaz Rodr\'iguez, and David Filliat.
+\newblock Continual reinforcement learning deployed in real-life using policy distillation and sim2real transfer.
+\newblock \emph{arXiv preprint arXiv:1906.04452}, 2019.
+
+\bibitem[Usmanova et~al.(2022)]{usmanova2022federated}
+Anastasiia Usmanova, Fran\c{c}ois Portet, Philippe Lalanda, and German Vega.
+\newblock Federated continual learning through distillation in pervasive computing.
+\newblock \emph{arXiv preprint arXiv:2207.08181}, 2022.
+
+\end{thebibliography}
+
+\end{document}
