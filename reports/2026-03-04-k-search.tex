@@ -1,0 +1,126 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Paper Review: K-Search --- LLM Kernel Generation\\via Co-Evolving Intrinsic World Model}
+\author{Internbot Research Assistant}
+\date{March 4, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We review K-Search~\citep{cao2026ksearch}, which reframes LLM-based GPU kernel optimization from stochastic code generation to structured planning via a co-evolving world model. On complex FlashInfer kernels the method achieves 2.1$\times$ average and up to 14.3$\times$ improvement over evolutionary baselines, and sets state-of-the-art on the GPUMODE TriMul benchmark with 85$\times$ fewer iterations than the next-best automated method.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} K-Search: LLM Kernel Generation via Co-Evolving Intrinsic World Model\\
+\textbf{Authors:} Shiyi Cao, Ziming Mao, Joseph E.\ Gonzalez, Ion Stoica (UC Berkeley)\\
+\textbf{Links:} \href{https://arxiv.org/abs/2602.19128}{arXiv} $\mid$ \href{https://huggingface.co/papers/2602.19128}{HF Papers}
+
+\subsection{Problem}
+
+GPU kernel optimization requires navigating a vast design space of tiling, memory layout, synchronization, and architecture-specific instructions. Existing LLM-based approaches (OpenEvolve, ShinkaEvolve, FunSearch) treat LLMs as stochastic code generators inside evolutionary loops. This fails on complex kernels because high-performance solutions often require \emph{coordinated multi-step structural transformations} where intermediate steps may regress before yielding gains---a sound strategy gets discarded due to a transient compilation error.
+
+\subsection{Method}
+
+K-Search repurposes the LLM as an \textbf{intrinsic world model} with three key innovations:
+
+\begin{enumerate}
+    \item \textbf{Explicit decoupling} of high-level planning from low-level implementation. An action $a_t = (x_{\text{parent}}, \delta)$ pairs a parent program with an optimization \emph{intent} (e.g., ``resolve bank conflicts via padding''). The intent is evaluated independently of whether the first code attempt compiles.
+
+    \item \textbf{Co-evolving search tree.} The world model maintains a tree of open (frontier) and closed (visited) nodes, each with a priority score $V \in [0,1]$. At each step:
+    \begin{itemize}
+        \item \textbf{Select:} $a_t = \arg\max_{a \in A(S_t)} V(a \mid S_t)$
+        \item \textbf{Instantiate:} sample code $x_t \sim \pi_{\text{code}}(x \mid a_t)$ with a local refinement loop (stagnation limit $K$)
+        \item \textbf{Evolve:} update the tree via insert / update / prune operations conditioned on execution feedback
+    \end{itemize}
+
+    \item \textbf{In-context co-evolution.} The world model refines its transition dynamics purely via in-context learning---no weight updates---by assimilating the growing history of observations.
+\end{enumerate}
+
+The objective is $J(x) = s \cdot (p_{\text{ref}} / p) \cdot 100$ (correctness-gated speedup over a reference baseline), maximized within a fixed budget $B$.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Kernel} & \textbf{K-Search} & \textbf{OpenEvolve} & \textbf{Improvement} \\
+\midrule
+GQA Paged Decode & 76.0 & 44.2 & 1.72$\times$ \\
+MLA Paged Decode & 47.1 & 39.9 & 1.18$\times$ \\
+MLA Paged Prefill & 57.4 & 19.5 & 2.95$\times$ \\
+FP8 MoE (Blackwell) & 44.1 & 3.1 & 14.3$\times$ \\
+\midrule
+\textbf{Average} & \textbf{56.1} & 26.7 & \textbf{2.10$\times$} \\
+\bottomrule
+\end{tabular}
+\caption{FlashInfer kernel scores (H100/B200, 120 iterations, 3 runs).}
+\end{table}
+
+On the GPUMODE TriMul competition, K-Search achieves 1030~$\mu$s geometric-mean latency with only 300 iterations, beating the prior best automated method (TTT, 1161~$\mu$s with 25{,}600 iterations) and human submissions.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item World model evolves via in-context learning only---bounded by context window capacity.
+    \item Requires frontier LLMs (GPT-5.2, Gemini-3-Pro); quality is bounded by LLM domain knowledge.
+    \item Tends to discover structurally complex kernels (e.g., split-K) that are suboptimal for small-batch workloads where simpler designs win.
+    \item Single scalar objective; does not handle multi-objective trade-offs (latency vs.\ memory vs.\ power).
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Learned World Model via Fine-Tuning}
+
+\textbf{Gap:} The current world model relies entirely on in-context learning, limiting its capacity to what fits in the prompt window. As the search tree grows, older observations may be truncated.
+
+\textbf{Approach:} Fine-tune a smaller LLM specifically as the world model on $(S_t, a_t, o_t) \to S_{t+1}$ trajectories collected from K-Search runs. This would internalize optimization heuristics in weights rather than context, enabling longer search horizons and potentially working with weaker (cheaper) base models for code generation.
+
+\textbf{Feasibility:} Moderate (2--3 months). Requires collecting trajectory data from multiple kernel optimization runs and training a LoRA adapter.
+
+\subsection{Multi-Objective Search with Pareto Frontiers}
+
+\textbf{Gap:} K-Search optimizes a single aggregate speedup score. In practice, kernel selection depends on batch size, memory budget, and power constraints.
+
+\textbf{Approach:} Extend the search tree to maintain Pareto-optimal frontiers across multiple objectives. The priority score $V$ becomes a vector, and action selection uses Pareto dominance or scalarization with user-specified weights. The world model's prune operation would remove Pareto-dominated branches rather than low-scoring ones.
+
+\textbf{Feasibility:} Moderate (2--4 months). The tree structure naturally accommodates multi-objective tracking; the main challenge is defining meaningful evaluation metrics beyond latency.
+
+\subsection{Cross-Architecture Transfer of World Model Knowledge}
+
+\textbf{Gap:} Each K-Search run starts from scratch. Optimization insights learned on H100 (e.g., ``shared memory padding eliminates bank conflicts'') likely transfer to B200 or future architectures, but the current system discards this knowledge.
+
+\textbf{Approach:} Serialize the final search tree (including pruned branches with failure reasons) as a transferable ``optimization playbook.'' When targeting a new architecture, initialize the world model with the previous tree, marking all nodes as tentative. The co-evolution process then quickly validates or invalidates prior knowledge against the new hardware.
+
+\textbf{Feasibility:} Easy (2--4 weeks). Requires serialization of the search tree state and a re-initialization protocol.
+
+\section{Conclusion}
+
+K-Search demonstrates that treating LLMs as \emph{planners} rather than \emph{generators} unlocks dramatically better GPU kernel optimization. The co-evolving world model's ability to maintain, prioritize, and prune optimization hypotheses across non-monotonic search paths is the key enabler. The most immediately actionable follow-up is cross-architecture transfer of world model knowledge, which could amortize search costs across hardware generations with minimal engineering effort.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+
+\bibitem[Cao et~al.(2026)]{cao2026ksearch}
+S.~Cao, Z.~Mao, J.~E.~Gonzalez, and I.~Stoica.
+\newblock K-Search: LLM kernel generation via co-evolving intrinsic world model.
+\newblock \emph{arXiv:2602.19128}, 2026.
+
+\end{thebibliography}
+
+\end{document}
