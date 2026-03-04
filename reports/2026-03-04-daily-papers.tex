@@ -1,0 +1,115 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review: March 4, 2026\\Beyond Length Scaling for Generative Reward Models}
+\author{Internbot Research Assistant}
+\date{March 4, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Today's review covers \emph{Beyond Length Scaling: Synergizing Breadth and Depth for Generative Reward Models}~\citep{zhang2026mixgrm}, which proposes Mix-GRM, a framework that decomposes chain-of-thought reasoning in generative reward models into breadth (multi-principle coverage) and depth (sequential verification) mechanisms, achieving new state-of-the-art on five reward modeling benchmarks with $\sim$278$\times$ less data than the strongest competitor.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} Beyond Length Scaling: Synergizing Breadth and Depth for Generative Reward Models\\
+\textbf{Authors:} Qiyuan Zhang, Yufei Wang, Tianhe Wu, Can Xu, Qingfeng Sun, Kai Zheng, Xue Liu, Chen Ma\\
+\textbf{Affiliations:} City University of Hong Kong, Tencent Hunyuan, MBZUAI
+
+\subsection{Core Problem}
+
+Generative Reward Models (GRMs) produce natural-language rationales alongside preference decisions for LLM alignment. The prevailing strategy to improve GRMs is \emph{unstructured length scaling}---simply making CoT reasoning longer. The authors argue this is misguided: longer CoTs do not universally improve performance, and the optimal reasoning structure diverges across task types.
+
+\subsection{Key Contribution: Mix-GRM}
+
+Mix-GRM decomposes GRM reasoning into two orthogonal mechanisms:
+
+\begin{itemize}
+    \item \textbf{Breadth-CoT (B-CoT):} Simulates parallel thinking. $N$ independent rationales are sampled, parsed into atomic ``Principle-Judgment-Verdict'' units $\mathcal{S} = \{(p_k, j_k, v_k)\}_{k=1}^{K}$, then merged and deduplicated. The top-10 most frequent principles form a consensus set, expanding horizontal evaluative coverage. Best suited for \emph{subjective preference} tasks.
+
+    \item \textbf{Depth-CoT (D-CoT):} Simulates sequential thinking. A self-generated reasoning trace $z$ (step-by-step solution derivation) is injected, and a focused subset of principles ($|K| \leq 3$) is re-evaluated grounded in the trace via $\tilde{j}_k = \mathcal{T}_{\text{refine}}(p_k \mid z)$. Best suited for \emph{objective correctness} tasks.
+\end{itemize}
+
+\noindent\textbf{Training:} The model is first SFT-trained on a mixture dataset pairing B-CoT with preference tasks and D-CoT with correctness tasks. Then GRPO-based RLVR is applied with binary verdict-level reward ($+1$ if correct, $-1$ otherwise):
+\begin{equation}
+    \mathcal{J}_{\text{GRPO}}(\theta) = \mathbb{E}\left[\frac{1}{G}\sum_{i=1}^{G}\left(\frac{\pi_\theta(o_i|I)}{\pi_{\theta_{\text{old}}}(o_i|I)}\hat{A}_i - \beta\,\mathbb{D}_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})\right)\right]
+\end{equation}
+
+\noindent\textbf{Key finding:} RLVR acts as a ``switching amplifier''---with only verdict-level supervision (no structural labels), the model spontaneously learns to couple B-CoT with preference tasks and D-CoT with correctness tasks. Structural match rate jumps from 73\% (post-SFT) to 95\% (post-RLVR).
+
+\subsection{Main Results}
+
+\begin{itemize}
+    \item Mix-GRM (79.4 avg.) surpasses leading open-source RMs by 8.2\% across RewardBench v1/v2, RM-Bench, RMB, and PPE.
+    \item With SFT alone (9K samples), Mix-GRM (75.1) nearly matches FARE-8B (75.9) trained on $\sim$2.5M samples---a $\sim$278$\times$ data efficiency advantage.
+    \item B-CoT improves preference tasks (+1.1) but hurts correctness ($-$2.0); D-CoT does the reverse (+0.6 correctness, $-$2.3 preference). Mix-GRM combines both: +1.8 preference AND +1.3 correctness.
+    \item Downstream: SOTA on Best-of-10 test-time scaling for MATH (43.2\%), CHAMP, MBPP+, and BigCodeBench.
+    \item Token costs are comparable across methods ($\sim$700--830 tokens), confirming gains stem from structural efficacy, not additional compute.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item The breadth/depth dichotomy is a binary approximation of a higher-dimensional reasoning manifold. Real tasks often blend deductive rigor with multi-dimensional nuance.
+    \item The emergent polarization from RLVR may introduce structural rigidity for hybrid tasks (e.g., agentic research requiring both rigorous logic and high-quality writing).
+\end{enumerate}
+
+\section{Follow-up Research Directions}
+
+\subsection{Soft-Routing Across the Reasoning Manifold}
+
+\textbf{Gap:} The current binary B-CoT/D-CoT assignment is coarse. Many real tasks (e.g., code review, scientific writing) require both breadth and depth simultaneously.
+
+\textbf{Approach:} Train a lightweight router (e.g., a learned gating module or mixture-of-experts head) that produces a continuous blend weight $\alpha \in [0,1]$ between B-CoT and D-CoT reasoning modes per input. The router can be trained end-to-end with RLVR, using the verdict reward signal to learn when and how much of each mode to activate. This extends the binary polarization to a continuous spectrum.
+
+\textbf{Feasibility:} Moderate (2--3 months). Requires modifying the SFT data pipeline to include hybrid examples and adding a small gating network.
+
+\subsection{Mechanism-Aware Data Curation for RLVR}
+
+\textbf{Gap:} Mix-GRM's RLVR stage uses 21K training examples with uniform sampling. The ``switching amplifier'' effect suggests the model learns structural alignment from reward signal alone---but the quality and distribution of RLVR data likely matters.
+
+\textbf{Approach:} Apply self-aware curriculum generation (similar to SwS~\citep{liang2025sws}) where the model identifies inputs where its current mechanism assignment is \emph{wrong} (B-CoT used for correctness tasks or vice versa) and synthesizes targeted examples to strengthen the weaker mode. This could accelerate the 73\%$\to$95\% structural alignment and push it further.
+
+\textbf{Feasibility:} Easy (2--4 weeks). Reuses existing infrastructure; only requires adding a mechanism-mismatch detector and a targeted sampling loop.
+
+\subsection{Scaling to Multi-Turn Agent Evaluation}
+
+\textbf{Gap:} Mix-GRM evaluates single-turn response pairs. Modern LLM agents operate in multi-turn, tool-using settings where evaluation requires tracking coherence across turns, tool-call correctness, and goal completion.
+
+\textbf{Approach:} Extend the Principle-Judgment-Verdict schema to a \emph{temporal} variant where principles are evaluated per turn and aggregated across the trajectory. B-CoT would cover diverse evaluation dimensions per turn, while D-CoT would verify logical consistency across the full trajectory. Train on multi-turn preference data from agent benchmarks (e.g., AgentBench, GAIA).
+
+\textbf{Feasibility:} Hard (6+ months). Requires new multi-turn evaluation datasets, trajectory-level reward formulation, and significantly more compute for longer context windows.
+
+\section{Conclusion}
+
+This paper makes a compelling case that \emph{how} a reward model reasons matters more than \emph{how long} it reasons. The breadth/depth decomposition is elegant and the emergent structural alignment from RLVR is a surprising and practically useful finding. The most actionable follow-up is mechanism-aware data curation, which could be implemented quickly to further boost the switching amplifier effect. Longer-term, extending this framework to multi-turn agent evaluation would address a critical gap in the RL alignment pipeline.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{2}
+
+\bibitem[Zhang et~al.(2026)]{zhang2026mixgrm}
+Q.~Zhang, Y.~Wang, T.~Wu, C.~Xu, Q.~Sun, K.~Zheng, X.~Liu, and C.~Ma.
+\newblock Beyond length scaling: Synergizing breadth and depth for generative reward models.
+\newblock \emph{arXiv:2603.01571}, 2026.
+
+\bibitem[Liang et~al.(2025)]{liang2025sws}
+X.~Liang, Z.~Li, Y.~Gong, Y.~Wang, H.~Zhang, Y.~Shen, Y.~Wu, and W.~Chen.
+\newblock SwS: Self-aware weakness-driven problem synthesis in RL for LLM reasoning.
+\newblock \emph{arXiv:2506.08989}, 2025.
+
+\end{thebibliography}
+
+\end{document}
