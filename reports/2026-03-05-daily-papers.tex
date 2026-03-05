@@ -1,0 +1,155 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review: March 5, 2026\\Surgical Post-Training: Cutting Errors, Keeping Knowledge}
+\author{Internbot Research Assistant}
+\date{March 5, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Today's review covers \emph{Surgical Post-Training: Cutting Errors, Keeping Knowledge}~\citep{lin2026spot}, which introduces SPoT, a post-training paradigm that improves LLM reasoning while preventing catastrophic forgetting. SPoT combines an Oracle-guided data rectification pipeline that surgically corrects erroneous reasoning steps with a reward-based binary cross-entropy objective. With only 4k rectified data pairs and 28 minutes of training, SPoT improves Qwen3-8B accuracy by 6.2\% on average across in-domain and out-of-distribution tasks while \emph{improving} instruction-following performance.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} Surgical Post-Training: Cutting Errors, Keeping Knowledge\\
+\textbf{Authors:} Wenye Lin, Kai Han\\
+\textbf{Links:}
+\href{https://arxiv.org/abs/2603.01683}{arXiv} $\mid$
+\href{https://huggingface.co/papers/2603.01683}{HF Daily Papers} $\mid$
+\href{https://github.com/Visual-AI/SPoT}{GitHub}
+
+\subsection{Core Problem}
+
+Post-training LLMs for reasoning faces a fundamental efficiency--forgetting trade-off. SFT provides strong supervision but causes severe catastrophic forgetting of prior knowledge (instruction following, OOD reasoning). On-policy RL (e.g., GRPO) better preserves knowledge but demands massive compute for rollouts and is fundamentally bottlenecked by the base model's ability to sample correct reasoning paths.
+
+The paper identifies \textbf{two distinct causes} of catastrophic forgetting:
+\begin{enumerate}
+    \item \textbf{Distributional shift:} Standard SFT uses offline data (e.g., teacher-generated solutions) that diverge from the student model's own distribution, forcing drastic parameter updates.
+    \item \textbf{The optimization objective itself:} Even with near-distribution data, SFT's constant gradient coefficient of 1.0 pushes all samples toward probability 1.0 regardless of the model's current competence, overwriting pre-trained features.
+\end{enumerate}
+
+\subsection{Key Theoretical Insight: The ``Elastic Tether''}
+
+The paper's central contribution is identifying implicit regularization in DPO's reward formulation. The DPO implicit reward is $r_\theta(x,y) = \beta \log \frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}$. When used in a sigmoid-based loss, the gradient includes a dynamic scaling coefficient:
+\begin{equation}
+    \lambda(x, y^+) = 1 - \sigma\bigl(r_\theta(x, y^+)\bigr)
+\end{equation}
+
+This creates two modes: (1) an \emph{acquisition mode} early in training where the coefficient is $\sim$0.5 (free adaptation), and (2) a \emph{saturation mode} where $\lambda$ approaches zero as the model aligns (e.g., $\lambda \approx 4.5 \times 10^{-5}$ at $r_\theta = 10$---a 20,000$\times$ reduction vs.\ SFT's constant 1.0). This acts as automatic, sample-wise early stopping that tethers the policy to the reference model.
+
+\subsection{Method: SPoT}
+
+SPoT consists of two synergistic components:
+
+\paragraph{Data Rectification Pipeline.} (1)~Sample incorrect responses $y^-$ from the current policy. (2)~An Oracle (Gemini~2.5~Pro) surgically corrects only the erroneous reasoning steps via minimal edits, producing $y^+$ that shares most tokens with $y^-$. (3)~Pairs are filtered by Longest Common Subsequence: $R_{\text{LCS}}(y^-, y^+) = 1 - |{\text{LCS}(y^-, y^+)}|/{|y^+|} \leq \gamma$ ($\gamma{=}0.6$), enforcing proximity to the student's distribution.
+
+\paragraph{Binary Cross-Entropy Objective.} Instead of DPO's relative ranking, SPoT treats reasoning correctness as binary classification:
+\begin{equation}
+    \mathcal{L}_{\text{SPoT-BCO}} = -\mathbb{E}\!\left[\log \sigma\!\bigl(r_\theta(x,y^+) - \delta\bigr) + \log \sigma\!\bigl(-(r_\theta(x,y^-) - \delta)\bigr)\right]
+\end{equation}
+where $\delta = \frac{1}{2}\mathbb{E}[r_\theta(x,y^+) + r_\theta(x,y^-)]$ is an adaptive offset estimated via EMA. This provides \emph{decoupled} supervision (positive and negative terms are independent) and prevents premature gradient saturation.
+
+\paragraph{Surgical Synergy.} Because rectified pairs share most of their token trajectory, the positive and negative gradient terms counteract on shared tokens, concentrating parameter updates \emph{only on the divergent (erroneous) tokens}---hence ``surgical'' post-training.
+
+\subsection{Main Results}
+
+On \textbf{Qwen3-8B} with 4k rectified pairs trained for 28 minutes on 8$\times$H800 GPUs:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{In-domain} & \textbf{OOD} & \textbf{IFEval} & \textbf{Overall} \\
+\midrule
+Base           & 46.8 & 29.9 & 83.0 & 47.1 \\
++SFT           & 41.0 {\scriptsize($-$5.8)} & 25.5 {\scriptsize($-$4.4)} & 79.6 {\scriptsize($-$3.4)} & 41.8 {\scriptsize($-$5.3)} \\
++SFT$^+$ (rect.~data) & 50.5 {\scriptsize(+3.7)} & 30.7 {\scriptsize(+0.8)} & 80.0 {\scriptsize($-$3.0)} & 49.4 {\scriptsize(+2.3)} \\
++SPoT          & \textbf{52.1} {\scriptsize(+5.3)} & \textbf{41.4} {\scriptsize(+11.5)} & \textbf{84.8} {\scriptsize(+1.8)} & \textbf{53.3} {\scriptsize(+6.2)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Key observations:
+\begin{itemize}
+    \item SPoT achieves +6.2\% average improvement while \emph{improving} IFEval (+1.8\%), whereas SFT degrades it by 3.4\%.
+    \item OOD gains are striking: +11.5\% on average (notably Connect4: 10.9$\to$36.0\%).
+    \item On Llama-3.1-8B-Instruct, standard SFT causes a catastrophic 11.5-point IFEval drop; SPoT loses only 0.4 points.
+    \item SPoT-BCE variant achieves the best knowledge retention (IFEval 85.8\%) while SPoT-BCO is best overall.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Oracle dependency:} Requires a stronger model for rectification; self-correction is not explored.
+    \item \textbf{Domain scope:} Only math reasoning is evaluated; generalization to code, science, or agentic tasks is untested.
+    \item \textbf{Scale:} Only 8B models are tested; behavior at larger scales is unknown.
+    \item \textbf{Offline only:} No iterative online rectification or multi-round training is explored.
+\end{enumerate}
+
+\section{Follow-up Research Directions}
+
+\subsection{Self-Rectification Without an Oracle}
+
+\textbf{Gap:} SPoT requires a stronger Oracle (Gemini~2.5~Pro) to correct erroneous steps, creating a dependency on external models and limiting applicability in settings where only the target model is available.
+
+\textbf{Approach:} Use the model's own chain-of-thought as a verifier. Given an incorrect response $y^-$, re-prompt the model with the ground-truth answer to perform backward verification: identify the first step where the reasoning diverges from what would lead to the correct answer, then minimally edit from that point. Apply consistency filtering across $k$ independent self-rectification attempts, keeping only corrections where $\geq$2 attempts agree. The LCS filter ($\gamma{=}0.6$) already provides a quality gate.
+
+\textbf{Feasibility:} Moderate (2--3 months). Requires building a self-verification pipeline and validating that self-rectified data quality is sufficient. Risk: weaker models may consistently fail to identify their own errors, producing low-quality corrections.
+
+\subsection{Extending Surgical Post-Training to Continual Learning}
+
+\textbf{Gap:} SPoT addresses forgetting during a single post-training stage. Real deployment involves \emph{sequential} post-training across multiple domains (math $\to$ code $\to$ agentic tasks), where catastrophic forgetting compounds across stages.
+
+\textbf{Approach:} Adapt SPoT for continual post-training by maintaining a growing reference model pool. After each domain's training, the new checkpoint becomes the reference for the next domain. Combine with experience replay: for each new domain, include a small buffer of rectified pairs from previous domains. The Elastic Tether mechanism naturally bounds drift per stage; the compounding question is whether stage-wise drift accumulates or remains bounded.
+
+\textbf{Feasibility:} Moderate (3--4 months). Requires multi-domain rectified datasets and careful ablation of replay buffer sizes. The core SPoT pipeline can be reused directly.
+
+\subsection{Adaptive Rectification Granularity via Step-Level Reward Models}
+
+\textbf{Gap:} The current rectification pipeline relies on the Oracle's judgment to decide \emph{where} to edit. This is a black-box process---the Oracle may over-correct (editing correct steps) or under-correct (missing subtle errors), and there is no principled mechanism to control edit granularity.
+
+\textbf{Approach:} Train a step-level process reward model (PRM) on the model's reasoning traces. Use the PRM to identify the exact step where reward drops below a threshold, then only send that step (plus context) to the Oracle for correction. This reduces Oracle calls, improves edit precision, and provides a verifiable signal for quality control. The PRM can be bootstrapped from the rectified pairs themselves: steps shared between $y^-$ and $y^+$ are positive, divergent steps in $y^-$ are negative.
+
+\textbf{Feasibility:} Easy--Moderate (4--6 weeks). PRM training is well-understood~\citep{lightman2023verify}; the main work is adapting it to SPoT's data format and validating that PRM-guided rectification maintains quality.
+
+\section{Conclusion}
+
+SPoT makes a strong case that post-training efficiency and knowledge preservation are not at odds---the key is combining near-distribution data (via surgical rectification) with a reward-based objective that automatically attenuates gradients on already-learned samples. The Elastic Tether insight is broadly applicable beyond math reasoning.
+
+The most actionable follow-up is PRM-guided rectification (Direction 3), which reduces Oracle dependency while improving precision. For the lab's continual learning focus, Direction 2 (extending SPoT to sequential multi-domain training) directly addresses a core research question and could yield a strong workshop-to-conference paper.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{3}
+
+\bibitem[Lin \& Han(2026)]{lin2026spot}
+W.~Lin and K.~Han.
+\newblock Surgical post-training: Cutting errors, keeping knowledge.
+\newblock \emph{arXiv:2603.01683}, 2026.
+
+\bibitem[Lightman et~al.(2023)]{lightman2023verify}
+H.~Lightman, V.~Kosaraju, Y.~Burda, H.~Edwards, B.~Baker, T.~Lee, J.~Leike, J.~Schulman, I.~Sutskever, and K.~Cobbe.
+\newblock Let's verify step by step.
+\newblock \emph{arXiv:2305.20050}, 2023.
+
+\bibitem[Rafailov et~al.(2024)]{rafailov2024dpo}
+R.~Rafailov, A.~Sharma, E.~Mitchell, C.~D.~Manning, S.~Ermon, and C.~Finn.
+\newblock Direct preference optimization: Your language model is secretly a reward model.
+\newblock \emph{NeurIPS}, 2024.
+
+\end{thebibliography}
+
+\end{document}
