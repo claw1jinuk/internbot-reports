@@ -1,0 +1,167 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review: March 6, 2026\\Heterogeneous Agent Collaborative Reinforcement Learning}
+\author{Internbot Research Assistant}
+\date{March 6, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Today's review covers \emph{Heterogeneous Agent Collaborative Reinforcement Learning}~\citep{zhang2026hacrl}, which introduces HACRL, a paradigm enabling multiple heterogeneous LLMs to learn from each other's rollouts during RLVR training while maintaining independent inference. The proposed algorithm HACPO uses capability-aware advantage estimation, exponential importance sampling, and stepwise clipping to enable safe cross-agent knowledge transfer. HACPO consistently improves all participating agents (averaging +3.3\% over GSPO) at \emph{half} the rollout cost, and even weaker models contribute useful exploration signals to stronger ones.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} Heterogeneous Agent Collaborative Reinforcement Learning\\
+\textbf{Authors:} Zhixia Zhang, Zixuan Huang, Xin Xia, Deqing Wang, Fuzhen Zhuang, Shuai Ma, Ning Ding, Yaodong Yang, Jianxin Li, Yikun Ban\\
+\textbf{Affiliations:} Beihang University, ByteDance, Tsinghua University, Peking University\\
+\textbf{Links:}
+\href{https://arxiv.org/abs/2603.02604}{arXiv} $\mid$
+\href{https://huggingface.co/papers/2603.02604}{HF Daily Papers} $\mid$
+\href{https://zzx-peter.github.io/hacrl/}{Project Page}
+
+\subsection{Core Problem}
+
+In Reinforcement Learning with Verifiable Rewards (RLVR), each LLM independently generates rollouts, evaluates them with verifiable rewards (e.g., math answer checking), and trains only on its own data. This is wasteful: multiple agents solving the same prompts redundantly generate costly trajectories that are never shared. HACRL asks: \emph{can an LLM improve by leveraging rollouts from other heterogeneous LLMs?}
+
+The paper defines a precise taxonomy of heterogeneity:
+\begin{itemize}
+    \item \textbf{Heterogeneous State:} Same architecture, different parameters (e.g., Qwen3-4B vs.\ Qwen3-4B-Instruct).
+    \item \textbf{Heterogeneous Size:} Same family, different parameter count (e.g., Qwen3-1.7B vs.\ Qwen3-4B).
+    \item \textbf{Heterogeneous Model:} Different architectures entirely (e.g., Qwen3-4B vs.\ Llama3.2-3B).
+\end{itemize}
+
+Unlike knowledge distillation (unidirectional teacher$\to$student), HACRL enables \emph{bidirectional} mutual learning: even weaker agents provide complementary exploration signals---alternative reasoning paths and informative errors underrepresented in the stronger agent's rollouts.
+
+\subsection{Key Contribution: HACPO}
+
+HACPO (Heterogeneous Agent Collaborative Policy Optimization) pools rollouts from $n$ agents and trains each agent on both its own rollouts ($\mathcal{J}_{\text{homo}}$) and others' ($\mathcal{J}_{\text{hete}}$):
+\begin{equation}
+    \mathcal{J} = \mathcal{J}_{\text{homo}} + \mathcal{J}_{\text{hete}}
+\end{equation}
+
+Naively sharing rollouts fails catastrophically (e.g., Qwen3-4B drops from 0.684$\to$0.583 avg). HACPO addresses this with four mechanisms:
+
+\paragraph{1. Agent-Capability-Aware Advantage Estimation.} Instead of computing group-relative advantages from one agent's responses alone, HACPO uses a capability-adjusted baseline:
+\begin{equation}
+    \hat{A}_{t,i}^{(k)} = \frac{R(y_{t,i}^{(k)}) - \hat{\mu}_t^{(k)}}{\sigma_{t,\text{joint}}} \quad\text{where}\quad \hat{\mu}_t^{(k)} = \frac{1}{nG}\sum_{j}\sum_{i} \omega_t^{(k,j)} \cdot R(y_{t,i}^{(j)})
+\end{equation}
+The capability ratio $\omega_t^{(k,j)} = \hat{P}_t^{(k)} / \hat{P}_t^{(j)}$ rescales rewards from agent $j$ relative to agent $k$'s performance level, using a sliding window ($K{=}5$) of mean rewards. This keeps the advantage estimate unbiased (Theorem~4.1).
+
+\paragraph{2. Model Capabilities Discrepancy Coefficient.} The same $\omega$ modulates gradient magnitude: stronger agents' rollouts receive amplified weight, weaker agents' rollouts are attenuated. This prevents noisy low-quality samples from dominating updates.
+
+\paragraph{3. Exponential Importance Sampling.} Sequence-level importance ratios correct distributional mismatch:
+\begin{equation}
+    s_{t,i}^{(k,j)} = \left[\frac{\pi_{\theta_t}^{(k)}(y)}{\pi_{\theta_{\text{old}}}^{(j)}(y)}\right]^{1/|y|}
+\end{equation}
+For incompatible tokenizers (e.g., Qwen vs.\ Llama), responses are detokenized and re-tokenized. An exponential dampening $\tilde{s} = s \cdot \text{sg}[s]^\alpha$ ($\alpha \geq 0$) suppresses updates from distant distributions.
+
+\paragraph{4. Stepwise Clipping.} Cross-agent ratios are asymmetrically clipped to $[1{-}\delta, 1.0]$ (never upweighting beyond on-policy), with the lower bound progressively tightening across mini-batches within a training step. This prevents cross-agent rollouts from dominating late-stage updates.
+
+\subsection{Main Results}
+
+All experiments train on 7,500 math questions and evaluate on 7 benchmarks (MATH-500, MATH, GSM8K, AIME2025, AMC23, Minerva, Olympiad).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llccc}
+\toprule
+\textbf{Setting} & \textbf{Model} & \textbf{GSPO} & \textbf{HACPO} & \textbf{$\Delta$} \\
+\midrule
+\multirow{2}{*}{Hetero.\ State} & Qwen3-4B & 0.684 & \textbf{0.755} & +7.1\% \\
+& Qwen3-4B-Instruct & 0.799 & \textbf{0.813} & +1.4\% \\
+\midrule
+\multirow{2}{*}{Hetero.\ Size} & Qwen3-1.7B-Base & 0.467 & \textbf{0.493} & +2.6\% \\
+& Qwen3-4B-Base & 0.578 & \textbf{0.601} & +2.3\% \\
+\midrule
+\multirow{2}{*}{Hetero.\ Model} & Qwen3-4B-Base & 0.578 & \textbf{0.597} & +1.9\% \\
+& Llama3.2-3B-Inst. & 0.351 & \textbf{0.390} & +3.9\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Key observations:
+\begin{itemize}
+    \item HACPO improves \emph{all} agents in \emph{every} setting, averaging +3.3\% over GSPO at \textbf{half the rollout cost} (rollouts are shared, not independently generated).
+    \item Largest gains on hard benchmarks: Qwen3-4B on AIME2025 jumps +13.7pp (0.485$\to$0.622) and AMC23 jumps +17.5pp (0.675$\to$0.850).
+    \item Naive rollout sharing (without HACPO's mechanisms) catastrophically degrades performance (e.g., 4B: 0.684$\to$0.583), validating the necessity of all four components.
+    \item GSPO$\times$2 (double rollouts, double cost) generally does not match HACPO, confirming gains come from \emph{complementary heterogeneous knowledge}, not just more data.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Domain scope:} Only mathematical reasoning is evaluated; code, instruction following, and agentic tasks are untested.
+    \item \textbf{Scale:} Largest model is 8B; behavior at 70B+ is unknown.
+    \item \textbf{Agent count:} All experiments use exactly 2 agents. The $n$-agent case is formulated but not empirically validated for $n > 2$.
+    \item \textbf{Hyperparameter sensitivity:} $\alpha$, $\delta$, and $\delta_{\text{step}}$ vary per model combination, adding tuning overhead.
+    \item \textbf{Compute:} Re-tokenization cost for cross-architecture pairs is not analyzed.
+\end{enumerate}
+
+\section{Follow-up Research Directions}
+
+\subsection{HACPO for RLHF with Learned Reward Models}
+
+\textbf{Gap:} HACRL assumes \emph{verifiable} rewards (binary math answer checking). In RLHF, rewards come from learned preference models that are noisy, miscalibrated, and distribution-dependent. The capability ratio $\omega$ and advantage estimation assume clean reward signals---learned rewards violate this.
+
+\textbf{Approach:} Replace the single shared reward with agent-specific reward ensembles. Each agent maintains a reward model calibrated on its own distribution. Cross-agent rollouts are scored by \emph{both} the generating agent's and the learning agent's reward models; only rollouts where both agree (reward consensus) are used for $\mathcal{J}_{\text{hete}}$. This acts as a verification proxy in the absence of ground truth, filtering out reward model hallucinations. The capability ratio can be estimated from reward model agreement rates rather than raw reward values.
+
+\textbf{Feasibility:} Moderate (2--3 months). Requires training per-agent reward models and implementing the consensus filter. The core HACPO algorithm can be reused.
+
+\subsection{Scaling to $n > 2$ Agents with Adaptive Collaboration Graphs}
+
+\textbf{Gap:} HACPO is formulated for $n$ agents but only tested with $n{=}2$. Scaling naively to $n{=}10$+ introduces combinatorial complexity: not all agent pairs benefit equally, and weak-weak pairs may produce mutual degradation.
+
+\textbf{Approach:} Learn a dynamic collaboration graph where edges represent beneficial knowledge transfer directions. Initialize fully connected, then prune edges based on a running estimate of per-pair transfer utility (measured as the improvement in the learner's reward from the partner's rollouts vs.\ its own). Agents connected by strong edges share rollouts; disconnected pairs do not. Update the graph periodically (e.g., every 50 training steps). This naturally discovers hub-spoke topologies where one strong model serves multiple weaker ones, or peer clusters.
+
+\textbf{Feasibility:} Moderate (2--4 months). Main challenge is efficiently computing pairwise transfer utility at scale without excessive overhead.
+
+\subsection{Combining HACRL with Surgical Post-Training (SPoT)}
+
+\textbf{Gap:} HACRL improves reasoning via collaborative RLVR but does not address catastrophic forgetting of pre-trained knowledge. SPoT~\citep{lin2026spot} addresses forgetting via near-distribution data and reward-based BCE objectives, but operates in a single-agent, offline setting.
+
+\textbf{Approach:} Use HACPO's cross-agent rollout sharing to generate diverse incorrect responses, then apply SPoT's Oracle-guided rectification to surgically correct the erroneous steps. The key synergy: heterogeneous agents produce \emph{different types of errors} on the same prompt, providing richer rectification signal than a single agent. Train with a hybrid objective: $\mathcal{J}_{\text{HACPO}}$ for reasoning improvement + $\mathcal{L}_{\text{SPoT-BCO}}$ on rectified pairs for forgetting prevention. The Elastic Tether from SPoT ensures knowledge preservation while HACPO's mechanisms enable safe cross-agent learning.
+
+\textbf{Feasibility:} Moderate (3--4 months). Requires integrating two training pipelines. Risk: the two objectives may conflict, requiring careful balancing. Reward: if successful, this addresses both key limitations---forgetting (SPoT's strength) and sample efficiency (HACPO's strength).
+
+\section{Conclusion}
+
+HACRL makes a compelling case that LLMs need not train in isolation during RLVR. The four mechanisms in HACPO---capability-aware advantage estimation, discrepancy coefficients, exponential importance sampling, and stepwise clipping---are each necessary (naive sharing is catastrophic) and together enable consistent mutual improvement across all three heterogeneity levels. The most striking finding is that even weaker models provide valuable complementary signals to stronger ones, challenging the assumption that knowledge transfer is inherently one-directional.
+
+For the lab, the most actionable direction is combining HACRL with SPoT (Direction~3), which bridges yesterday's reviewed paper with today's and addresses both reasoning improvement and forgetting prevention---two of our core research topics. The natural next step is extending HACPO to RLHF with learned rewards (Direction~1), which would broaden its applicability beyond math to general alignment.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{3}
+
+\bibitem[Zhang et~al.(2026)]{zhang2026hacrl}
+Z.~Zhang, Z.~Huang, X.~Xia, D.~Wang, F.~Zhuang, S.~Ma, N.~Ding, Y.~Yang, J.~Li, and Y.~Ban.
+\newblock Heterogeneous agent collaborative reinforcement learning.
+\newblock \emph{arXiv:2603.02604}, 2026.
+
+\bibitem[Lin \& Han(2026)]{lin2026spot}
+W.~Lin and K.~Han.
+\newblock Surgical post-training: Cutting errors, keeping knowledge.
+\newblock \emph{arXiv:2603.01683}, 2026.
+
+\bibitem[Sheng et~al.(2024)]{sheng2024verl}
+G.~Sheng, C.~Zhang, Z.~Hu, et~al.
+\newblock HybridFlow: A flexible and efficient RLHF framework.
+\newblock \emph{arXiv:2409.19256}, 2024.
+
+\end{thebibliography}
+
+\end{document}
