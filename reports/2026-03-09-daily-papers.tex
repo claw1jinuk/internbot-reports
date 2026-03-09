@@ -1,0 +1,149 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review: March 9, 2026\\Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling}
+\author{Internbot Research Assistant}
+\date{March 9, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Today's review covers \emph{Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling}~\citep{liu2026timers1}, which introduces the first billion-scale (8.3B parameters, 0.75B activated) Mixture-of-Experts foundation model for time series forecasting. Timer-S1 achieves state-of-the-art on the GIFT-Eval benchmark (MASE=0.693, CRPS=0.485) through three innovations: Serial-Token Prediction (STP) that respects forecasting's sequential nature, a curated dataset of one trillion time points (TimeBench), and a multi-stage training pipeline with post-training refinement. STP outperforms both next-token and multi-token prediction at equivalent compute budgets.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling\\
+\textbf{Authors:} Yong Liu, Xingjian Su, Shiyu Wang, Haoran Zhang, Haixuan Liu, Yuxuan Wang, Zhou Ye, Yang Xiang, Jianmin Wang, Mingsheng Long\\
+\textbf{Links:}
+\href{https://arxiv.org/abs/2603.04791}{arXiv} $\mid$
+\href{https://huggingface.co/papers/2603.04791}{HF Daily Papers}
+% Code not yet released; authors state "Timer-S1 will be released to facilitate further research."
+
+\subsection{Core Problem}
+
+Time series foundation models face a \textbf{scaling bottleneck}: despite architectural advances, prior models remain small relative to their language counterparts. The fundamental challenge is that forecasting is inherently serial---each prediction depends on all preceding estimates---yet existing approaches either suffer from error accumulation (autoregressive rolling) or lack sufficient serial computation (parallel multi-step prediction). Timer-S1 addresses this with a new paradigm: \emph{Serial Scaling} across three dimensions---architecture, dataset, and training pipeline.
+
+\subsection{Key Contribution: Serial-Token Prediction}
+
+Timer-S1 uses a two-stage architecture:
+
+\paragraph{TimeMoE Blocks ($L{=}24$).} Sparse MoE transformer blocks ($E{=}32$ experts, $K{=}2$ activated per token, $D{=}1024$) with QK-Norm, pre-RMSNorm, and RoPE. These learn general temporal representations via next-token prediction.
+
+\paragraph{TimeSTP Blocks ($H{=}16$).} The core innovation. $H$ sequential blocks are appended after the TimeMoE backbone. Each $j$-th block generates predictions shifted by $j{+}1$ patches via:
+\begin{equation}
+    \bar{h}_i^{L+j} = M_j \cdot \text{Concat}\!\left(\text{RMSNorm}(h_i^{L+j-1}),\; \text{RMSNorm}(h_i^0)\right), \quad \hat{x}_{i+j+1} = \text{PatchProject}(h_i^{L+j})
+\end{equation}
+where $M_j$ is a mixing projection and $h_i^0$ are the original input embeddings, re-injected at every step. This dual-input design enables progressive refinement while preserving the original signal.
+
+\paragraph{Key distinctions from LLM autoregression.} (1)~STP does \emph{not} condition on future ground-truth---avoiding the train-test gap that plagues teacher-forced models. (2)~STP blocks are \emph{retained} at inference, producing multi-step forecasts in a single forward pass rather than requiring expensive per-step rollouts. (3)~Adaptive depth: the model uses only as many STP blocks as the forecasting horizon requires.
+
+\subsection{Training Pipeline}
+
+\paragraph{TimeBench Dataset.} One trillion (1.032T) time points from finance, IoT, meteorology, and healthcare. Includes both real-world data (Chronos, LOTSA) and synthetic data (KernelSynth, canonical signals). Quality-controlled via ADF stationarity tests and forecastability entropy. Data augmentation includes frequency resampling and value-flipping to mitigate directional bias.
+
+\paragraph{Pre-Training.} Joint objective: $\mathcal{L}_{\text{Pre}} = \mathcal{L}_{\text{NTP}} + \mathcal{L}_{\text{STP}} + \alpha \cdot \mathcal{L}_{\text{aux}}$, where $\mathcal{L}_{\text{NTP}}$ is next-token prediction (TimeMoE backbone), $\mathcal{L}_{\text{STP}}$ is serial-token prediction (TimeSTP blocks with uniform horizon weighting), and $\mathcal{L}_{\text{aux}}$ is MoE load-balancing. Input: $N{=}180$ tokens (context $T{=}2880$, patch size $P{=}16$), prediction length 272.
+
+\paragraph{Post-Training.} Three refinements: (1)~\emph{Weighted STP}: reweights horizon losses as $\frac{1}{\sqrt{j}}$ to prioritize near-term accuracy (motivated by variance growth in Markov processes). (2)~\emph{Continued pre-training}: mixes GIFT-Eval Pretrain data with TimeBench to prevent overfitting. (3)~\emph{Long-context extension}: RoPE-based scaling from 2,880 to 11,520 tokens.
+
+\subsection{Main Results}
+
+On the \textbf{GIFT-Eval} benchmark (24 datasets, 144K series, 177M data points):
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Model} & \textbf{MASE} $\downarrow$ & \textbf{CRPS} $\downarrow$ \\
+\midrule
+Timer-3 (Sundial) & 0.750 & 0.559 \\
+Chronos-2 & --- & $\sim$0.49 \\
+\textbf{Timer-S1} & \textbf{0.693} & \textbf{0.485} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Key observations:
+\begin{itemize}
+    \item Timer-S1 achieves \textbf{7.6\% lower MASE} and \textbf{13.2\% lower CRPS} than Timer-3 (Sundial).
+    \item Advantages are particularly pronounced on medium- and long-term forecasting tasks, validating the serial computation design.
+    \item At matched compute budgets, Timer-S1 (24-MoE + 16-STP) outperforms Timer-NTP (40-MoE, pure autoregression) on both MASE and CRPS, demonstrating that STP is a better use of parameters than deeper backbone alone.
+    \item Performance improves monotonically with scale up to the 8.3B configuration, confirming a scaling law for time series.
+    \item Removing STP blocks at inference (falling back to rolling autoregression) causes significant degradation, confirming their critical role.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Univariate only:} Pre-training uses univariate series; multivariate correlations must be recovered through fine-tuning.
+    \item \textbf{No exogenous covariates:} Cannot natively ingest external variables (e.g., calendar features, weather).
+    \item \textbf{Fixed patch size:} $P{=}16$ causes error spikes at certain periodicities; adaptive patching is not explored.
+    \item \textbf{Code not released:} ``Timer-S1 will be released to facilitate further research.''
+    \item \textbf{Representation trade-off:} Short-term and long-term forecasting may require fundamentally different representations; the current unified model may not optimally serve both.
+\end{enumerate}
+
+\section{Follow-up Research Directions}
+
+\subsection{Multivariate Serial-Token Prediction with Cross-Series Attention}
+
+\textbf{Gap:} Timer-S1 trains on univariate series only, losing inter-variable dependencies critical for applications like energy grid forecasting or financial portfolio modeling. The channel-independence assumption limits practical deployment.
+
+\textbf{Approach:} Extend TimeSTP blocks with a cross-series attention layer inserted between the dual-input mixing and the MoE feed-forward. At each STP step $j$, after generating per-variable predictions, apply sparse cross-attention across variables using a learned routing mechanism (similar to the MoE expert selection) to identify which variable pairs have informative dependencies at horizon $j$. This avoids the $O(V^2)$ cost of full cross-attention while capturing the most salient multivariate interactions. Pre-train on multivariate subsets of TimeBench where multiple co-located sensors or correlated financial instruments are available.
+
+\textbf{Feasibility:} Moderate (3--4 months). Requires curating multivariate training data from TimeBench and adding a sparse cross-attention module. The core STP architecture can be reused, and the routing mechanism can piggyback on the existing MoE infrastructure.
+
+\subsection{Adaptive Patch Size via Frequency-Aware Tokenization}
+
+\textbf{Gap:} The fixed patch size $P{=}16$ creates error spikes when series periodicities align with the patch boundary (as shown in the sinusoidal ablation). Real-world data contains mixed frequencies, and a single patch size cannot optimally capture all of them.
+
+\textbf{Approach:} Replace fixed patching with a multi-scale tokenizer that produces tokens at multiple resolutions (e.g., $P \in \{8, 16, 32\}$) simultaneously. Use a lightweight spectral analysis (FFT) of the input window to assign a frequency-dependent weight to each resolution's tokens before they enter the TimeMoE backbone. During STP, each horizon step can select the resolution most appropriate for its prediction scale. This is analogous to multi-scale feature extraction in vision (FPN) adapted for temporal data.
+
+\textbf{Feasibility:} Easy--Moderate (4--6 weeks). Multi-scale patching is straightforward to implement; the main challenge is training stability with variable-length token sequences and designing the frequency-based routing. The FFT computation adds negligible overhead.
+
+\subsection{RL-Based Post-Training for Domain-Specific Forecasting}
+
+\textbf{Gap:} Timer-S1's post-training uses supervised objectives (weighted STP) which optimize point/quantile accuracy but cannot incorporate domain-specific decision costs. In energy trading, for example, over-prediction and under-prediction have asymmetric economic consequences; in healthcare, missing a critical event is far worse than a false alarm.
+
+\textbf{Approach:} Apply RLVR-style post-training where the reward function encodes domain-specific utility (e.g., asymmetric loss for energy, event detection F1 for healthcare). Use GRPO~\citep{shao2024deepseekmath} to optimize Timer-S1's forecasting head with the frozen backbone as the reference policy. The STP blocks provide natural ``reasoning steps'' that can receive step-level rewards (process reward modeling for time series): intermediate forecasts at each STP block can be evaluated against ground truth to provide dense supervision, analogous to step-level math verification in LLM RLVR~\citep{zhang2026hacrl}.
+
+\textbf{Feasibility:} Moderate (2--3 months). GRPO infrastructure exists for LLMs and can be adapted for time series with minimal modification. The main research question is whether RL post-training provides meaningful gains over supervised post-training for forecasting, given that verifiable rewards (forecast accuracy) are continuous rather than binary.
+
+\section{Conclusion}
+
+Timer-S1 demonstrates that time series foundation models can scale to billions of parameters when the architecture respects the inherently serial nature of forecasting. The Serial-Token Prediction design is the key insight: by producing multi-step forecasts through sequential STP blocks (each conditioning on the previous step's output \emph{and} the original input), Timer-S1 achieves better accuracy than both autoregressive rolling and parallel multi-token prediction at equivalent compute.
+
+For the lab, the most actionable direction is RL-based post-training (Direction~3), which bridges our RL expertise (previous reviews on HACRL, SPoT) with the time series domain. Using STP blocks as ``reasoning steps'' for process reward modeling is a natural and novel connection. Longer-term, multivariate STP (Direction~1) would address the most significant practical limitation and could yield a strong contribution to the time series foundation model community.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{3}
+
+\bibitem[Liu et~al.(2026)]{liu2026timers1}
+Y.~Liu, X.~Su, S.~Wang, H.~Zhang, H.~Liu, Y.~Wang, Z.~Ye, Y.~Xiang, J.~Wang, and M.~Long.
+\newblock Timer-S1: A billion-scale time series foundation model with serial scaling.
+\newblock \emph{arXiv:2603.04791}, 2026.
+
+\bibitem[Shao et~al.(2024)]{shao2024deepseekmath}
+Z.~Shao, P.~Wang, Q.~Zhu, R.~Xu, J.~Song, M.~Zhang, Y.K.~Li, Y.~Wu, and D.~Guo.
+\newblock DeepSeekMath: Pushing the limits of mathematical reasoning in open language models.
+\newblock \emph{arXiv:2402.03300}, 2024.
+
+\bibitem[Zhang et~al.(2026)]{zhang2026hacrl}
+Z.~Zhang, Z.~Huang, X.~Xia, D.~Wang, F.~Zhuang, S.~Ma, N.~Ding, Y.~Yang, J.~Li, and Y.~Ban.
+\newblock Heterogeneous agent collaborative reinforcement learning.
+\newblock \emph{arXiv:2603.02604}, 2026.
+
+\end{thebibliography}
+
+\end{document}
