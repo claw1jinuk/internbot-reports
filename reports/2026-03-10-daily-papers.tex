@@ -1,0 +1,171 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review: March 10, 2026\\BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds}
+\author{Internbot Research Assistant}
+\date{March 10, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Today's review covers \emph{BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning}~\citep{li2026bandpo}, which identifies a structural bottleneck in PPO/GRPO's fixed clipping: the upward update margin for low-probability tokens scales linearly with $\pi_{\text{old}}$, suppressing high-advantage tail strategies and inducing entropy collapse. BandPO replaces fixed clipping with the \emph{Band} operator, which projects $f$-divergence trust regions into dynamic, probability-aware clipping intervals via convex optimization. BandPO consistently outperforms both canonical GRPO (+3.0 avg mean@32) and Clip-Higher (+0.9 avg mean@32) across 1.5B--8B models on math reasoning benchmarks while maintaining an order-of-magnitude higher policy entropy.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning\\
+\textbf{Authors:} Yuan Li, Bo Wang, Yufei Gao, Yuqian Yao, Xinyuan Wang, Zhangyue Yin, Xipeng Qiu\\
+\textbf{Affiliations:} Fudan University, Shanghai Innovation Institute\\
+\textbf{Links:}
+\href{https://arxiv.org/abs/2603.04918}{arXiv} $\mid$
+\href{https://huggingface.co/papers/2603.04918}{HF Daily Papers} $\mid$
+\href{https://github.com/OpenMOSS/BandPO}{GitHub}
+
+\subsection{Core Problem: The Fixed-Clipping Bottleneck}
+
+PPO/GRPO constrain the probability ratio $r_t(\theta) = \pi_\theta/\pi_{\text{old}}$ to a fixed interval $[1{-}\epsilon^-, 1{+}\epsilon^+]$. Multiplying by $\pi_{\text{old}}$, the feasible probability variation is:
+\begin{equation}
+    -\epsilon^- \cdot \pi_{\text{old}}(a|s) \;\leq\; \Delta\pi(a|s) \;\leq\; \epsilon^+ \cdot \pi_{\text{old}}(a|s)
+\end{equation}
+
+For low-probability (tail) tokens, this margin is vanishingly small. Example: $\pi_{\text{old}}{=}0.08$, $\epsilon^+{=}0.2$ gives $\Delta\pi \leq 0.016$---negligible against the simplex capacity of 0.92. The model \emph{cannot} reinforce novel high-advantage strategies residing in the tail. Empirically, upper-bound clipping of low-probability tokens accounts for ${\sim}20\%$ of total clipping volume, surging to ${\sim}60\%$ in the first 50 training steps. This triggers rapid \textbf{entropy collapse}: vanilla GRPO converges to mean entropy ${\sim}0.02$.
+
+\subsection{Key Contribution: The Band Operator}
+
+BandPO defines trust regions via $f$-divergences: $\mathcal{T}_{f,\delta}(P) = \{Q \in \Delta_V : D_f(Q \| P) \leq \delta\}$. The \emph{Band} operator projects these into probability-dependent clipping bounds:
+\begin{equation}
+    \text{Band}_{f,\delta}(r;\, a,\, P) = \text{clip}\!\left(r,\; r^{\text{lower}}_{f,\delta}(a; P),\; r^{\text{upper}}_{f,\delta}(a; P)\right)
+\end{equation}
+where $r^{\text{upper}} = \max_{Q \in \mathcal{T}} Q(a)/P(a)$ and $r^{\text{lower}} = \min_{Q \in \mathcal{T}} Q(a)/P(a)$ are solutions to convex optimization problems.
+
+\paragraph{Scalarization (Theorem 1).} Via Lemma~1 (optimal $Q^*$ preserves relative proportions in the complement set $V \setminus \{a\}$), the high-dimensional constraint reduces to a univariate inequality:
+\begin{equation}
+    g_f(p, r) = p \cdot f(r) + (1{-}p) \cdot f\!\left(\frac{1 - rp}{1 - p}\right) \leq \delta
+\end{equation}
+which is strictly convex in $r$ with minimum 0 at $r{=}1$. The two roots of $g_f(p, r) = \delta$ are the optimal bounds.
+
+\paragraph{Key Properties.} As $p \to 0^+$: $r^{\text{upper}} \to +\infty$ (tail tokens get wide bounds). As $p \to 1^-$: both bounds $\to 1$ (head tokens are tightly constrained). This naturally resolves the bottleneck: the ``clipping budget'' is redistributed from head to tail tokens.
+
+\paragraph{Closed-Form Solutions.} For Total Variation: $r^{\text{upper}} = 1 + \delta/p$ (linear inverse scaling). For Pearson $\chi^2$: $r^{\text{upper}} = 1 + \sqrt{\delta(1{-}p)/p}$ (inverse square-root scaling). For KL divergence (primary variant): no closed form exists; solved via CUDA-accelerated parallel bisection.
+
+\subsection{The BandPO Objective}
+
+BandPO replaces PPO/GRPO's clip with Band:
+\begin{equation}
+    J^{\text{Band}}_t(\theta;\, y_i) = \min\!\left(r_{t,i} \cdot A_{t,i},\; \text{Band}_{f,\delta}(r_{t,i};\, y_{t,i},\, \pi_{\text{old}}) \cdot A_{t,i}\right) - \beta \cdot D_{\text{KL}}(\pi_{\text{ref}} \| \pi_\theta)_t
+\end{equation}
+This consolidates the two heuristic clipping parameters ($\epsilon^-, \epsilon^+$) into a single interpretable trust-region radius $\delta$.
+
+\subsection{Main Results}
+
+Evaluated on AMC~2023, AIME~2024, AIME~2025 (mean@32 / pass@32, 3 runs, default $\delta{=}0.05$):
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+\textbf{Model} & \textbf{Method} & \textbf{Avg mean@32} & \textbf{Avg pass@32} \\
+\midrule
+\multirow{3}{*}{DS-R1-Qwen-1.5B} & GRPO & 37.37 & 57.40 \\
+& + Clip-Higher & 39.46 & 58.74 \\
+& + \textbf{BandPO} & \textbf{40.40} & \textbf{62.48} \\
+\midrule
+\multirow{3}{*}{Qwen2.5-3B-Inst.} & GRPO & 17.57 & 32.60 \\
+& + Clip-Higher & 20.47 & 40.60 \\
+& + \textbf{BandPO} & \textbf{22.00} & \textbf{42.01} \\
+\midrule
+\multirow{3}{*}{DS-R1-Qwen-7B} & GRPO & 49.04 & 66.78 \\
+& + Clip-Higher & 48.37 & 66.69 \\
+& + \textbf{BandPO} & \textbf{51.44} & \textbf{67.12} \\
+\midrule
+\multirow{3}{*}{DS-R1-Llama-8B} & GRPO & 44.08 & 64.97 \\
+& + Clip-Higher & 46.57 & 67.49 \\
+& + \textbf{BandPO} & \textbf{47.41} & \textbf{67.94} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Key observations:
+\begin{itemize}
+    \item BandPO consistently outperforms both GRPO and Clip-Higher across all 4 models. Average gains over GRPO: +3.0 mean@32, +3.8 pass@32. Over Clip-Higher: +0.9 mean@32, +1.2 pass@32.
+    \item Clip-Higher \emph{regresses} at 7B scale (drops 0.67 avg mean@32 vs.\ GRPO on AIME), while BandPO improves by +2.40. BandPO's principled bounds are more robust than heuristic relaxation.
+    \item Largest relative gain on weaker models: Qwen2.5-3B sees +25\% relative improvement in mean@32 over GRPO (17.57$\to$22.00).
+    \item Entropy: GRPO collapses to ${\sim}0.02$; BandPO converges to ${\sim}0.2$ ($10\times$ higher). BandPO reduces tail-token clipping to \textbf{near zero}.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Computational overhead:} KL-based Band requires iterative bisection per token (mitigated by CUDA parallelism and lookup tables, but not free).
+    \item \textbf{Static trust region:} A global $\delta$ is applied uniformly; syntactic connectors and critical reasoning steps likely need different stability margins.
+    \item \textbf{Domain scope:} Only math reasoning benchmarks (AMC/AIME); code, instruction following, and creative tasks are untested.
+    \item \textbf{Only GRPO tested:} Interaction with critic-based PPO variants is unexplored.
+\end{enumerate}
+
+\section{Follow-up Research Directions}
+
+\subsection{Adaptive Token-Level Trust Regions}
+
+\textbf{Gap:} BandPO uses a static global $\delta$ for all tokens. The paper itself acknowledges this as a limitation: routine syntactic tokens need tight constraints (high confidence), while pivotal reasoning tokens need wide exploration margins.
+
+\textbf{Approach:} Learn a lightweight trust-region predictor $\delta(s_t, a_t) = \delta_0 \cdot \sigma(w^\top h_t)$ that modulates the Band radius per token based on the hidden state $h_t$. Train this predictor jointly with the policy using a meta-objective: maximize downstream reward while minimizing trust-region violations (measured by the actual divergence $D_f$ exceeding the local $\delta$). The predictor can be initialized with heuristic signals: high entropy tokens get larger $\delta$, low entropy tokens get smaller $\delta$. This creates an ``adaptive tether'' that is tight where the policy is confident and loose where it needs to explore---connecting to the Elastic Tether concept from SPoT~\citep{lin2026spot}.
+
+\textbf{Feasibility:} Easy--Moderate (3--5 weeks). The Band operator already accepts $\delta$ as a per-computation parameter; making it token-dependent requires adding a small prediction head and a meta-gradient step. The CUDA bisection solver already handles per-token $\delta$ values.
+
+\subsection{BandPO for Multi-Agent Collaborative RL (HACRL + BandPO)}
+
+\textbf{Gap:} HACRL~\citep{zhang2026hacrl} enables heterogeneous LLMs to share rollouts during training, but uses standard GRPO with fixed clipping. Cross-agent rollouts have fundamentally different probability distributions than self-generated ones, making the fixed-clipping bottleneck \emph{worse}: a token that is high-probability for the generating agent may be low-probability for the learning agent, and vice versa.
+
+\textbf{Approach:} Replace HACPO's clipping mechanism with BandPO's probability-aware bounds. For cross-agent rollouts, the Band operator naturally adapts: when agent $k$ evaluates agent $j$'s rollout, each token's clipping bounds reflect agent $k$'s own probability, automatically tightening for tokens $k$ already assigns high probability (safe to keep) and loosening for tokens $k$ assigns low probability (opportunity to learn). This eliminates the need for HACPO's separate exponential importance sampling dampening, as the Band bounds inherently provide conservative constraints for distribution-shifted data. The resulting algorithm---\emph{BandHACPO}---would unify trust-region projection with cross-agent knowledge transfer.
+
+\textbf{Feasibility:} Moderate (2--3 months). Requires integrating BandPO into the HACRL codebase (both use the verl framework), running the 2-agent experiments from HACRL with Band replacing clip, and validating that the four HACPO mechanisms remain beneficial or can be simplified.
+
+\subsection{Divergence Selection as a Learned Hyperparameter}
+
+\textbf{Gap:} BandPO provides closed-form bounds for TV and $\chi^2$ and numerical solutions for KL, but uses KL throughout experiments. Different divergences induce qualitatively different bound shapes: TV gives linear scaling ($1/p$), $\chi^2$ gives square-root scaling ($1/\sqrt{p}$), and KL falls between. The optimal divergence likely depends on model size, training stage, and task difficulty.
+
+\textbf{Approach:} Parameterize the $f$-divergence generator as a learned convex function $f_\phi(u)$ from a family that interpolates between TV, $\chi^2$, and KL (e.g., $\alpha$-divergences with learnable $\alpha$). Use the differentiable implicit function theorem to backpropagate through the Band bounds with respect to $\phi$. Optimize $\phi$ on a held-out validation set every $N$ training steps. This meta-learning approach could discover divergence schedules that start aggressive (TV-like, wide tail bounds for early exploration) and anneal to conservative (KL-like, tighter bounds for late-stage refinement).
+
+\textbf{Feasibility:} Hard (4--6 months). Differentiating through the bisection solver requires implicit differentiation or a differentiable root-finding layer. The $\alpha$-divergence family is well-studied but ensuring convexity of the learned $f_\phi$ requires constrained parameterization. High risk, high reward: if successful, this could provide a principled schedule that eliminates the $\delta$-tuning sensitivity observed for smaller models.
+
+\section{Conclusion}
+
+BandPO makes a clean theoretical contribution: the fixed-clipping bottleneck in PPO/GRPO is not merely an inconvenience but a structural failure that provably suppresses tail-action exploration and drives entropy collapse. The Band operator's probability-aware bounds resolve this by redistributing the clipping budget---loosening constraints where exploration is needed (tail tokens) and tightening where stability matters (head tokens). The consolidation of two heuristic parameters ($\epsilon^-, \epsilon^+$) into a single interpretable trust-region radius $\delta$ is an elegant simplification.
+
+For the lab, the most actionable direction is combining BandPO with HACRL (Direction~2): cross-agent rollouts are exactly the setting where fixed clipping is most harmful, since token probabilities diverge maximally across heterogeneous agents. The Band operator's natural adaptation to per-token probability provides a principled replacement for HACPO's multiple distribution-correction mechanisms. This directly connects our last three RL-focused reviews (SPoT, HACRL, BandPO) into a unified research thread.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{3}
+
+\bibitem[Li et~al.(2026)]{li2026bandpo}
+Y.~Li, B.~Wang, Y.~Gao, Y.~Yao, X.~Wang, Z.~Yin, and X.~Qiu.
+\newblock BandPO: Bridging trust regions and ratio clipping via probability-aware bounds for LLM reinforcement learning.
+\newblock \emph{arXiv:2603.04918}, 2026.
+
+\bibitem[Lin \& Han(2026)]{lin2026spot}
+W.~Lin and K.~Han.
+\newblock Surgical post-training: Cutting errors, keeping knowledge.
+\newblock \emph{arXiv:2603.01683}, 2026.
+
+\bibitem[Zhang et~al.(2026)]{zhang2026hacrl}
+Z.~Zhang, Z.~Huang, X.~Xia, D.~Wang, F.~Zhuang, S.~Ma, N.~Ding, Y.~Yang, J.~Li, and Y.~Ban.
+\newblock Heterogeneous agent collaborative reinforcement learning.
+\newblock \emph{arXiv:2603.02604}, 2026.
+
+\end{thebibliography}
+
+\end{document}
