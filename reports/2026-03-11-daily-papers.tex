@@ -1,0 +1,145 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review: March 11, 2026\\How Far Can Unsupervised RLVR Scale LLM Training?}
+\author{Internbot Research Assistant}
+\date{March 11, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Today's review covers \emph{How Far Can Unsupervised RLVR Scale LLM Training?}~\citep{he2026urlvr}, which proves that all intrinsic unsupervised RLVR methods (certainty-based and ensemble-based) converge to \emph{sharpening the model's initial distribution}---amplifying existing preferences rather than discovering new knowledge. This creates a ``rise-then-fall'' pattern where early training gains are inevitably followed by model collapse due to confidence-correctness misalignment. The paper shows that small datasets ($\leq$128 samples) and test-time training prevent collapse, introduces Model Collapse Step as a label-free model evaluation metric (5.6$\times$ cheaper than pass@$k$), and identifies external reward methods (self-verification, generation-verification asymmetries) as the path forward.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} How Far Can Unsupervised RLVR Scale LLM Training?\\
+\textbf{Authors:} Bingxiang He, Yuxin Zuo, Zeyuan Liu, et al.\ (21 authors)\\
+\textbf{Affiliations:} Tsinghua University, Shanghai AI Lab, UIUC, Peking University\\
+\textbf{Venue:} ICLR 2026\\
+\textbf{Links:}
+\href{https://arxiv.org/abs/2603.08660}{arXiv} $\mid$
+\href{https://huggingface.co/papers/2603.08660}{HF Daily Papers} $\mid$
+\href{https://github.com/PRIME-RL/TTRL}{GitHub}
+
+\subsection{Core Problem: The Supervision Bottleneck}
+
+Standard RLVR (Reinforcement Learning with Verifiable Rewards) has powered DeepSeek-R1, Gemini~2.5, and Qwen3 by training LLMs against ground-truth labels (correct math answers, passing test cases). But curating these labels becomes infeasible as models approach human expertise. \textbf{Unsupervised RLVR} (URLVR) derives reward signals \emph{without} ground truth, promising to scale post-training like pretraining scales on unlabeled data.
+
+The paper taxonomizes URLVR methods into two categories:
+\begin{itemize}
+    \item \textbf{Intrinsic:} Rewards from the model's own signals---certainty-based (Self-Certainty, Token/Trajectory-Level Entropy, Probability) and ensemble-based (Majority Voting/TTRL, Co-Reward, EMPO).
+    \item \textbf{External:} Rewards from independent mechanisms---leveraging unlabeled data (RPT, DuPO, SEAL) or generation-verification asymmetries (LADDER for integration, Absolute Zero for code, AlphaProof for formal proofs).
+\end{itemize}
+
+\subsection{Key Finding: Intrinsic URLVR Converges to Sharpening}
+
+\paragraph{Theorem 1.} For majority-voting reward, the probability mass on the initial majority answer converges \textbf{geometrically} to 1 with rate $\rho = e^{-1/\beta}$. The limiting policy is deterministic: all mass concentrates on trajectories producing the initial majority-voted answer; all other trajectories go to zero.
+
+Via a unified framework expressing all intrinsic rewards as cross-entropy manipulations, the authors show \textbf{all intrinsic methods} share this sharpening behavior. The reward signal is a self-referential proxy that inevitably creates a ``rich-get-richer'' dynamic.
+
+\paragraph{Confidence-Correctness Misalignment.} When the model is initially confident about a \emph{wrong} answer, sharpening amplifies that error. Per-problem analysis on 25 MATH500 problems shows only 3/25 (12\%) had their greedy correctness flipped---the remaining 22 simply sharpened initial preferences. This produces the universal \textbf{rise-then-fall} pattern: early gains from beneficial sharpening (where confidence aligns with correctness), followed by collapse (where misalignment dominates).
+
+\subsection{Main Results}
+
+\paragraph{Rise-then-fall is universal.} Five intrinsic methods on Qwen3-1.7B-Base all eventually collapse, with distinct failure modes: Self-Certainty and Majority Voting degrade gradually; Probability triggers length collapse (favoring brevity); Token/Trajectory-Level Entropy triggers repetition collapse.
+
+\paragraph{Small datasets prevent collapse.} Training set sizes $\{32, 128, 512, \ldots, 16384\}$ from DAPO-17k: datasets $\leq$128 samples remain stable through 600 steps. Datasets $\geq$512 consistently collapse. The key mechanism: small datasets saturate quickly (KL divergence reaches only 0.057 at 600 steps for 32 samples vs.\ $2\times$ higher for 512), limiting the sharpening dynamic.
+
+\paragraph{Test-time training escapes collapse.} Training on AMC23's 40 test problems (test-time) vs.\ DAPO-17k (train-time): test-time training shows sustained improvement on both AMC23 \emph{and} AIME24 without collapse.
+
+\paragraph{TTRL genuinely improves capabilities.}
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Model} & \textbf{Base maj@1024} & \textbf{After TTRL avg@32} \\
+\midrule
+Qwen2.5-Math-1.5B & 37.30 & \textbf{48.90} (+11.6) \\
+Qwen2.5-Math-7B & 50.79 & \textbf{68.10} (+17.3) \\
+\bottomrule
+\end{tabular}
+\end{table}
+\noindent The post-TTRL pass@1 exceeds the base model's maj@$\infty$, proving genuine capability enhancement beyond self-consistency alignment.
+
+\paragraph{Model Collapse Step as evaluation metric.} Collapse step (the training step where intrinsic reward hacking begins) correlates strongly with supervised RLVR gain, requires no labels, and uses 5.6$\times$ fewer tokens (1.19B vs.\ 6.66B) than ground-truth evaluation.
+
+\paragraph{Scaling paradox.} Smaller models consistently outperform larger variants: Qwen3-1.7B is more stable than Qwen3-4B; OctoThinker-3B outlasts OctoThinker-8B by ${\sim}40$ steps. Larger capacity amplifies sensitivity to noisy pseudo-rewards.
+
+\paragraph{Self-verification shows promise.} On the Countdown task, self-verification achieves higher validation accuracy than Trajectory-Level Entropy. Crucially, when reward accuracy initially dips (policy tries to exploit the verifier), it \emph{recovers}---unlike intrinsic methods where degradation is monotonic. Instruction-aligned Qwen3-1.7B starts at 60\%+ and reaches 80\%+.
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Theoretical scope:} Theorem~1 is proven rigorously only for majority voting. Extension to other intrinsic rewards uses a unified framework with proof sketches, not full proofs.
+    \item \textbf{Domain scope:} Math reasoning only. Generalization to code, NLP, and multimodal tasks is untested.
+    \item \textbf{External rewards:} Self-verification is validated on only one task (Countdown). The external reward taxonomy is a survey, not a systematic empirical comparison.
+    \item \textbf{Scale:} Most experiments use 1.5B--4B models. Behavior at 70B+ is unknown.
+\end{enumerate}
+
+\section{Follow-up Research Directions}
+
+\subsection{BandPO-Guided Unsupervised RLVR to Delay Collapse}
+
+\textbf{Gap:} The rise-then-fall pattern is driven by premature sharpening---the model over-commits to its initial majority answer too quickly. BandPO~\citep{li2026bandpo} showed that fixed clipping causes entropy collapse by suppressing tail-action exploration. The same mechanism likely accelerates URLVR collapse: once the majority answer's probability rises, fixed clipping prevents the model from exploring alternative (potentially correct) answers in the tail.
+
+\textbf{Approach:} Replace GRPO's fixed clipping in TTRL with BandPO's probability-aware Band operator. The expanded bounds for low-probability tokens would preserve exploration of minority answers longer, delaying the geometric convergence toward the initial majority. Combine with the paper's finding that small datasets ($\leq$128) prevent collapse: use Band-TTRL on small curated subsets to extend the ``rise'' phase while avoiding the ``fall.'' Monitor both entropy and confidence-correctness alignment as training progresses; if alignment drops below a threshold, freeze training (adaptive early stopping guided by the model collapse step metric).
+
+\textbf{Feasibility:} Easy (2--3 weeks). Both TTRL and BandPO use the verl framework. The integration requires swapping the clip operator and running the existing experimental protocol. The theoretical question is whether Band's wider tail bounds meaningfully delay geometric convergence ($\rho = e^{-1/\beta}$) or merely shift the collapse point.
+
+\subsection{Cross-Agent Self-Verification via HACRL}
+
+\textbf{Gap:} Self-verification suffers from the model grading its own work---when generation and verification share the same parameters, the model can learn to generate outputs that fool its own verifier. The paper shows this as an initial dip in reward accuracy. While instruction-aligned models recover, base models often do not.
+
+\textbf{Approach:} Use HACRL's~\citep{zhang2026hacrl} heterogeneous agent framework for cross-verification: agent $A$ generates solutions while agent $B$ verifies them, and vice versa. Because $A$ and $B$ have different architectures or training stages, each agent's verifier is harder for the other to exploit. The HACPO mechanisms (capability-aware advantage estimation, exponential importance sampling) already handle distributional mismatch between agents. The key extension: define the reward for agent $A$'s rollout as agent $B$'s verification score, creating a co-evolutionary dynamic where each agent must produce solutions that satisfy an independent judge.
+
+\textbf{Feasibility:} Moderate (2--3 months). Requires implementing the cross-verification reward within HACRL's rollout-sharing infrastructure and validating on math benchmarks. Risk: both agents may converge to the same errors (shared training data), reducing the diversity benefit. Mitigation: use agents from different model families (Qwen + Llama) to maximize verification diversity.
+
+\subsection{Curriculum-Guided URLVR with Confidence-Correctness Filtering}
+
+\textbf{Gap:} The paper shows that collapse is driven by ``False Certain'' problems---high-confidence wrong answers that sharpening amplifies. If these problems could be identified and excluded early, the remaining ``True Certain'' and ``True Uncertain'' problems would benefit from sharpening without collapse.
+
+\textbf{Approach:} Implement a two-phase curriculum: (1)~\emph{Diagnostic phase}: run majority voting for $K{=}50$ steps and compute per-problem reward trajectories. Problems where reward rises monotonically and quickly saturates are likely ``True Certain'' (safe). Problems where reward oscillates or rises slowly are ``Uncertain'' (potentially valuable). Problems where reward rises despite low initial confidence are ``False Certain'' candidates (dangerous). (2)~\emph{Training phase}: train only on ``Certain'' and ``Uncertain'' problems, excluding suspected ``False Certain.'' Periodically re-evaluate the curriculum (every 200 steps) as the model's distribution shifts. The Model Collapse Step metric provides a cheap diagnostic signal for when to trigger re-evaluation.
+
+\textbf{Feasibility:} Easy--Moderate (3--5 weeks). The diagnostic phase is essentially the existing training pipeline run for fewer steps. The curriculum logic is simple filtering. The main research question is whether the per-problem trajectory signals are reliable enough for accurate classification, given the paper's finding that only 12\% of problems flip their correctness.
+
+\section{Conclusion}
+
+This paper provides the first rigorous theoretical and empirical characterization of unsupervised RLVR's scaling limits. The core insight is sobering but precisely articulated: intrinsic reward methods are fundamentally limited to sharpening the model's initial distribution, creating an inescapable rise-then-fall pattern. The practical implications are nuanced---TTRL genuinely improves capabilities when used carefully (small datasets, test-time training, early stopping), and Model Collapse Step provides a cheap label-free evaluation metric.
+
+For the lab, this paper ties together our entire RL review series into a coherent picture: SPoT addresses forgetting during supervised post-training, HACRL enables cross-agent knowledge sharing during RLVR, BandPO improves exploration via probability-aware clipping, and this paper identifies the fundamental ceiling that \emph{all} these improvements are working within. The most immediate follow-up is Direction~1 (BandPO + TTRL): a direct combination of the last two reviewed papers that tests whether better exploration delays the inevitable convergence. The most ambitious is Direction~2 (HACRL cross-verification): using heterogeneous agents as mutual verifiers to break the self-referential reward loop.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{3}
+
+\bibitem[He et~al.(2026)]{he2026urlvr}
+B.~He, Y.~Zuo, Z.~Liu, S.~Zhao, Z.~Fu, J.~Yang, C.~Qian, K.~Zhang, Y.~Fan, G.~Cui, X.~Chen, Y.~Sun, X.~Lv, X.~Zhu, L.~Sheng, R.~Li, H.~Gao, Y.~Zhang, B.~Zhou, Z.~Liu, and N.~Ding.
+\newblock How far can unsupervised RLVR scale LLM training?
+\newblock \emph{ICLR}, 2026.
+
+\bibitem[Li et~al.(2026)]{li2026bandpo}
+Y.~Li, B.~Wang, Y.~Gao, Y.~Yao, X.~Wang, Z.~Yin, and X.~Qiu.
+\newblock BandPO: Bridging trust regions and ratio clipping via probability-aware bounds for LLM reinforcement learning.
+\newblock \emph{arXiv:2603.04918}, 2026.
+
+\bibitem[Zhang et~al.(2026)]{zhang2026hacrl}
+Z.~Zhang, Z.~Huang, X.~Xia, D.~Wang, F.~Zhuang, S.~Ma, N.~Ding, Y.~Yang, J.~Li, and Y.~Ban.
+\newblock Heterogeneous agent collaborative reinforcement learning.
+\newblock \emph{arXiv:2603.02604}, 2026.
+
+\end{thebibliography}
+
+\end{document}
