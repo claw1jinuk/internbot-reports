@@ -1,0 +1,178 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review: March 12, 2026\\Omni-Diffusion: Unified Multimodal Understanding and Generation\\with Masked Discrete Diffusion}
+\author{Internbot Research Assistant}
+\date{March 12, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Today's review covers \emph{Omni-Diffusion}~\citep{li2026omnidiffusion}, the first any-to-any multimodal language model built entirely on masked discrete diffusion. Unlike autoregressive multimodal models that process modalities sequentially, Omni-Diffusion directly models the joint distribution over discrete tokens from text, speech, and images through a unified mask-predict framework built on Dream-7B. It achieves competitive or superior performance to autoregressive baselines (AnyGPT, NExT-GPT) across speech, vision, and cross-modal tasks---including best-in-class TTS (WER 3.07) and visual understanding (MME-Perception 1216.7, surpassing 14B models)---while enabling parallel decoding that maintains strong quality with as few as 10 inference steps.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} Omni-Diffusion: Unified Multimodal Understanding and Generation with Masked Discrete Diffusion\\
+\textbf{Authors:} Lijiang Li, Zuwei Long, Yunhang Shen, Heting Gao, Haoyu Cao, Xing Sun, Caifeng Shan, Ran He, Chaoyou Fu\\
+\textbf{Links:}
+\href{https://arxiv.org/abs/2603.06577}{arXiv} $\mid$
+\href{https://huggingface.co/papers/2603.06577}{HF Daily Papers} $\mid$
+\href{https://omni-diffusion.github.io}{Project Page}
+% Code not yet released.
+
+\subsection{Core Problem: Why Discrete Diffusion for Multimodal Models?}
+
+Most multimodal models rely on autoregressive (AR) architectures that process tokens left-to-right. This imposes an inherent seriality that limits generation speed and forces modality-specific decoder heads (e.g., NExT-GPT generates text autoregressively, then feeds it to separate image/speech decoders). Omni-Diffusion argues that masked discrete diffusion offers three advantages: (1)~controllable generation trajectories, (2)~parallel decoding across all positions, and (3)~a unified framework that models the \emph{joint} distribution over multimodal tokens directly, creating an intrinsically aligned semantic representation space.
+
+\subsection{Method: Unified Mask-Predict Framework}
+
+\paragraph{Probabilistic Formulation.} All modalities are tokenized into discrete tokens, wrapped with modality-specific begin/end markers, and concatenated into a single sequence. The training objective is:
+\begin{equation}
+    \mathcal{L} = -\mathbb{E}_{t,\, q(\mathbf{x}_t|\mathbf{x}_0)}\left[\sum_{i} \mathbb{I}[x_t^i = \texttt{[MASK]}] \cdot \log p_\theta(x_0^i \mid \mathbf{x}_t)\right]
+\end{equation}
+At each timestep $t$, a fraction $r(t)$ of tokens are replaced with \texttt{[MASK]}; the model predicts the clean tokens at all masked positions. Cross-entropy loss is computed only on masked positions.
+
+\paragraph{Tokenization.} Text uses the base LLM vocabulary. Images use MAGVIT-v2 (16$\times$ downsampling, codebook size 8192). Speech uses SenseVoiceSmall for encoding (12.5~Hz, codebook size 16384) with GLM-4-Voice for decoding. A lightweight MLP adapter projects speech tokens to the diffusion model's hidden dimension.
+
+\paragraph{Architecture.} The backbone is Dream-7B, a pre-trained discrete diffusion language model. The vocabulary is expanded to accommodate 16384 speech + 8192 image tokens. Only the embedding and output projection layers are extended; the core diffusion architecture is preserved.
+
+\subsection{Training: Three-Stage Progressive Pipeline}
+
+\begin{enumerate}
+    \item \textbf{Stage 1 -- Visual-Language Pre-Alignment:} 10M LAION-2B captions + 4M JourneyDB text-to-image pairs. LR: $10^{-4}$.
+    \item \textbf{Stage 2 -- Speech-Vision-Language Joint Alignment:} Retains Stage~1 data; adds 1,354h ASR data (LibriSpeech, Common Voice, GigaSpeech, VoxPopuli) and 5,108h TTS data (LibriTTS, Emilia). LR: $10^{-4}$.
+    \item \textbf{Stage 3 -- Speech-Driven Visual Interaction:} Introduces the Speech-Driven Visual Interaction (SDVI) dataset: 30K spoken visual QA + 30K speech-to-image samples, synthesized via LLaVA-OneVision + CosyVoice2. LR: $10^{-5}$.
+\end{enumerate}
+
+\paragraph{Attenuated Tail-Pad Masking.} Standard uniform masking causes overfitting to padding tokens. A scaling factor $\gamma{=}0.6$ reduces the mask ratio for pad tokens, ensuring gradient updates are driven by semantic tokens.
+
+\subsection{Inference Innovations}
+
+\begin{itemize}
+    \item \textbf{Entropy-Based Decoding:} At each step, unmask the top-$k$ highest-confidence tokens (lowest entropy); iterate until all tokens are decoded. Integrates repetition penalty and classifier-free guidance.
+    \item \textbf{Position Penalty:} Scales down logits of the last $N^t = L{-}100$ tokens by $\gamma_p{=}0.5$ during early inference, preventing simultaneous decoding from both sequence ends (which causes repetitive image patterns).
+    \item \textbf{Special Token Pre-Infilling:} For spoken dialogue, a \texttt{[begin-of-speech]} token is placed at position 0.25$L$, guiding the model to generate text in the first quarter and speech in the remaining 75\%.
+    \item \textbf{Adaptive Token Length:} TTS: initialize speech length = 3.5$\times$ text length; ASR: text length = 0.2$\times$ speech length.
+\end{itemize}
+
+\subsection{Main Results}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+\textbf{Task} & \textbf{Model} & \textbf{Size} & \textbf{Score} \\
+\midrule
+\multirow{3}{*}{ASR (WER $\downarrow$)} & AnyGPT & --- & 8.50 \\
+& GLM-4-Voice & --- & 2.82 \\
+& \textbf{Omni-Diffusion} & 7B & \textbf{7.05} \\
+\midrule
+\multirow{3}{*}{TTS (WER $\downarrow$)} & CosyVoice (specialist) & --- & 2.89 \\
+& GLM-4-Voice & --- & 5.64 \\
+& \textbf{Omni-Diffusion} & 7B & \textbf{3.07} \\
+\midrule
+\multirow{3}{*}{MME-P ($\uparrow$)} & LLaVA & 7B & 809.6 \\
+& InstructBLIP & 14B & 1212.8 \\
+& \textbf{Omni-Diffusion} & 7B & \textbf{1216.7} \\
+\midrule
+\multirow{3}{*}{SEED-2+ ($\uparrow$)} & NExT-GPT & --- & 26.2 \\
+& Emu & 14B & 33.5 \\
+& \textbf{Omni-Diffusion} & 7B & \textbf{34.5} \\
+\midrule
+\multirow{2}{*}{T2I CLIP-I ($\uparrow$)} & NExT-GPT & --- & 0.691 \\
+& \textbf{Omni-Diffusion} & 7B & 0.667 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Key observations:
+\begin{itemize}
+    \item \textbf{TTS:} Omni-Diffusion achieves WER 3.07---best among any-to-any models, approaching the specialist CosyVoice (2.89) and far surpassing GLM-4-Voice (5.64).
+    \item \textbf{Visual understanding:} MME-Perception 1216.7 surpasses InstructBLIP-14B (1212.8) despite being 7B; SEED-Bench-2-Plus 34.5 is best across all compared models.
+    \item \textbf{Cross-modal alignment:} Speech-to-image CLIP scores degrade $<$2\% vs.\ text-to-image (CLIP-T: 0.225 vs.\ 0.235), demonstrating strong alignment across modalities.
+    \item \textbf{Parallel decoding:} Text-to-image quality with 10 steps (CLIP-T=0.226) is within 4\% of 256 steps (0.235). TTS at 0.125$L$ steps gives WER 4.83 vs.\ 3.07 at 0.5$L$.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{No computational cost analysis:} Inference latency and training FLOPs are not compared against AR baselines. The parallel decoding advantage is demonstrated in quality-vs-steps but not wall-clock time.
+    \item \textbf{Image generation quality:} CLIP-I (0.667) lags behind Emu (0.656 with external diffusion) and NExT-GPT (0.691) on some metrics. The 256$\times$256 MAGVIT-v2 resolution limits visual fidelity.
+    \item \textbf{No ablation studies:} Individual contributions of attenuated tail-pad masking, position penalty, pre-infilling, and adaptive length are not isolated.
+    \item \textbf{Limited speech evaluation:} Only English ASR/TTS on LibriSpeech/LibriTTS; no multilingual or spontaneous speech evaluation.
+    \item \textbf{Emergent capabilities unexplored:} Image inpainting is demonstrated qualitatively (exploiting the mask mechanism) but not benchmarked.
+\end{enumerate}
+
+\section{Follow-up Research Directions}
+
+\subsection{RL-Based Post-Training for Discrete Diffusion LLMs}
+
+\textbf{Gap:} Omni-Diffusion is trained purely with supervised objectives (masked prediction). Our review series has shown that RL post-training dramatically improves AR models (SPoT, HACRL, BandPO). However, applying RL to discrete diffusion models is non-trivial: there is no natural ``left-to-right'' token generation trajectory for policy gradient methods, and the mask-predict process does not produce a single sequential rollout.
+
+\textbf{Approach:} Treat each diffusion denoising step as an ``action'' in an MDP. At step $t$, the ``state'' is the partially masked sequence $\mathbf{x}_t$; the ``action'' is the set of tokens predicted at masked positions; the ``reward'' is computed at the final step via a verifiable reward function (e.g., correctness for QA, CLIP score for images). Apply GRPO~\citep{shao2024deepseekmath} at the \emph{trajectory level}, where a trajectory is the full denoising chain from fully masked to fully decoded. Advantage estimation can use group-relative comparison across $G$ independent denoising trajectories from the same prompt, exactly as in standard RLVR. BandPO's~\citep{li2026bandpo} probability-aware clipping naturally applies per-step: at each denoising step, different tokens have different confidence levels, and the Band operator would expand exploration for low-confidence positions while constraining high-confidence ones.
+
+\textbf{Feasibility:} Hard (4--6 months). The main challenge is defining a meaningful per-step reward signal (process reward) for diffusion chains, since intermediate states are partially masked and cannot be evaluated by standard verifiers. May require training a diffusion-aware process reward model. High potential impact: could be the first RL post-training method for discrete diffusion LLMs.
+
+\subsection{Scaling Discrete Diffusion to High-Resolution Multimodal Generation}
+
+\textbf{Gap:} Omni-Diffusion uses MAGVIT-v2 at 256$\times$256, producing 256 image tokens per image. This limits visual fidelity and is well below the 512--1024px standard of current image generation. Scaling to higher resolution na\"ively would quadruple the sequence length, creating memory and compute bottlenecks for the transformer backbone.
+
+\textbf{Approach:} Apply a hierarchical diffusion scheme: (1)~generate a low-resolution (256$\times$256) token grid using the current framework, (2)~condition a second-stage discrete diffusion model on the low-resolution tokens to produce a 4$\times$ upsampled high-resolution grid (1024$\times$1024). The second stage can use a smaller, more efficient model with local attention (since spatial coherence is already established by stage~1). Alternatively, integrate recent multi-scale discrete tokenizers (e.g., from the image generation literature) that produce variable-length token sequences with coarse-to-fine structure, allowing the diffusion process to operate across scales within a single model.
+
+\textbf{Feasibility:} Moderate (3--4 months). Hierarchical diffusion is well-established in continuous diffusion; adapting it to discrete tokens requires designing a conditional masking scheme where stage-2 masks are guided by stage-1 outputs. The multi-scale tokenizer approach is more novel and riskier.
+
+\subsection{Continual Learning for Multimodal Diffusion Models via SPoT}
+
+\textbf{Gap:} Omni-Diffusion's three-stage training pipeline adds modalities sequentially (images, then speech, then cross-modal interaction). This risks catastrophic forgetting: Stage~3's speech-visual data may degrade Stage~1's image generation quality. The paper does not evaluate whether early-stage capabilities are preserved.
+
+\textbf{Approach:} Apply SPoT's~\citep{lin2026spot} surgical post-training principles to discrete diffusion. The key adaptation: instead of token-level correctness (as in SPoT for AR models), define ``correctness'' at the \emph{mask-prediction} level. For each training sample in Stage~3, generate predictions from the Stage~2 checkpoint and the current Stage~3 model; identify positions where Stage~3 degrades relative to Stage~2 (regression tokens). Apply the Elastic Tether mechanism (reward-based BCE objective with the Stage~2 model as reference) specifically on regression tokens, while allowing free adaptation on new-modality tokens. The LCS filtering from SPoT can be adapted to compare masked prediction distributions rather than full sequences.
+
+\textbf{Feasibility:} Moderate (2--3 months). SPoT's framework is directly applicable; the main research is defining appropriate regression metrics for discrete diffusion (e.g., per-position KL divergence between stage checkpoints) and validating that the Elastic Tether prevents forgetting without hindering new-modality acquisition. This would also serve as a test of SPoT's generality beyond AR models.
+
+\section{Conclusion}
+
+Omni-Diffusion demonstrates that masked discrete diffusion can serve as a viable foundation for unified multimodal models, achieving competitive or superior performance to AR baselines across understanding, generation, and cross-modal tasks. The mask-predict paradigm offers natural advantages: parallel decoding (10-step image generation with $<$4\% quality loss), native support for inpainting via the mask mechanism, and a unified probabilistic framework that sidesteps the need for modality-specific decoder heads.
+
+For the lab, this paper opens a new research axis at the intersection of our core topics. The most impactful direction is RL post-training for discrete diffusion LLMs (Direction~1): it would connect our RL expertise (SPoT, HACRL, BandPO, URLVR reviews) with the diffusion LLM topic, addressing a fundamental open question---can RL improve discrete diffusion models the way it has transformed autoregressive ones? Direction~3 (SPoT for continual multimodal learning) is more immediately feasible and would test whether our reviewed forgetting-prevention methods generalize beyond AR architectures.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{4}
+
+\bibitem[Li et~al.(2026)]{li2026omnidiffusion}
+L.~Li, Z.~Long, Y.~Shen, H.~Gao, H.~Cao, X.~Sun, C.~Shan, R.~He, and C.~Fu.
+\newblock Omni-Diffusion: Unified multimodal understanding and generation with masked discrete diffusion.
+\newblock \emph{arXiv:2603.06577}, 2026.
+
+\bibitem[Lin \& Han(2026)]{lin2026spot}
+W.~Lin and K.~Han.
+\newblock Surgical post-training: Cutting errors, keeping knowledge.
+\newblock \emph{arXiv:2603.01683}, 2026.
+
+\bibitem[Li et~al.(2026b)]{li2026bandpo}
+Y.~Li, B.~Wang, Y.~Gao, Y.~Yao, X.~Wang, Z.~Yin, and X.~Qiu.
+\newblock BandPO: Bridging trust regions and ratio clipping via probability-aware bounds for LLM reinforcement learning.
+\newblock \emph{arXiv:2603.04918}, 2026.
+
+\bibitem[Shao et~al.(2024)]{shao2024deepseekmath}
+Z.~Shao, P.~Wang, Q.~Zhu, R.~Xu, J.~Song, M.~Zhang, Y.K.~Li, Y.~Wu, and D.~Guo.
+\newblock DeepSeekMath: Pushing the limits of mathematical reasoning in open language models.
+\newblock \emph{arXiv:2402.03300}, 2024.
+
+\end{thebibliography}
+
+\end{document}
