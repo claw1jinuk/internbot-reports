@@ -1,0 +1,155 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review: March 16, 2026\\IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse}
+\author{Internbot Research Assistant}
+\date{March 16, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Today's review covers \emph{IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse}~\citep{bai2026indexcache}, which addresses a hidden bottleneck in sparse attention methods: while sparse attention reduces per-layer cost from $O(L^2)$ to $O(Lk)$, the \emph{indexer} that selects the top-$k$ tokens still runs at $O(L^2)$ across all $N$ layers, totaling $O(NL^2)$. IndexCache exploits the observation that adjacent layers share 70--100\% of their top-$k$ selections, partitioning layers into Full (compute fresh indices) and Shared (reuse cached indices). At 75\% indexer removal, IndexCache achieves 1.82$\times$ prefill and 1.48$\times$ decode speedup at 200K context on a 30B model with only $-$0.3 long-context quality loss, and scales to 744B (GLM-5) with near-zero degradation.
+\end{abstract}
+
+\section{Paper Summary}
+
+\textbf{Title:} IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse\\
+\textbf{Authors:} Yushi Bai, Qian Dong, Ting Jiang, Xin Lv, Zhengxiao Du, Aohan Zeng, Jie Tang, Juanzi Li\\
+\textbf{Affiliations:} Tsinghua University, Zhipu AI\\
+\textbf{Links:}
+\href{https://arxiv.org/abs/2603.12201}{arXiv} $\mid$
+\href{https://huggingface.co/papers/2603.12201}{HF Daily Papers}
+% Code not yet released.
+
+\subsection{Core Problem: The Indexer Bottleneck}
+
+Sparse attention methods like DeepSeek Sparse Attention (DSA) reduce core attention from $O(L^2)$ to $O(Lk)$ by selecting only the top-$k$ most relevant tokens per query. However, \emph{identifying} those top-$k$ tokens requires an indexer that computes approximate attention scores across all $L$ tokens---at $O(L^2)$ per layer. Across $N$ layers, this totals $O(NL^2)$, which becomes the dominant cost at long contexts. Profiling shows the indexer is a non-negligible bottleneck during prefill.
+
+\paragraph{Key Insight.} Analysis of cross-layer overlap in a 30B model reveals that adjacent layers share \textbf{70--100\%} of their top-$k$ token selections ($k{=}2048$, measured over 768 samples). This massive redundancy suggests most indexer computations are unnecessary.
+
+\subsection{Method: Full and Shared Layers}
+
+IndexCache partitions $N$ layers into \textbf{Full (F)} layers that compute and cache fresh top-$k$ indices, and \textbf{Shared (S)} layers that simply inherit the cached indices from the nearest preceding F layer. The implementation requires only a single conditional branch per layer.
+
+A binary pattern $\mathbf{c} = c_1 c_2 \cdots c_N$ (with $c_\ell \in \{F, S\}$, first layer always F) determines the assignment. Two complementary approaches determine this pattern:
+
+\paragraph{Training-Free (Greedy Search).} Starting with all layers as F, iteratively convert $K$ layers to S by greedily selecting the flip that minimizes LM loss on a calibration set (768 mini-batches, 200K context). This outperforms uniform interleaving because indexer importance varies across layers---early/transitional layers are more critical.
+
+\paragraph{Training-Aware (Multi-Layer Distillation).} Train retained indexers to serve multiple consecutive layers via a distillation loss:
+\begin{equation}
+    \mathcal{L}^I_{\text{multi}} = \sum_{j=0}^{m} \frac{1}{m{+}1} \sum_t D_{\text{KL}}\!\left(\mathbf{p}_t^{(\ell+j)} \;\|\; \mathbf{q}_t^{(\ell)}\right)
+\end{equation}
+where $\mathbf{p}_t^{(\ell+j)}$ is the aggregated attention distribution at layer $\ell{+}j$ and $\mathbf{q}_t^{(\ell)}$ is the indexer output at the retained layer $\ell$. Proposition~1 shows this gradient equals that of a single averaged target, enabling efficient optimization. Training: 1K dense warm-up + 4K sparse steps on SFT data (200K context).
+
+\subsection{Main Results}
+
+\paragraph{30B Model (GLM-4.7-Flash, 47 layers, H100$\times$8).}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Context} & \textbf{DSA (s)} & \textbf{IC-1/2 (s)} & \textbf{IC-1/4 (s)} & \textbf{Speedup} \\
+\midrule
+10K prefill & 0.57 & 0.47 & 0.45 & 1.27$\times$ \\
+60K prefill & 3.38 & 2.86 & 2.59 & 1.30$\times$ \\
+120K prefill & 8.57 & 6.57 & 5.66 & 1.51$\times$ \\
+\textbf{200K prefill} & \textbf{19.5} & \textbf{13.7} & \textbf{10.7} & \textbf{1.82$\times$} \\
+200K decode & 58 tok/s & 73 tok/s & 86 tok/s & 1.48$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Key observations:
+\begin{itemize}
+    \item Speedup \textbf{grows with context length} (1.27$\times$ at 10K $\to$ 1.82$\times$ at 200K) because the indexer's $O(L^2)$ cost dominates more at longer contexts.
+    \item \textbf{Quality (training-free, searched pattern):} At 1/2 retention: Long Avg 50.3 (+0.1 vs.\ baseline 50.2). At 1/4 retention: Long Avg 49.9 ($-$0.3). At 1/8 retention: significant degradation ($-$4.1).
+    \item \textbf{Searched vs.\ uniform:} At 1/4 retention, searched pattern recovers 6.9 points of Long Avg that uniform interleaving loses (49.9 vs.\ 43.0).
+    \item \textbf{General reasoning is preserved:} AIME~2025 actually \emph{improves} by +1.6 (92.6 vs.\ 91.0), GPQA-Diamond +1.0.
+\end{itemize}
+
+\paragraph{744B Model (GLM-5, 82 layers).}
+\begin{itemize}
+    \item Training-free, 1/2 searched: Long Avg 78.7 (+0.3 vs.\ baseline 78.4). Near-zero degradation at production scale.
+    \item Training-free, 1/4 searched: Long Avg 78.0 ($-$0.4). Still remarkably close to baseline.
+    \item End-to-end speedup: ${\sim}$1.2$\times$ at 50\% indexer retention.
+\end{itemize}
+
+\paragraph{Training-aware results.} With multi-layer distillation (5K training steps), \textbf{uniform interleaving matches searched patterns}---pattern sensitivity vanishes with training. At 1/2 retention: Long Avg 51.6 (+0.6 vs.\ baseline). Ablation confirms the cross-layer distillation loss is essential (removing it drops Long Avg from 51.6$\to$49.8).
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Extreme sparsity degrades:} At 1/8 retention (87.5\% indexer removal), Long Avg drops by 4.1 even with searched patterns. The approach has diminishing returns past 75\%.
+    \item \textbf{Pattern search cost:} Greedy search requires ${\sim}N^2/2P$ forward passes (amortized with $P$-way pipeline parallelism). One-time cost but non-trivial.
+    \item \textbf{DSA-specific:} Designed for indexer-based sparse attention (DSA). Applicability to other sparse attention families (e.g., sliding window, linear attention) is not explored.
+    \item \textbf{No code released:} ``We plan to apply training-aware IndexCache to GLM-5 in the near future.''
+\end{enumerate}
+
+\section{Follow-up Research Directions}
+
+\subsection{Dynamic IndexCache with Learned Skip Prediction}
+
+\textbf{Gap:} IndexCache uses a static binary pattern (F/S) determined offline. In practice, the optimal skip pattern likely depends on the \emph{input}---some queries may require fresh indexing at layers where others can safely reuse. The 70--100\% overlap is an average; for challenging reasoning steps or rare tokens, overlap may drop significantly.
+
+\textbf{Approach:} Train a lightweight per-layer skip predictor $\sigma(h_\ell) \in [0, 1]$ that decides whether layer $\ell$ should be F or S based on the hidden state $h_\ell$. The predictor is a single linear layer + sigmoid, adding negligible overhead. Train it with a distillation objective: minimize the KL divergence between the S-mode output (using cached indices) and the F-mode output (using fresh indices), weighted by the accuracy loss. Use RL (GRPO with binary reward: $+1$ if skipping does not degrade the final answer, $0$ otherwise) to fine-tune the predictor for task-specific optimization. This creates an input-adaptive IndexCache where easy inputs skip aggressively ($>$75\% S layers) and hard inputs use more F layers.
+
+\textbf{Feasibility:} Easy--Moderate (3--5 weeks). The skip predictor is tiny; the main challenge is defining a meaningful per-layer reward signal without waiting for the full forward pass. A proxy: use the cached-vs-fresh index overlap as an immediate signal---low overlap $\to$ don't skip.
+
+\subsection{IndexCache for Streaming Continual Knowledge Adaptation}
+
+\textbf{Gap:} OAKS~\citep{kim2026oaks} showed that LLMs fail to track dynamically evolving facts in long streaming contexts. A key bottleneck is inference speed: as context accumulates, the quadratic indexer cost makes real-time adaptation infeasible at 128K+ contexts. IndexCache can directly accelerate the inference loop, but na\"ive caching may miss fact transitions---if a new chunk updates a fact, the cached top-$k$ indices from previous layers may still point to outdated tokens.
+
+\textbf{Approach:} Extend IndexCache with a \emph{cache invalidation} mechanism triggered by knowledge transitions. When a new context chunk arrives, compute a lightweight ``change score'' (cosine distance between the new chunk's embedding and the cached key embeddings at F layers). If the change score exceeds a threshold, force the next $m$ layers to be F (refreshing the index cache with the new evidence). Otherwise, maintain the S pattern. This creates a ``transition-aware'' IndexCache that is fast during stable phases and accurate during knowledge updates---directly addressing the Volatility failure mode (32.1\% unnecessary changes) identified in OAKS.
+
+\textbf{Feasibility:} Moderate (2--3 months). Requires implementing a change-detection module and integrating it with the F/S scheduling. The cosine-distance computation is cheap (operates on embeddings, not full attention). OAKS-BABI provides a controlled testbed with known transition points for validation.
+
+\subsection{Cross-Layer Index Reuse for Discrete Diffusion Models}
+
+\textbf{Gap:} Omni-Diffusion~\citep{li2026omnidiffusion} showed that discrete diffusion models can serve as unified multimodal architectures, but their inference requires multiple denoising steps, each involving full transformer forward passes. The IndexCache insight---that adjacent computation steps share similar attention patterns---may extend to adjacent \emph{denoising steps}: the set of important tokens likely changes slowly between steps $t$ and $t{-}1$ as the sequence is gradually unmasked.
+
+\textbf{Approach:} Apply IndexCache \emph{across denoising steps} rather than across layers. At denoising step $t$, compute fresh top-$k$ indices. At steps $t{-}1, t{-}2, \ldots, t{-}m$, reuse the cached indices (with invalidation when newly unmasked tokens fall outside the cache). This would reduce the $O(TL^2)$ total denoising cost (where $T$ is the number of steps) to $O(T/m \cdot L^2)$---potentially enabling the 10-step generation quality of Omni-Diffusion at even fewer effective steps. Validate by measuring index overlap across denoising steps on masked text generation.
+
+\textbf{Feasibility:} Moderate--Hard (3--5 months). The assumption that adjacent denoising steps share attention patterns needs empirical validation---the unmasking process may cause sharper attention shifts than layer-to-layer variation. If overlap is $\geq$60\%, the approach is viable; if $<$40\%, a more sophisticated caching strategy (e.g., incremental index update for newly unmasked positions only) would be needed.
+
+\section{Conclusion}
+
+IndexCache is an elegant efficiency contribution: by exploiting the massive cross-layer redundancy in top-$k$ token selection (70--100\% overlap), it removes up to 75\% of indexer computations with negligible quality loss ($-$0.3 Long Avg at 1/4 retention). The speedup grows with context length---exactly where it matters most---reaching 1.82$\times$ prefill at 200K tokens. The training-aware variant eliminates pattern sensitivity entirely, making deployment straightforward.
+
+This paper completes our review series' coverage of all five core research topics. For the lab, the most actionable direction is Direction~2 (IndexCache for streaming knowledge adaptation): combining the efficiency gain with OAKS's continual learning challenge to enable real-time fact tracking in long-context streaming scenarios. Direction~3 (cross-denoising-step caching for discrete diffusion) connects to our Omni-Diffusion review and could significantly accelerate diffusion-based multimodal generation.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{3}
+
+\bibitem[Bai et~al.(2026)]{bai2026indexcache}
+Y.~Bai, Q.~Dong, T.~Jiang, X.~Lv, Z.~Du, A.~Zeng, J.~Tang, and J.~Li.
+\newblock IndexCache: Accelerating sparse attention via cross-layer index reuse.
+\newblock \emph{arXiv:2603.12201}, 2026.
+
+\bibitem[Kim et~al.(2026)]{kim2026oaks}
+J.~Kim, H.~Lee, D.~Zhou, S.H.~Park, S.~Yoon, T.~Bui, F.~Dernoncourt, S.~Cha, and M.~Seo.
+\newblock Can large language models keep up? Benchmarking online adaptation to continual knowledge streams.
+\newblock \emph{arXiv:2603.07392}, 2026.
+
+\bibitem[Li et~al.(2026)]{li2026omnidiffusion}
+L.~Li, Z.~Long, Y.~Shen, H.~Gao, H.~Cao, X.~Sun, C.~Shan, R.~He, and C.~Fu.
+\newblock Omni-Diffusion: Unified multimodal understanding and generation with masked discrete diffusion.
+\newblock \emph{arXiv:2603.06577}, 2026.
+
+\end{thebibliography}
+
+\end{document}
