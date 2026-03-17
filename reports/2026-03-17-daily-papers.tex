@@ -1,0 +1,201 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review --- March 17, 2026\\
+\large LookaheadKV: Fast and Accurate KV Cache Eviction\\by Glimpsing into the Future without Generation}
+\author{Internbot --- Automated Research Review}
+\date{March 17, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report reviews \textbf{LookaheadKV}~\cite{lookaheadkv}, which resolves the accuracy--latency tradeoff in KV cache eviction for long-context LLM inference.
+Heuristic eviction methods (SnapKV, PyramidKV) are fast but inaccurate because they estimate token importance only from the input prompt.
+Draft-based methods (LAQ, SpecKV) improve accuracy by generating a surrogate response first, but incur 234--553\,ms of overhead at 32K context.
+LookaheadKV replaces draft generation with 32 learnable soft tokens and selective LoRA modules that predict importance scores in a single augmented forward pass, achieving 14.5$\times$ lower overhead than LAQ while matching or exceeding its accuracy.
+The method adds less than 0.5\% parameters and generalizes from 16K training contexts to 128K evaluation.
+We connect this to our previous IndexCache review---together they address the two key bottlenecks in efficient long-context inference: indexer computation and KV cache memory.
+\end{abstract}
+
+\section{Paper Summary}
+
+\subsection{Overview}
+\begin{itemize}
+    \item \textbf{Title:} LookaheadKV: Fast and Accurate KV Cache Eviction by Glimpsing into the Future without Generation
+    \item \textbf{Authors:} Jinwoo Ahn, Ingyu Seong, Akhil Kedia, Junhan Kim, Hyemi Jang, Kangwook Lee, Yongkweon Jeon (Samsung Research)
+    \item \textbf{arXiv:} \href{https://arxiv.org/abs/2603.10899}{2603.10899}
+    \item \textbf{Code:} \href{https://github.com/SamsungLabs/LookaheadKV}{github.com/SamsungLabs/LookaheadKV}
+    \item \textbf{Topics:} LLM efficiency, inference optimization, KV cache management
+\end{itemize}
+
+\subsection{Core Problem}
+KV cache memory grows linearly with sequence length, creating a bottleneck for long-context inference.
+\textbf{Eviction} selectively discards low-importance KV entries to fit a fixed cache budget $C$.
+The key challenge is \emph{accurately} estimating token importance:
+
+\begin{itemize}
+    \item \textbf{Heuristic methods} (SnapKV, PyramidKV, StreamingLLM) score tokens using attention patterns over a suffix observation window during prefill. They are fast ($<$1\,ms overhead) but cannot anticipate which tokens the \emph{response} will actually attend to.
+    \item \textbf{Draft-based methods} (LAQ, SpecKV) first generate a surrogate response---either via partial self-generation or a separate draft model---then compute importance from the draft's attention patterns. Accurate, but incur 234--553\,ms of overhead at 32K context due to the additional forward passes.
+\end{itemize}
+
+The fundamental bottleneck: \emph{accurate eviction requires knowledge of the future response, but generating that response is itself expensive.}
+
+\subsection{Proposed Method}
+
+LookaheadKV introduces two lightweight components that estimate response-aware importance scores in a single augmented forward pass:
+
+\paragraph{Lookahead Tokens.}
+A set of $n_{\mathrm{lookahead}} = 32$ learnable soft embeddings $P \in \mathbb{R}^{32 \times d}$ are appended to the input sequence during prefill. These tokens serve as surrogate ``queries'' trained to mimic the attention patterns a real response would produce.
+
+\paragraph{Lookahead LoRA.}
+Low-rank adapters (rank $r\!=\!8$, $\alpha\!=\!32$) are selectively activated \emph{only for the lookahead token positions}, leaving the original model behavior completely untouched for standard input tokens:
+\[
+Q_{\mathrm{LKV}} = [X, P]\,W_q + [\mathbf{0}, P]\,\Delta W_q, \qquad
+K_{\mathrm{LKV}} = [X, P]\,W_k + [\mathbf{0}, P]\,\Delta W_k
+\]
+LoRA is applied to all linear layers ($W_q, W_k, W_v, W_o, W_{\mathrm{up}}, W_{\mathrm{down}}, W_{\mathrm{gate}}$), adding $<$0.5\% parameters.
+
+\paragraph{Importance Estimation.}
+The ground-truth importance of the $j$-th prompt token is defined as:
+\[
+s_j = \frac{1}{n_{\mathrm{out}}} \sum_{i=n_{\mathrm{in}}+1}^{n_{\mathrm{in}}+n_{\mathrm{out}}} A_{i,j}
+\]
+i.e., the average cross-attention from all response positions to key position $j$.
+LookaheadKV estimates this by extracting the attention scores from the 32 lookahead token positions over the input positions---no generation needed.
+
+\paragraph{Training.}
+For each of 183K training samples, the frozen LLM generates a response via greedy decoding (max 512 tokens) to compute ground-truth importance. The lookahead tokens and LoRA modules are trained to minimize the KL divergence between estimated and ground-truth importance distributions, averaged over all layers and heads:
+\[
+\mathcal{L} = \frac{1}{L \cdot H} \sum_{\ell=1}^{L} \sum_{h=1}^{H} D_{\mathrm{KL}}\!\left(\hat{s}_{\mathrm{GT}}^{(\ell,h)} \;\|\; \hat{s}_{\mathrm{LKV}}^{(\ell,h)}\right)
+\]
+
+\subsection{Key Results}
+
+\paragraph{Efficiency.}
+On LLaMA3.1-8B at 32K context with cache budget $C\!=\!128$:
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{TTFT Overhead (ms)} & \textbf{Memory (GB)} \\
+\midrule
+SnapKV & 77.67 & 13.00 \\
+SpecKV & 502.87 & --- \\
+LAQ & 553.68 & 450.52 \\
+\textbf{LookaheadKV} & \textbf{38.04} & \textbf{13.05} \\
+\bottomrule
+\end{tabular}
+\end{center}
+LookaheadKV is 14.5$\times$ faster than LAQ with negligible memory overhead ($+$0.05\,GB). Total TTFT overhead is $<$2.16\% at 32K context.
+
+\paragraph{Quality (MT-Bench).}
+On LLaMA3.1-8B (FullKV baseline: 7.77):
+
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Budget} & \textbf{PyramidKV} & \textbf{SnapKV} & \textbf{SpecKV} & \textbf{LAQ} & \textbf{LookaheadKV} \\
+\midrule
+64 & 6.85 & 6.80 & 6.77 & 7.10 & \textbf{7.26} \\
+128 & 7.39 & 7.50 & 7.34 & 7.54 & \textbf{7.63} \\
+256 & 7.76 & 7.72 & 7.84 & 7.72 & \textbf{7.92} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+LookaheadKV achieves the best scores at every budget level. At the critical low-budget regime ($C\!=\!64$), it recovers 93.4\% of FullKV quality vs.\ LAQ's 91.4\% and SnapKV's 87.5\%.
+
+\paragraph{Long-Context Generalization.}
+Despite training on max 16K sequences, LookaheadKV generalizes effectively:
+
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Context} & \textbf{FullKV} & \textbf{SnapKV} & \textbf{SpecKV} & \textbf{LAQ} & \textbf{LookaheadKV} \\
+\midrule
+64K & 84.15 & 39.64 & 64.02 & 64.10 & \textbf{69.45} \\
+128K & 73.72 & 30.56 & 52.62 & 50.67 & \textbf{54.83} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Ablations.}
+Key design choices validated: (1) $n_{\mathrm{lookahead}}=32$ saturates performance---64/128 tokens add overhead with no accuracy gain; (2) LoRA on all layers outperforms Q/V-only or embedding-only variants; (3) combining with SnapKV's suffix window \emph{hurts} performance ($-$2\%), indicating the learned predictions are strictly superior to suffix heuristics; (4) importance rankings remain stable under stochastic decoding (Recall@512 $>$91\% at temperature 0.8).
+
+\subsection{Limitations}
+\begin{itemize}
+    \item \textbf{Scale:} Experiments limited to models up to 8B. Behavior at 70B+ is unknown.
+    \item \textbf{Prefill-only:} Addresses eviction during prefill but not during autoregressive decoding, where the cache continues to grow.
+    \item \textbf{Training required:} Unlike zero-shot heuristics (SnapKV), requires model-specific training with 183K samples and ground-truth importance extraction.
+    \item \textbf{Context generalization gap:} Performance degrades at 64K--128K despite training on 16K, though it remains the best among eviction methods.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{LookaheadKV + IndexCache: Unified Sparse-and-Evict Pipeline}
+
+\paragraph{Gap.}
+IndexCache~\cite{indexcache} accelerates the \emph{indexer} in sparse attention by reusing top-$k$ indices across layers, while LookaheadKV accelerates the \emph{eviction} decision for which KV entries to retain. Both target long-context efficiency but operate on different stages of the attention pipeline. No work has combined cross-layer index reuse with learned importance prediction in a unified framework.
+
+\paragraph{Approach.}
+Design a two-stage pipeline: (1) LookaheadKV's soft tokens predict a coarse importance ranking during prefill, reducing the KV cache to budget $C$; (2) IndexCache's F/S layer partitioning reuses top-$k$ indices within the compressed cache, eliminating redundant indexer computation. The lookahead tokens could additionally predict which layers are ``Shared'' (high index overlap), unifying both decisions in a single forward pass.
+
+\paragraph{Feasibility.}
+Both methods are lightweight and complementary---LookaheadKV adds $<$0.5\% parameters and IndexCache is training-free in its basic variant. The combined overhead should remain under 3\% TTFT while achieving multiplicative speedups: LookaheadKV's 14.5$\times$ eviction speedup $\times$ IndexCache's 1.82$\times$ prefill speedup. Initial experiments could use LLaMA3.1-8B on RULER at 32K--128K context.
+
+\subsection{Decoding-Stage Eviction via Streaming Lookahead Tokens}
+
+\paragraph{Gap.}
+LookaheadKV only addresses prefill-stage eviction. During autoregressive decoding, the KV cache continues to grow as new tokens are generated, eventually re-creating the memory bottleneck. The authors flag this as explicit future work. For continual knowledge streams~\cite{oaks}, where models must process evolving information over time, decoding-stage eviction is essential.
+
+\paragraph{Approach.}
+Extend the lookahead mechanism to operate in a \emph{streaming} fashion during decoding: periodically (every $k$ generated tokens), re-run the 32 lookahead tokens over the current cache to produce updated importance scores. Evict the lowest-scoring entries to maintain a fixed budget. The key challenge is amortizing the lookahead overhead---since decoding is latency-critical, the re-scoring must be infrequent or batched. One option: maintain a moving-average importance score that blends prefill predictions with lightweight online updates from each new token's attention pattern.
+
+\paragraph{Feasibility.}
+The 32-token lookahead adds $\sim$1\,ms at 8K context, which is comparable to a single decoding step. Re-scoring every 64--128 generated tokens would add $<$1\% overhead to total generation latency. The LoRA modules already exist and need no retraining---only the inference loop changes. Evaluation on LongProc's long-form generation tasks would directly measure the benefit.
+
+\subsection{Task-Adaptive Importance via Reinforcement Learning}
+
+\paragraph{Gap.}
+LookaheadKV trains importance prediction with a fixed KL-divergence objective on a curated dataset. The importance scores are \emph{task-agnostic}---the same model handles coding, QA, summarization, and conversation. However, different tasks exhibit different attention patterns: coding tasks attend heavily to variable declarations, while QA tasks attend to evidence passages. BandPO~\cite{bandpo} showed that probability-aware bounds improve RL training for LLMs. A similar principle could make importance prediction task-adaptive.
+
+\paragraph{Approach.}
+Replace KL-divergence training with an RL objective where the reward is downstream task performance under the evicted cache. The lookahead tokens and LoRA modules become a ``policy'' that decides which KV entries to keep. Use GRPO or PPO with the reward signal: $R = \mathrm{TaskMetric}(\mathrm{model\ output\ with\ evicted\ cache})$. BandPO's probability-aware clipping could stabilize training when the eviction policy drastically changes which tokens are retained. This would produce task-specialized lookahead modules that can be swapped at inference time.
+
+\paragraph{Feasibility.}
+The parameter count is small ($<$21M for 8B models), making RL fine-tuning tractable. The main challenge is reward design---task metrics (accuracy, BLEU, etc.) provide sparse signals. A hybrid approach could combine the KL objective (dense signal) with task-specific RL rewards (sparse but informative). Initial experiments could target a single task family (e.g., long-context QA) where ground-truth answers are available as reward signals.
+
+\section{Conclusion}
+
+LookaheadKV provides an elegant resolution to the accuracy--latency tradeoff in KV cache eviction.
+By replacing explicit draft generation with 32 learnable soft tokens and selective LoRA modules, it achieves 14.5$\times$ lower overhead than draft-based methods while matching or exceeding their accuracy across 6 models and 4 benchmark suites.
+The method is notable for its parameter efficiency ($<$0.5\%), minimal TTFT overhead ($<$2.16\% at 32K), and context length generalization (16K$\rightarrow$128K).
+
+Combined with our previous IndexCache review, this paper completes the picture of efficient long-context inference: IndexCache eliminates redundant indexer computation via cross-layer reuse, while LookaheadKV eliminates the draft-generation bottleneck for eviction decisions.
+The natural next step is a unified sparse-and-evict pipeline that chains both techniques, potentially achieving multiplicative speedups with minimal quality loss.
+The extension to decoding-stage eviction and task-adaptive RL training opens further directions connecting to our lab's work on continual knowledge adaptation (OAKS) and RL-based LLM optimization (BandPO).
+
+\begin{thebibliography}{9}
+\bibitem{lookaheadkv} Ahn, J., Seong, I., Kedia, A., Kim, J., Jang, H., Lee, K., \& Jeon, Y. (2026). LookaheadKV: Fast and Accurate KV Cache Eviction by Glimpsing into the Future without Generation. \textit{arXiv preprint arXiv:2603.10899}.
+
+\bibitem{indexcache} Bai, Y., et al. (2026). IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse. \textit{arXiv preprint arXiv:2603.12201}.
+
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv preprint arXiv:2603.07392}.
+
+\bibitem{bandpo} (2026). BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning. \textit{arXiv preprint arXiv:2603.04918}.
+\end{thebibliography}
+
+\end{document}
