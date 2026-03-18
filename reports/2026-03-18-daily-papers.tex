@@ -1,0 +1,252 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review --- March 18, 2026\\
+\large Effective Distillation to Hybrid xLSTM Architectures}
+\author{Internbot --- Automated Research Review}
+\date{March 18, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report reviews \textbf{Effective Distillation to Hybrid xLSTM Architectures}~\cite{xlstm-distill}, which distills pre-trained Transformer LLMs into sub-quadratic hybrid mLSTM + Sliding Window Attention (SWA) students.
+Prior distillation methods (LoLCATs, Llamba, RADLADS) preserve language \emph{understanding} but fall short on free-form \emph{generation} tasks (math, code, instruction-following).
+This work closes that gap: the distilled xLSTM-Llama3.1-8B achieves a critical tolerance $\alpha^* = 0.0$ (perfect teacher parity on the majority of benchmarks), while delivering $\sim$2$\times$ prefill speedup and constant-memory generation.
+A three-stage pipeline---hidden-state alignment, sparse KL distillation, and decentralized expert merging---enables the full transfer with only 5--20B tokens.
+We connect this to our previous IndexCache and LookaheadKV reviews: while those methods optimize \emph{within} the Transformer paradigm, this paper asks whether we can escape the quadratic bottleneck entirely through distillation.
+\end{abstract}
+
+\section{Paper Summary}
+
+\subsection{Overview}
+\begin{itemize}
+    \item \textbf{Title:} Effective Distillation to Hybrid xLSTM Architectures
+    \item \textbf{Authors:} Lukas Hauzenberger, Niklas Schmidinger, Thomas Schmied, Anamaria-Roberta Hartl, David Stap, Pieter-Jan Hoedt, Maximilian Beck, Sebastian B\"{o}ck, Gunter Klambauer, Sepp Hochreiter (JKU Linz / ELLIS Unit Linz)
+    \item \textbf{arXiv:} \href{https://arxiv.org/abs/2603.15590}{2603.15590}
+    \item \textbf{Topics:} LLM efficiency, distillation, sub-quadratic architectures
+\end{itemize}
+
+\subsection{Core Problem}
+
+Transformers with softmax attention have $O(n^2)$ complexity and a KV cache that grows linearly with context length, making long-context inference expensive.
+Sub-quadratic architectures (SSMs, linear attention, recurrent models) offer constant memory and linear-time prefill, but training them from scratch to match Transformer quality requires enormous compute.
+\textbf{Distillation} is the shortcut: transfer knowledge from a pre-trained Transformer teacher into an efficient student.
+
+The specific challenge: prior linearization methods (LoLCATs, Llamba, RADLADS) successfully preserve language \emph{understanding} (MMLU, ARC, HellaSwag) but \textbf{fail on generation tasks}---mathematical reasoning (GSM8K, MATH), code synthesis (HumanEval, MBPP), and instruction-following (IFEval, MT-Bench).
+This paper aims to close that generation gap.
+
+\subsection{Proposed Method}
+
+\paragraph{Hybrid mLSTM + SWA Architecture.}
+Every multi-head attention block in the teacher Transformer is replaced with a hybrid layer:
+\[
+h_t = o_t \cdot \mathrm{mLSTM}(q_t) + (1 - o_t) \cdot \mathrm{SWA}(q_t)
+\]
+where $o_t$ is a learned, data-dependent per-head scalar gate computed from $[q_t, k_t, v_t]$.
+
+\textbf{mLSTM} (matrix LSTM) augments linear attention with three data-dependent gates:
+\[
+S_t = f_t \cdot S_{t-1} + i_t \cdot \phi(k_t)\, v_t^\top
+\]
+where $i_t = \exp(x_t^\top w_i)$ (input gate), $f_t = \sigma(x_t^\top w_f)$ (forget gate), and an output gate $o_t = \sigma(x_t^\top W_{og})$ modulates the readout.
+This gives both the efficiency of linear attention (constant memory) and the expressiveness of gated recurrence.
+
+\textbf{Sliding Window Attention (SWA)} restricts each query to a fixed window of 512 tokens plus 4 initial ``sink'' tokens, handling precise local dependencies that the recurrent state may blur.
+
+Key design: \emph{all} attention layers are replaced (unlike Mamba-in-Llama which keeps 50\% softmax attention). MLP layers, embeddings, and the LM head are copied directly from the teacher.
+
+\paragraph{Three-Stage Distillation Pipeline.}
+
+\textbf{Stage I: Hidden-State Alignment} (655M tokens, 4K context).
+Layer-by-layer MSE matching between teacher and student attention outputs:
+\[
+\min_{\theta_\ell} \| h_t^{(\ell)} - \hat{h}_t^{(\ell)} \|_2^2
+\]
+Only the new parameters (feature maps, gate projections) are trained; embeddings and MLPs remain frozen. This is a cheap initialization step.
+
+\textbf{Stage II: Knowledge Distillation} (5--20B tokens).
+End-to-end fine-tuning with a combined objective:
+\[
+\mathcal{L} = -\sum_t \Big[ \gamma \log p_\theta(y_t | x_{1:t}) + \beta\, D_{\mathrm{KL}}\!\left(p_T^{(k)} \| p_\theta^{(k)}\right) \Big]
+\]
+with $\gamma = 0.9$ (cross-entropy) and $\beta = 0.1$ (sparse KL over top-256 teacher logits).
+The sparse KL is a crucial efficiency innovation: only 256 logit values per position need to be stored, enabling \textbf{offline teacher computation} (precompute once, reuse across training runs).
+
+\textbf{Stage III: Expert Merging} (optional).
+Train $K=4$ independent domain experts (math, code, STEM, instruction-following) from the same Stage-I seed, each on $\sim$5B domain-specific tokens.
+Consolidate via uniform linear combination: $\theta_{\mathrm{merge}} = \sum_i \lambda_i \theta^{(i)}$.
+This enables \textbf{decentralized, modular capability development}---experts can be trained on different machines and updated independently.
+
+\subsection{Key Results}
+
+\paragraph{Evaluation Framework.}
+The paper introduces two formal metrics:
+\begin{itemize}
+    \item \textbf{Win-and-Tie Rate} $C_\alpha$: fraction of benchmarks where the student matches or exceeds the teacher within tolerance $\alpha$.
+    \item \textbf{Critical Tolerance} $\alpha^*$: the minimum $\alpha$ such that $C_\alpha \geq 0.5$. Lower is better; $\alpha^* = 0$ means perfect teacher parity.
+\end{itemize}
+
+\paragraph{Critical Tolerance Comparison.}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Model} & $\alpha^*$ & \textbf{Interpretation} \\
+\midrule
+xLSTM-Llama3.1-8B & \textbf{0.00} & Perfect parity \\
+xLSTM-Olmo3-7B & 0.01 & Near-perfect \\
+xLSTM-Llama3.1-8B-IT (merged) & 0.02 & Excellent \\
+xLSTM-Qwen2.5-7B-IT (merged) & 0.05 & Good \\
+\midrule
+LoLCATs (prior SOTA) & 1.00 & Poor generation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The xLSTM student achieves $\alpha^* = 0.0$ for Llama 3.1 8B---it literally matches the teacher on the majority of benchmarks with zero tolerance, while LoLCATs requires 100\% tolerance.
+
+\paragraph{Comparison with Other Linearized Architectures.}
+\begin{itemize}
+    \item \textbf{vs.\ Mamba-in-Llama}: Even though Mamba-in-Llama retains 50\% of original softmax attention layers, xLSTM students (replacing \emph{all} attention) match or exceed its performance.
+    \item \textbf{vs.\ QRWKV7-7B-IT}: Substantially higher Win-and-Tie rates across tolerances.
+    \item \textbf{vs.\ Llamba, Liger}: Pareto-dominated at all tolerance levels.
+\end{itemize}
+
+\paragraph{Inference Efficiency} (single H100 80GB):
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+\textbf{Metric} & \textbf{Improvement} \\
+\midrule
+Prefill throughput (B=1, 65K context) & $\sim$2$\times$ \\
+Time-to-first-token & $\sim$2$\times$ reduction \\
+Generation latency (B=1, 131K) & $\sim$50\% reduction \\
+GPU memory during generation & $\sim$50\% reduction \\
+Generation throughput (B=8, long context) & $\sim$4$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Memory is \textbf{constant} over sequence length (no growing KV cache), allowing generation at contexts where the teacher runs OOM.
+
+\paragraph{Benchmark Highlights.}
+\begin{itemize}
+    \item \textbf{Understanding}: Full teacher parity on MMLU, ARC, HellaSwag (recovery $\sim$1.0).
+    \item \textbf{Math/Code}: Strong recovery on GSM8K, MATH, HumanEval, MBPP ($>$0.95 recovery).
+    \item \textbf{Instruction-following}: \emph{Exceeds} teacher on MT-Bench (GPT-5.1 as judge).
+    \item \textbf{STEM reasoning}: Weakest area---GPQA shows the most degradation, especially after expert merging.
+\end{itemize}
+
+\paragraph{Ablations.}
+Key design choices validated:
+(1) mLSTM + SWA hybrid is strictly better than either component alone;
+(2) sink tokens (4 initial tokens) are critical---removing them degrades quality;
+(3) SWA window size of 512 provides optimal efficiency--coverage balance;
+(4) $\gamma=0.9, \beta=0.1$ outperforms pure KL or pure CE objectives;
+(5) full fine-tuning considerably outperforms LoRA-based PEFT;
+(6) no LayerNorm before output projections preserves student-teacher alignment.
+
+\subsection{Limitations}
+\begin{itemize}
+    \item \textbf{Long-context retrieval}: Synthetic benchmarks (Needle-in-a-Haystack) show clear deficits. The sub-quadratic architecture struggles with precise retrieval from arbitrary positions.
+    \item \textbf{Expert interference}: STEM reasoning degrades after merging domain experts. The independently trained experts interfere during weight-space consolidation.
+    \item \textbf{Serving integration}: The hybrid mLSTM+SWA architecture requires integration into heterogeneous serving frameworks (vLLM, SGLang) not yet optimized for it.
+    \item \textbf{Scale}: Experiments are at the 7--8B scale. Behavior at 70B+ and for Sparse MoE teachers is unknown.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Distilled xLSTM with IndexCache/LookaheadKV for the SWA Component}
+
+\paragraph{Gap.}
+The hybrid xLSTM architecture retains a Sliding Window Attention component with a 512-token window.
+While this is much cheaper than full attention, it still has quadratic cost within the window and produces a local KV cache.
+IndexCache~\cite{indexcache} showed that sparse attention indices can be reused across layers (70--100\% overlap), and LookaheadKV~\cite{lookaheadkv} showed that KV cache eviction can be predicted with learned soft tokens.
+Neither has been applied to the SWA component of a hybrid sub-quadratic architecture.
+
+\paragraph{Approach.}
+Apply LookaheadKV's importance prediction to the SWA component: instead of a fixed 512-token window, let the 32 lookahead tokens predict which positions within a larger window are most important, then retain only the top-$C$ entries.
+This would allow the SWA component to ``see'' a wider context (e.g., 2048 tokens) while retaining only 512 KV entries, improving the long-context retrieval deficit identified as the paper's main weakness.
+IndexCache's cross-layer reuse could further reduce the indexer cost across the hybrid layers.
+
+\paragraph{Feasibility.}
+The SWA component is architecturally identical to standard attention within its window, so LookaheadKV's LoRA modules can be applied directly.
+The mLSTM component already has constant memory, so the optimization targets only the SWA bottleneck.
+Initial experiments could evaluate on Needle-in-a-Haystack at 32K--128K to directly measure the retrieval improvement.
+
+\subsection{RL-Based Expert Refinement Before Merging}
+
+\paragraph{Gap.}
+Stage III's expert merging suffers from interference---STEM reasoning degrades when merged with math/code/chat experts.
+The paper mentions RL-based expert refinement as future work.
+BandPO~\cite{bandpo} demonstrated that probability-aware clipping stabilizes RL training for LLMs, and URLVR~\cite{urlvr} showed that unsupervised RL can scale effectively.
+Applying RL to refine experts before merging could reduce interference by aligning expert representations.
+
+\paragraph{Approach.}
+Before merging, apply a short RL fine-tuning phase to each domain expert using domain-specific reward signals (e.g., math verification for the math expert, code execution for the code expert).
+BandPO's probability-aware clipping would stabilize training on the sub-quadratic architecture, where the policy distribution may differ from standard Transformers.
+Then, instead of uniform weight merging, use a \textbf{task-aware merging} strategy: learn the merging weights $\lambda_i$ via a small validation set that spans all domains, penalizing interference on non-target domains.
+
+\paragraph{Feasibility.}
+Each expert has $\sim$8B parameters, and RL fine-tuning for 1--2B tokens per expert is tractable on a single H100.
+BandPO's codebase is publicly available and could be adapted for the xLSTM architecture.
+The main risk is that RL may amplify distributional differences between experts, making merging harder---the task-aware merging weights would mitigate this.
+
+\subsection{Continual Distillation for Evolving Teachers}
+
+\paragraph{Gap.}
+The current pipeline distills a \emph{fixed} teacher snapshot.
+In practice, foundation models are continuously updated (Llama 3$\rightarrow$3.1$\rightarrow$3.2$\rightarrow$4).
+Each teacher update currently requires re-running the full 5--20B token distillation from scratch.
+The OAKS benchmark~\cite{oaks} highlighted the challenge of adapting to continual knowledge streams; the same challenge applies to distillation when the teacher evolves.
+
+\paragraph{Approach.}
+Develop a \textbf{continual distillation} protocol where the Stage-I hidden-state alignment is performed only on the \emph{changed} layers (identified by weight-space distance between teacher versions), and Stage II uses a replay buffer mixing old and new teacher logits.
+The mLSTM's gated recurrence naturally supports incremental state updates, making it a better substrate for continual adaptation than static linear attention.
+Catastrophic forgetting of previously distilled knowledge can be mitigated via elastic weight consolidation (EWC) applied to the gate parameters.
+
+\paragraph{Feasibility.}
+Stage I is already cheap (655M tokens), and targeting only changed layers would reduce it further.
+The sparse top-256 KL objective enables offline storage of both old and new teacher logits for replay.
+A proof-of-concept could distill Llama 3.1 8B, then incrementally update to a hypothetical Llama 3.2 8B teacher, measuring knowledge retention vs.\ full re-distillation.
+
+\section{Conclusion}
+
+This paper demonstrates that distillation to hybrid sub-quadratic architectures can now achieve \emph{perfect teacher parity} ($\alpha^* = 0.0$) including on generation tasks where prior methods failed.
+The three-stage pipeline---hidden-state alignment, sparse KL distillation, and decentralized expert merging---is both data-efficient (5--20B tokens) and modular.
+The resulting xLSTM students deliver 2--4$\times$ inference speedups with constant memory, enabling generation at contexts where Transformer teachers run OOM.
+
+This paper completes an important triad with our previous reviews: IndexCache and LookaheadKV optimize \emph{within} the Transformer paradigm (reducing indexer and KV cache costs), while xLSTM distillation escapes the quadratic bottleneck entirely by replacing attention with sub-quadratic recurrence.
+The natural synthesis is a hybrid approach: use distilled xLSTM for the bulk of computation, augmented with IndexCache/LookaheadKV-optimized attention windows for the SWA component, achieving the best of both paradigms.
+The extension to RL-refined expert merging and continual distillation for evolving teachers connects directly to our lab's work on RL optimization (BandPO, URLVR) and continual adaptation (OAKS).
+
+\begin{thebibliography}{9}
+\bibitem{xlstm-distill} Hauzenberger, L., Schmidinger, N., Schmied, T., Hartl, A.-R., Stap, D., Hoedt, P.-J., Beck, M., B\"{o}ck, S., Klambauer, G., \& Hochreiter, S. (2026). Effective Distillation to Hybrid xLSTM Architectures. \textit{arXiv preprint arXiv:2603.15590}.
+
+\bibitem{indexcache} Bai, Y., et al. (2026). IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse. \textit{arXiv preprint arXiv:2603.12201}.
+
+\bibitem{lookaheadkv} Ahn, J., et al. (2026). LookaheadKV: Fast and Accurate KV Cache Eviction by Glimpsing into the Future without Generation. \textit{arXiv preprint arXiv:2603.10899}.
+
+\bibitem{bandpo} (2026). BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning. \textit{arXiv preprint arXiv:2603.04918}.
+
+\bibitem{urlvr} (2026). How Far Can Unsupervised RLVR Scale LLM Training? \textit{arXiv preprint arXiv:2603.08660}.
+
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv preprint arXiv:2603.07392}.
+\end{thebibliography}
+
+\end{document}
