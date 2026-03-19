@@ -1,0 +1,230 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review --- March 19, 2026\\
+\large Online Experiential Learning for Language Models}
+\author{Internbot --- Automated Research Review}
+\date{March 19, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report reviews \textbf{Online Experiential Learning (OEL)}~\cite{oel}, a reward-free framework that enables language models to continuously improve from deployment experience.
+Current LLMs are static after training---they cannot learn from real interactions.
+OEL addresses this via a two-stage loop: (1) extract structured experiential knowledge from raw interaction trajectories, then (2) consolidate that knowledge into model weights via on-policy context distillation.
+The on-policy formulation is critical: it prevents catastrophic forgetting (maintaining IF-Eval accuracy at $\sim$70--75\% vs.\ 60--65\% for off-policy), and self-generated knowledge outperforms knowledge from stronger models (31.1\% vs.\ 22.7\% after consolidation).
+Over 2--3 rounds of OEL, models achieve 5--7$\times$ improvement on game tasks.
+We connect this to OAKS~\cite{oaks} (continual knowledge streams) and the xLSTM distillation pipeline~\cite{xlstm-distill} (knowledge transfer via distillation), positioning OEL as the deployment-side complement to pre-training-time continual learning.
+\end{abstract}
+
+\section{Paper Summary}
+
+\subsection{Overview}
+\begin{itemize}
+    \item \textbf{Title:} Online Experiential Learning for Language Models
+    \item \textbf{Authors:} Tianzhu Ye, Li Dong, Qingxiu Dong, Xun Wu, Shaohan Huang, Furu Wei (Microsoft Research)
+    \item \textbf{arXiv:} \href{https://arxiv.org/abs/2603.16856}{2603.16856}
+    \item \textbf{Topics:} Continual learning, lifelong LLM improvement, on-policy distillation
+\end{itemize}
+
+\subsection{Core Problem}
+
+LLMs are trained offline and \textbf{stop improving after deployment}.
+Existing approaches to post-deployment improvement (RLHF, RLAIF) require reward models or human annotations that are expensive and do not scale.
+In real deployment, the server training the model cannot access the user-side environment directly---it only sees raw interaction trajectories, which are noisy and hard to learn from.
+
+The authors identify three specific failures of naive approaches:
+\begin{enumerate}
+    \item \textbf{Raw trajectories are useless for training}: consolidating raw trajectories actually \emph{hurts} performance (7.8\% vs.\ 7.5\% baseline).
+    \item \textbf{Off-policy knowledge causes forgetting}: distilling from a teacher conditioned on experience degrades general capabilities.
+    \item \textbf{Stronger-model knowledge does not transfer}: knowledge extracted from a 4B model gives worse results when consolidated into a 1.7B model than the 1.7B model's own self-extracted knowledge.
+\end{enumerate}
+
+\subsection{Proposed Method}
+
+OEL creates a \textbf{virtuous cycle}: deploy $\rightarrow$ collect experience $\rightarrow$ extract knowledge $\rightarrow$ consolidate into weights $\rightarrow$ redeploy improved model.
+
+\paragraph{Stage 1: Knowledge Extraction.}
+An extraction model (the deployed model itself) processes batches of $n$ interaction trajectories and produces structured experiential knowledge.
+Extraction is \textbf{recursive}: the model conditions on trajectory $\tau_i$ \emph{and} previously accumulated knowledge $e_{i-1}$ to produce new knowledge $e_i'$, which is concatenated: $e_i = [e_{i-1};\, e_i']$.
+This runs for $K\!=\!10$ accumulation rounds.
+
+The extracted knowledge takes the form of high-level strategic principles (e.g., ``axis-aligned convergence principle,'' ``state-dependent decision-making''), not raw move sequences.
+Two formats are supported: structured (prefixed items, 8192 tokens max) and unstructured (free-form, 2048 tokens max).
+
+\paragraph{Stage 2: On-Policy Context Distillation.}
+The extracted knowledge is consolidated into model weights via:
+\[
+\mathcal{L}(\theta) = \mathbb{E}_{x \sim \mathcal{D},\, e \sim \mathcal{C},\, y \sim \pi_\theta(\cdot|x)} \left[ \frac{1}{|y|} \sum_t D_{\mathrm{KL}}\!\left( \pi_\theta(\cdot|x, y_{<t}) \;\|\; \pi_{\mathrm{teacher}}(\cdot|e, x, y_{<t}) \right) \right]
+\]
+Key design choices:
+\begin{itemize}
+    \item \textbf{On-policy sampling}: Responses $y$ are sampled from the student's own distribution $\pi_\theta$, not the teacher's. This is the critical anti-forgetting mechanism.
+    \item \textbf{Reverse KL}: Student $\|$ Teacher direction encourages mode-seeking behavior.
+    \item \textbf{Teacher}: The frozen initial model conditioned on experiential knowledge $e$ in its context window.
+    \item \textbf{Top-256 approximation}: KL computed over only the top-256 vocabulary tokens by student probability, enabling efficient computation.
+\end{itemize}
+
+Training uses 20--100 gradient steps per round with 64 game samples per step (1,280--6,400 total samples per round).
+
+\subsection{Key Results}
+
+\paragraph{Progressive Improvement.}
+Over multiple OEL rounds, models improve dramatically:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model / Task} & \textbf{Round 0} & \textbf{Round 1} & \textbf{Round 2--3} \\
+\midrule
+Qwen3-1.7B / Frozen Lake & $\sim$8\% & $\sim$28\% & $\sim$50\% \\
+Qwen3-4B-Instruct / Sokoban & $\sim$8\% & $\sim$21\% & $\sim$30\% \\
+Qwen3-8B / Frozen Lake & $\sim$11\% & $\sim$48\% & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This represents a 5--7$\times$ improvement from baseline to final round. Models also become more token-efficient: response length drops to $\sim$70\% of initial by Round~3.
+
+\paragraph{Raw Trajectories vs.\ Extracted Knowledge.}
+On Qwen3-4B-Instruct (Sokoban):
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Experience Type} & \textbf{In-Context} & \textbf{After Consolidation} \\
+\midrule
+No experience (baseline) & 7.5\% & --- \\
+Raw trajectories & 10.9\% & 7.8\% ($\downarrow$) \\
+Extracted knowledge & 18.2\% & \textbf{21.4\%} ($\uparrow$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Raw trajectories are not just unhelpful---they are \emph{harmful} for consolidation. The extraction step is essential because it distills strategic principles from noisy interaction data.
+
+\paragraph{On-Policy Consistency.}
+On Qwen3-1.7B (Frozen Lake), whose knowledge is being consolidated matters more than its quality:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Knowledge Source} & \textbf{In-Context} & \textbf{After Consolidation} \\
+\midrule
+From Qwen3-4B (stronger, off-policy) & 18.0\% & 22.7\% \\
+From Qwen3-1.7B (self, on-policy) & 23.8\% & \textbf{31.1\%} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Self-generated knowledge outperforms knowledge from a stronger model by 8.4 percentage points after consolidation. Knowledge ``may encode strategies beyond the smaller model's capabilities.''
+
+\paragraph{Catastrophic Forgetting.}
+On Qwen3-1.7B, measuring IF-Eval (out-of-distribution):
+\begin{itemize}
+    \item \textbf{On-policy OEL}: Maintains $\sim$70--75\% accuracy throughout training.
+    \item \textbf{Off-policy distillation}: Degrades from $\sim$70\% to $\sim$60--65\% over 40 steps.
+\end{itemize}
+On-policy sampling prevents the train-inference distribution mismatch that causes forgetting.
+
+\paragraph{Consolidation Surpasses In-Context Learning.}
+Post-consolidation performance consistently exceeds pre-consolidation in-context performance (e.g., 31.1\% vs.\ 23.8\% for self-knowledge). The distillation process enables generalization beyond what context-augmented inference provides.
+
+\subsection{Limitations}
+\begin{itemize}
+    \item \textbf{Narrow evaluation}: Only two text-based game environments (Frozen Lake 3$\times$3, Sokoban 6$\times$6). Real-world deployment scenarios (coding, dialogue) are untested.
+    \item \textbf{Context window saturation}: As knowledge accumulates, the context window fills up, limiting further extraction.
+    \item \textbf{No RL baselines}: No comparison with RLHF/PPO/DPO, making absolute performance hard to contextualize.
+    \item \textbf{Few rounds tested}: Only 2--3 OEL rounds. Long-term stability over many rounds is unknown.
+    \item \textbf{Self-extraction bottleneck}: Weaker models (1.7B) cannot use previous knowledge during extraction due to capacity constraints.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{OEL for Continual Knowledge Streams (OEL $\times$ OAKS)}
+
+\paragraph{Gap.}
+OAKS~\cite{oaks} benchmarked LLM adaptation to evolving knowledge streams but focused on retrieval-augmented and fine-tuning baselines that suffer from either staleness or forgetting.
+OEL provides a principled consolidation mechanism (on-policy distillation) that preserves general capabilities, but has only been tested on game environments with static rules.
+No work has applied OEL-style experiential learning to the \emph{knowledge adaptation} setting where the underlying facts change over time.
+
+\paragraph{Approach.}
+Replace OEL's game trajectories with OAKS-style knowledge interaction logs: the model is deployed to answer questions about current events, collects trajectories showing where its knowledge is outdated, extracts experiential knowledge about what changed (``entity X was acquired by Y on date Z''), and consolidates via on-policy distillation.
+The key challenge is designing the extraction prompt to separate \emph{factual updates} from \emph{strategic reasoning updates}---OEL currently conflates the two.
+A factual extraction stage could produce structured knowledge triplets, while a reasoning extraction stage produces strategic principles as in the current OEL design.
+
+\paragraph{Feasibility.}
+OEL's consolidation requires only 1,280--6,400 samples per round (20--100 gradient steps), making it lightweight enough for frequent updates as knowledge evolves.
+The OAKS benchmark provides ready-made evaluation with time-stamped knowledge streams.
+The main risk is that factual knowledge may require more precise consolidation than strategic knowledge---the reverse KL objective may not be sharp enough for exact factual recall.
+
+\subsection{OEL with Sub-Quadratic Student Models}
+
+\paragraph{Gap.}
+OEL's on-policy distillation is conceptually similar to the xLSTM distillation pipeline~\cite{xlstm-distill}: both transfer knowledge from a teacher to a student via KL-based objectives.
+However, OEL distills from a \emph{context-augmented teacher} into the \emph{same architecture}, while xLSTM distills from a Transformer teacher into a \emph{sub-quadratic student}.
+No work has explored whether OEL's experiential learning cycle can operate with a sub-quadratic student model, where the constant-memory mLSTM recurrence might naturally support incremental knowledge accumulation.
+
+\paragraph{Approach.}
+Run the OEL loop with an xLSTM-distilled student as the deployed model.
+The mLSTM's gated recurrence provides a natural ``memory'' that could internalize experiential knowledge more efficiently than a Transformer's context window.
+Specifically, test whether the mLSTM student requires fewer OEL rounds to reach the same performance as a Transformer student, since its recurrent state may better consolidate sequential experience.
+The xLSTM's constant-memory generation also means the OEL consolidation step (which generates on-policy rollouts) is faster and cheaper for long interactions.
+
+\paragraph{Feasibility.}
+Both OEL and xLSTM distillation code are available.
+The xLSTM-Llama3.1-8B student achieves teacher parity on generation tasks, so it is a viable starting model for OEL deployment.
+Initial experiments could use the Frozen Lake environment (simple, well-characterized) to compare OEL convergence speed between Transformer and xLSTM students of matched size.
+
+\subsection{RL-Enhanced Experiential Knowledge Extraction}
+
+\paragraph{Gap.}
+OEL's knowledge extraction relies on the deployed model's own summarization ability, which is a bottleneck for weaker models (the 1.7B model cannot even condition on previous knowledge).
+BandPO~\cite{bandpo} showed that probability-aware RL can optimize LLM outputs beyond what supervised objectives achieve.
+Applying RL to \emph{optimize the extraction process itself} could yield higher-quality experiential knowledge, especially for smaller models.
+
+\paragraph{Approach.}
+Train a small, specialized ``extractor'' module (e.g., LoRA adapter on the deployed model) via RL where the reward is the consolidation improvement: $R = \mathrm{PassRate}_{\mathrm{after}} - \mathrm{PassRate}_{\mathrm{before}}$.
+This creates a meta-learning loop: the extractor learns what kind of knowledge statements lead to the largest post-consolidation gains.
+BandPO's probability-aware clipping would stabilize this RL training, since the extractor's output distribution changes dramatically as it learns which knowledge formats consolidate best.
+
+\paragraph{Feasibility.}
+The reward signal (post-consolidation pass rate) requires running the full consolidation pipeline per RL update, which is expensive.
+To make this tractable, use a proxy reward: the in-context performance improvement from the extracted knowledge (which requires no gradient steps, only inference).
+Table~1 shows that in-context performance correlates with post-consolidation performance (18.2\% $\rightarrow$ 21.4\%), validating this proxy.
+The LoRA extractor adds minimal parameters ($<$1\% for 8B models), and the RL training could use GRPO with the pass-rate reward.
+
+\section{Conclusion}
+
+Online Experiential Learning provides the first complete, reward-free framework for continuous LLM improvement from deployment experience.
+Its key insight is that \textbf{structured knowledge extraction is essential}---raw trajectories hurt consolidation---and that \textbf{on-policy consistency matters more than knowledge quality}---self-generated knowledge from a weaker model outperforms knowledge from a stronger model by 37\% after consolidation.
+The on-policy context distillation mechanism cleanly prevents catastrophic forgetting, maintaining general capabilities while internalizing task-specific experience.
+
+This paper fills a critical gap in our review series: while OAKS characterized the \emph{problem} of continual adaptation, OEL provides a \emph{mechanism} for solving it.
+Combined with xLSTM distillation (efficient student architectures) and BandPO (RL optimization), OEL opens a path toward LLM systems that continuously improve from deployment without human annotation or reward models---the ``virtuous cycle'' of experiential learning.
+
+\begin{thebibliography}{9}
+\bibitem{oel} Ye, T., Dong, L., Dong, Q., Wu, X., Huang, S., \& Wei, F. (2026). Online Experiential Learning for Language Models. \textit{arXiv preprint arXiv:2603.16856}.
+
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv preprint arXiv:2603.07392}.
+
+\bibitem{xlstm-distill} Hauzenberger, L., et al. (2026). Effective Distillation to Hybrid xLSTM Architectures. \textit{arXiv preprint arXiv:2603.15590}.
+
+\bibitem{bandpo} (2026). BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning. \textit{arXiv preprint arXiv:2603.04918}.
+\end{thebibliography}
+
+\end{document}
