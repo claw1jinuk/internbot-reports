@@ -1,0 +1,237 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review --- March 20, 2026\\
+\large MetaClaw: Just Talk --- An Agent That Meta-Learns\\and Evolves in the Wild}
+\author{Internbot --- Automated Research Review}
+\date{March 20, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report reviews \textbf{MetaClaw}~\cite{metaclaw}, a continual meta-learning framework for deployed LLM agents that jointly evolves policies and reusable behavioral skills.
+Current agents are static after deployment---they cannot improve from interaction failures.
+MetaClaw operates across two timescales: (1) fast, gradient-free skill synthesis from failure trajectories (seconds, zero downtime), and (2) slow, opportunistic RL policy optimization via cloud LoRA during user-idle windows.
+A skill-generation versioning mechanism prevents catastrophic forgetting by flushing stale data whenever the skill library evolves.
+On MetaClaw-Bench, the full pipeline lifts Kimi-K2.5 from 21.4\% to 40.6\% accuracy with an 8.25$\times$ gain in task completion.
+We connect this to OEL~\cite{oel} (experiential learning from deployment) and OAKS~\cite{oaks} (continual knowledge streams), forming a comprehensive three-paper view of how agents can continuously adapt: OAKS defines the problem, OEL provides reward-free consolidation, and MetaClaw adds structured skill evolution with meta-learning.
+\end{abstract}
+
+\section{Paper Summary}
+
+\subsection{Overview}
+\begin{itemize}
+    \item \textbf{Title:} MetaClaw: Just Talk --- An Agent That Meta-Learns and Evolves in the Wild
+    \item \textbf{Authors:} Peng Xia, Jianwen Chen, Xinyu Yang, Haoqin Tu, Jiaqi Liu, Kaiwen Xiong, Siwei Han, Shi Qiu, Haonian Ji, Yuyin Zhou, Zeyu Zheng, Cihang Xie, Huaxiu Yao (UNC-Chapel Hill, CMU, UCSC, UC Berkeley)
+    \item \textbf{arXiv:} \href{https://arxiv.org/abs/2603.17187}{2603.17187}
+    \item \textbf{Code:} \href{https://github.com/aiming-lab/MetaClaw}{github.com/aiming-lab/MetaClaw}
+    \item \textbf{Topics:} Continual learning for LLM agents, meta-learning, skill evolution
+\end{itemize}
+
+\subsection{Core Problem}
+
+Deployed LLM agents remain \textbf{static after deployment} despite evolving user needs and task distributions.
+Existing approaches treat skill/memory libraries and RL-based policy optimization as isolated mechanisms:
+\begin{itemize}
+    \item Skill-based agents (Reflexion, ExpeL, Mem0) build static artifact stores never coordinated with weight updates.
+    \item RL methods (GRPO, DAPO) optimize fixed policies against fixed reward distributions without addressing \emph{when} to train or \emph{which data remains valid} after behavioral context changes.
+    \item Classical meta-learning (MAML, PEARL) assumes offline task distributions, not online non-stationary LLM agents.
+\end{itemize}
+
+The key challenge: how can a production agent improve from interaction failures \emph{without} interrupting service, suffering catastrophic forgetting, or requiring manual data curation?
+
+\subsection{Proposed Method}
+
+MetaClaw models the agent as $M = (\theta, S)$ where $\theta$ is the base LLM policy and $S$ is an evolving skill library.
+It operates across \textbf{two timescales} with a clean \textbf{support-query data split} borrowed from meta-learning.
+
+\paragraph{Fast Loop: Skill Synthesis (Seconds).}
+When failure trajectories accumulate past a threshold ($|D^{\mathrm{sup}}_g| \geq$ threshold), an LLM evolver $E$ synthesizes new skills:
+\[
+S_{g+1} = S_g \cup E(S_g, D^{\mathrm{sup}}_g)
+\]
+Skills are \textbf{natural-language behavioral directives} (JSON objects with name, description, procedural content, and category) injected into the system prompt.
+Examples: ``backup-before-modify'' (always create .bak files before editing), ``iso8601-timezone-format'' (timestamp standardization).
+
+Skills take effect \textbf{immediately} as system-prompt injections---zero parameter changes, zero downtime.
+Retrieval uses embedding-based cosine similarity to select relevant skills per task.
+
+\paragraph{Slow Loop: Opportunistic RL (Minutes--Hours).}
+Weight updates use \textbf{GRPO} with cloud-hosted LoRA fine-tuning:
+\[
+\theta_{t+1} = \theta_t + \alpha \nabla_\theta \mathbb{E}_{(\tau, \xi, g') \sim B}\left[R\!\left(\pi_\theta(\cdot|\tau, S_{g'})\right)\right]
+\]
+where $B$ is the replay buffer, $R$ is a process reward model (PRM), and only \textbf{query data} (post-adaptation trajectories collected after new skills are active) is eligible for gradient updates.
+
+Training runs are scheduled by the \textbf{Opportunistic Meta-Learning Scheduler (OMLS)}, a background daemon that monitors three idle signals: configured sleep windows, keyboard/mouse inactivity (30-min default), and Google Calendar occupancy.
+Training runs during user absence with zero service interruption.
+
+\paragraph{Skill Generation Versioning (Anti-Forgetting).}
+Each trajectory $\xi_i$ receives a \textbf{generation stamp} $g_i$ corresponding to the skill library version active when it was collected.
+When the skill counter advances from $g$ to $g+1$, \textbf{all samples with version $\leq g$ are flushed} from the RL buffer $B$.
+This prevents stale reward contamination---old trajectories produced under outdated skill contexts would yield invalid gradient signals.
+
+\paragraph{Core Algorithm Loop.}
+For each incoming task $\tau_i$:
+(1) Retrieve relevant skills via embedding similarity;
+(2) Execute policy, collect trajectory;
+(3) Stamp with current generation $g$;
+(4) Route: successes $\rightarrow$ RL buffer, failures $\rightarrow$ support set $D^{\mathrm{sup}}_g$;
+(5) If failures exceed threshold, trigger skill evolution (fast loop);
+(6) Flush stale-versioned samples from buffer;
+(7) If OMLS detects idle window + sufficient query data, run RL updates (slow loop).
+
+\subsection{Key Results}
+
+\paragraph{MetaClaw-Bench.}
+934 questions across 44 simulated workdays with persistent workspace state and progressive difficulty.
+
+\begin{center}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Model} & \textbf{Condition} & \textbf{Part I Acc.} & \textbf{Part I Compl.} & \textbf{Part II Acc.} & \textbf{Part II Compl.} \\
+\midrule
+GPT-5.2 & Baseline & 41.1\% & 14.7\% & 44.9\% & 58.4\% \\
+GPT-5.2 & +Skills & 44.0\% & 17.1\% & 49.1\% & 67.5\% \\
+\midrule
+Kimi-K2.5 & Baseline & 21.4\% & 2.0\% & 21.1\% & 18.2\% \\
+Kimi-K2.5 & +Skills & 28.3\% & 2.0\% & 26.9\% & 33.8\% \\
+Kimi-K2.5 & Full Pipeline & \textbf{40.6\%} & \textbf{16.5\%} & \textbf{39.6\%} & \textbf{51.9\%} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Key findings:
+\begin{itemize}
+    \item Full pipeline: 21.4\% $\rightarrow$ 40.6\% accuracy, \textbf{8.25$\times$ task completion gain} (2.0\% $\rightarrow$ 16.5\%)
+    \item Skills alone: +32.2\% relative accuracy lift for Kimi-K2.5, but completion stays flat (2.0\%)
+    \item Full pipeline brings a weaker model (Kimi-K2.5) near a stronger baseline (GPT-5.2)
+    \item \textbf{Complementary roles}: skills handle ``knowing what to do'' (accuracy), RL handles ``reliably doing it'' (completion)
+\end{itemize}
+
+\paragraph{Cross-Domain Transfer (AutoResearchClaw).}
+Skills synthesized from office tasks transfer to a 23-stage autonomous research pipeline:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Condition} & \textbf{Retry Rate} & \textbf{Refine Cycles} & \textbf{Completion} & \textbf{Robustness} \\
+\midrule
+Baseline & 10.5\% & 2.0 & 18/19 & 0.714 \\
++MetaClaw & \textbf{7.9\%} & \textbf{1.2} & \textbf{19/19} & \textbf{0.845} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+18.3\% robustness improvement with 40\% fewer refine cycles, demonstrating cross-domain skill transfer.
+
+\paragraph{Learning Dynamics.}
+Part II shows a clear inflection around day 8 after sufficient failure data accumulates: file-check completion jumps from $\sim$9\% (days 1--4) to $\sim$55--64\% (days 9--10), mirroring the classic meta-learning inner-loop structure.
+
+\subsection{Limitations}
+\begin{itemize}
+    \item \textbf{No skill pruning}: The library only grows; no mechanism removes outdated or conflicting skills, risking prompt bloat at scale.
+    \item \textbf{Simulated benchmark}: MetaClaw-Bench uses authored simulations, not real user data. Production transfer is unvalidated.
+    \item \textbf{Missing RL-only ablation}: No experiment isolates RL contribution without the skill library.
+    \item \textbf{Hyperparameter opacity}: LoRA rank/alpha, learning rates, PRM architecture, and failure thresholds are not reported.
+    \item \textbf{Limited model coverage}: Only GPT-5.2 and Kimi-K2.5 tested. Open-weight model behavior is unknown.
+    \item \textbf{OMLS generalizability}: Idle detection relies on Google Calendar and keyboard monitoring, limiting deployment to specific desktop environments.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{MetaClaw $\times$ OEL: Unifying Skill Evolution with Experiential Consolidation}
+
+\paragraph{Gap.}
+MetaClaw and OEL~\cite{oel} both enable continuous agent improvement from deployment experience, but via complementary mechanisms: MetaClaw synthesizes \emph{explicit} natural-language skills (injected into the prompt) and performs RL on query data, while OEL extracts \emph{implicit} experiential knowledge and consolidates it via on-policy context distillation.
+Neither leverages the other's strength: MetaClaw's skills are never internalized into weights (they remain as prompt injections), and OEL's consolidated knowledge lacks the structured, retrievable format of skills.
+
+\paragraph{Approach.}
+Design a three-stage adaptation loop:
+(1) MetaClaw's fast loop synthesizes skills from failures;
+(2) OEL's extraction stage converts accumulated skills into implicit experiential knowledge suitable for weight consolidation;
+(3) OEL's on-policy context distillation internalizes the knowledge into model parameters, effectively ``compiling'' prompt-based skills into the weights.
+This would resolve MetaClaw's prompt-bloat limitation (skills grow indefinitely in the prompt) by periodically distilling mature skills into weights and removing them from the prompt.
+The generation-versioning mechanism ensures only post-distillation trajectories enter the RL buffer.
+
+\paragraph{Feasibility.}
+Both systems use similar infrastructure (LLM-based extraction, LoRA-based training).
+OEL's consolidation requires only 1,280--6,400 samples per round, which fits within MetaClaw's OMLS idle windows.
+A proof-of-concept could run MetaClaw for 10 days to accumulate a skill library, then apply OEL consolidation to internalize the top-$k$ most-retrieved skills.
+Success metric: maintained accuracy after skill removal from the prompt.
+
+\subsection{Continual Skill Evolution on Knowledge Streams (MetaClaw $\times$ OAKS)}
+
+\paragraph{Gap.}
+MetaClaw's skills encode \emph{procedural} knowledge (how to do things), but OAKS~\cite{oaks} showed that deployed agents also face \emph{factual} knowledge drift (what is true changes over time).
+MetaClaw's generation-versioning handles behavioral context shifts but does not address the case where a skill becomes factually incorrect because the world changed (e.g., an API endpoint moves, a regulation updates).
+OAKS benchmarks this factual drift but offers no mechanism for skill-level adaptation.
+
+\paragraph{Approach.}
+Extend MetaClaw's skill library with \textbf{temporal validity metadata}: each skill gets a creation timestamp, a ``last validated'' timestamp, and a confidence score.
+When the agent encounters a failure that matches a previously-reliable skill, trigger a \textbf{skill revision} (not just addition) step where the evolver $E$ is given both the skill and the failure trajectory to produce an updated version.
+The OAKS time-stamped knowledge stream provides a natural evaluation: measure skill validity decay over time and the system's ability to self-correct.
+Confidence scores decay with time and reset on successful validation, enabling automatic retirement of stale skills.
+
+\paragraph{Feasibility.}
+The skill revision step reuses the existing evolver $E$ with a modified prompt (``revise this skill given this failure'' vs.\ ``synthesize a new skill'').
+OAKS provides ready-made evaluation with knowledge that changes over 6-month horizons.
+The main challenge is distinguishing ``skill is wrong because the world changed'' from ``skill is right but the task is harder''---the temporal metadata and failure analysis would need to separate these cases.
+
+\subsection{Efficient Skill-Augmented RL via Sub-Quadratic Agents}
+
+\paragraph{Gap.}
+MetaClaw's slow-loop RL operates on a standard Transformer LLM, where generating on-policy trajectories for GRPO is bottlenecked by quadratic attention and growing KV caches during long multi-turn interactions.
+The xLSTM distillation pipeline~\cite{xlstm-distill} produces sub-quadratic students with constant-memory generation, and LookaheadKV~\cite{lookaheadkv} reduces KV cache costs.
+Neither has been applied to the \emph{RL fine-tuning} setting where on-policy rollouts are the primary cost driver.
+
+\paragraph{Approach.}
+Replace MetaClaw's base LLM with an xLSTM-distilled student for the slow-loop RL.
+The constant-memory mLSTM recurrence means on-policy trajectory generation during GRPO is $\sim$2--4$\times$ faster and uses $\sim$50\% less memory, enabling more RL updates within each OMLS idle window.
+LookaheadKV could further optimize the SWA component of the hybrid architecture during the multi-turn interactions typical of agent tasks.
+The skill injection (system prompt) would interact with the mLSTM's gated recurrence---investigating whether skills are better encoded through the recurrent state (persistent) vs.\ the SWA window (local) could reveal architectural preferences for different skill types.
+
+\paragraph{Feasibility.}
+xLSTM-Llama3.1-8B achieves teacher parity on generation tasks with 2--4$\times$ speedup, making it a viable replacement.
+MetaClaw's LoRA-based RL training is architecture-agnostic and should work with the xLSTM hybrid.
+Initial experiments could measure the number of GRPO steps completable within a fixed idle window (e.g., 2 hours) for Transformer vs.\ xLSTM backends, directly quantifying the efficiency gain for opportunistic training.
+
+\section{Conclusion}
+
+MetaClaw introduces the first framework that \emph{jointly} evolves behavioral skills and policy parameters for deployed LLM agents, operating across two timescales with clean meta-learning-inspired data separation.
+The fast skill synthesis loop provides immediate adaptation (zero downtime, zero parameter changes), while the slow RL loop internalizes reliable behaviors during idle windows.
+The generation-versioning mechanism elegantly prevents catastrophic forgetting by ensuring gradient signals only come from trajectories collected under the current behavioral context.
+
+This paper completes a three-part narrative on continual agent adaptation in our review series:
+\textbf{OAKS} defines the problem (knowledge streams evolve, agents must keep up);
+\textbf{OEL} provides a reward-free consolidation mechanism (extract and internalize experiential knowledge);
+\textbf{MetaClaw} adds structured skill evolution with meta-learning (two-timescale adaptation with generation versioning).
+Together, they outline a comprehensive roadmap for self-improving LLM agents that continuously adapt from deployment without human annotation, reward models, or service interruption.
+
+\begin{thebibliography}{9}
+\bibitem{metaclaw} Xia, P., Chen, J., Yang, X., Tu, H., Liu, J., Xiong, K., Han, S., Qiu, S., Ji, H., Zhou, Y., Zheng, Z., Xie, C., \& Yao, H. (2026). MetaClaw: Just Talk --- An Agent That Meta-Learns and Evolves in the Wild. \textit{arXiv preprint arXiv:2603.17187}.
+
+\bibitem{oel} Ye, T., Dong, L., Dong, Q., Wu, X., Huang, S., \& Wei, F. (2026). Online Experiential Learning for Language Models. \textit{arXiv preprint arXiv:2603.16856}.
+
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv preprint arXiv:2603.07392}.
+
+\bibitem{xlstm-distill} Hauzenberger, L., et al. (2026). Effective Distillation to Hybrid xLSTM Architectures. \textit{arXiv preprint arXiv:2603.15590}.
+
+\bibitem{lookaheadkv} Ahn, J., et al. (2026). LookaheadKV: Fast and Accurate KV Cache Eviction by Glimpsing into the Future without Generation. \textit{arXiv preprint arXiv:2603.10899}.
+\end{thebibliography}
+
+\end{document}
