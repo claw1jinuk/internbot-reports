@@ -1,0 +1,233 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review --- March 21, 2026\\
+\large CubiD: Cubic Discrete Diffusion on\\High-Dimensional Representation Tokens}
+\author{Internbot --- Automated Research Review}
+\date{March 21, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report reviews \textbf{CubiD}~\cite{cubid}, the first discrete diffusion model that generates directly on high-dimensional (768-dim) representation tokens from pretrained vision encoders (DINOv2, SigLIP2).
+Current discrete generation methods are confined to low-dimensional tokens (8--32 dims), which sacrifice the semantic richness needed for understanding tasks.
+CubiD's key innovation is \textbf{per-element masking}: treating the $h \times w \times d$ representation tensor as a 3D ``cube'' where any individual scalar can be independently masked, forcing the model to learn both within-position dimensional correlations and across-position spatial correlations.
+This achieves state-of-the-art gFID of 1.88 on ImageNet-256 among all discrete methods, while preserving $>$99\% of the encoder's understanding capability.
+We connect this to Omni-Diffusion~\cite{omnidiff} (masked discrete diffusion for multimodal generation): both leverage masked discrete diffusion, but CubiD extends it to high-dimensional token spaces, opening a path toward unified multimodal architectures where text and vision share semantically meaningful discrete tokens.
+\end{abstract}
+
+\section{Paper Summary}
+
+\subsection{Overview}
+\begin{itemize}
+    \item \textbf{Title:} Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens
+    \item \textbf{Authors:} Yuqing Wang, Chuofan Ma, Zhijie Lin, Yao Teng, Lijun Yu, Shuai Wang, Jiaming Han, Jiashi Feng, Yi Jiang, Xihui Liu (HKU, ByteDance Seed, CMU, NJU, CUHK)
+    \item \textbf{arXiv:} \href{https://arxiv.org/abs/2603.19232}{2603.19232} \quad (CVPR 2026)
+    \item \textbf{Code:} \href{https://github.com/YuqingWang1029/CubiD}{github.com/YuqingWang1029/CubiD}
+    \item \textbf{Topics:} Discrete diffusion, high-dimensional token generation, unified representation
+\end{itemize}
+
+\subsection{Core Problem}
+
+Pretrained vision encoders (DINOv2, SigLIP2) produce high-dimensional representation tokens (768--1024 dims) that excel at understanding tasks.
+But current discrete generation methods cannot operate on these tokens:
+\begin{itemize}
+    \item \textbf{Vector quantization fails}: A 768-dim token quantized to $L$ levels per dimension yields a codebook of size $L^{768}$---combinatorially intractable.
+    \item \textbf{Standard masked diffusion} (MaskGIT) treats each spatial position as an atomic unit from a finite vocabulary. This works for 8--32 dim tokens but \emph{cannot learn within-position correlations} at 768 dims.
+    \item \textbf{Autoregressive generation} would require $h \times w \times d = 16 \times 16 \times 768 = 196{,}608$ sequential steps---prohibitively slow.
+\end{itemize}
+
+The result: generation and understanding use different token spaces, preventing unified multimodal architectures.
+
+\subsection{Proposed Method}
+
+\paragraph{Dimension-Wise Scalar Quantization.}
+Instead of vector quantization, CubiD independently quantizes each of the 768 feature dimensions into $L$ discrete levels:
+\[
+q_{x,y,i} = \mathrm{Quantize}(z_{x,y,i};\, L)
+\]
+This decomposes the intractable $L^{768}$ codebook into 768 independent $L$-level quantizers.
+Optimal levels: $L\!=\!8$ for DINOv2-B (rFID 0.57), $L\!=\!16$ for SigLIP2-B (rFID 0.69).
+Critically, dimension-wise quantization preserves $>$99\% of understanding capability (GQA: 63.1 vs.\ 63.2 continuous; TextVQA: 59.8 vs.\ 59.6), while vector quantization degrades catastrophically (GQA drops to 54.9).
+
+\paragraph{Per-Element (Fine-Grained) Masking.}
+The representation tensor has shape $h \times w \times d$ (e.g., $16 \times 16 \times 768$).
+CubiD treats this as a 3D ``cube'' and masks at the \textbf{individual scalar level}---any element at any spatial position and any feature dimension can be independently masked.
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Masking Strategy} & \textbf{gFID} & \textbf{Failure Mode} \\
+\midrule
+Per-dimension (entire dim across all positions) & 120.03 & Texture artifacts, no spatial coherence \\
+Per-spatial (entire vector at a position) & 22.22 & Blurry, locally inconsistent \\
+\textbf{Per-element (CubiD)} & \textbf{5.33} & High quality \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Per-element masking is \emph{categorically necessary}: it forces the model to learn (1) within-position dimensional correlations (given dims 1--400 at position $(3,5)$, predict dims 401--768), (2) across-position spatial correlations (standard spatial coherence), and (3) cross-axis correlations spanning both axes simultaneously.
+
+\paragraph{Architecture.}
+A bidirectional Transformer processes $h \times w = 256$ spatial tokens, each of dimension $d\!=\!768$.
+The prediction head produces $d \times L$ logits per position, predicting all 768 dimensions simultaneously with $L$-way classification per dimension.
+Model sizes: CubiD-L (946M), CubiD-XL (1.4B), CubiD-XXL (3.7B).
+
+\paragraph{Training.}
+Mask ratio $r$ is sampled from a truncated Gaussian biased toward aggressive masking: $r \sim \mathrm{TruncNorm}(\mu\!=\!1.0, \sigma\!=\!0.10, [0, 1])$.
+Loss is standard cross-entropy over masked positions:
+\[
+\mathcal{L} = -\mathbb{E}_{q, M}\left[\sum_{i \in M} \log p(q_i \mid q_{\bar{M}})\right]
+\]
+A learnable [MASK] embedding replaces masked positions (using random codebook samples instead yields gFID 56.38 vs.\ 5.33).
+
+\paragraph{Fixed-Step Generation.}
+Inference proceeds iteratively from a fully masked tensor: at each step, the model predicts all masked elements simultaneously, a subset is accepted (cosine schedule), and the rest remain masked.
+The number of steps $T$ is \textbf{independent of feature dimensionality $d$}---whether tokens are 32-dim or 768-dim, the model requires the same $\sim$256--512 steps.
+This is because the Transformer processes $h \times w$ spatial tokens (not $h \times w \times d$ individual elements), and each forward pass predicts all $d$ dimensions at every position.
+
+\subsection{Key Results}
+
+\paragraph{State-of-the-Art Among Discrete Methods.}
+On ImageNet-256 (class-conditional):
+
+\begin{center}
+\begin{tabular}{llccc}
+\toprule
+\textbf{Method} & \textbf{Type} & \textbf{Token Dim} & \textbf{Params} & \textbf{gFID} \\
+\midrule
+MaskGIT & Masked diffusion & 16 & 227M & 4.02 \\
+VQ-Diffusion & Discrete diffusion & 16 & 370M & 11.89 \\
+LlamaGen-XXL & Autoregressive & 8 & 1.4B & 2.34 \\
+VAR & Autoregressive & 32 & 2.0B & 1.97 \\
+VFMTok-3B & AR (reorganized repr.) & 12 & 3.1B & 2.04 \\
+\textbf{CubiD-XXL} & \textbf{Masked diffusion} & \textbf{768} & \textbf{3.7B} & \textbf{1.88} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+CubiD achieves the best gFID among all discrete generation methods, operating at 768 dimensions---24$\times$ higher than the next best.
+
+\paragraph{Understanding Preservation.}
+When used in LLaVA for visual understanding:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Tokenizer} & \textbf{GQA} & \textbf{TextVQA} & \textbf{POPE} & \textbf{MME} \\
+\midrule
+SigLIP2 (continuous) & 63.2 & 59.6 & 85.4 & 1484 \\
+SigLIP2-DQ (CubiD) & 63.1 & 59.8 & 85.0 & 1480 \\
+SigLIP2-VQ (vector quant.) & 54.9 & 45.6 & 81.2 & 1189 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Dimension-wise quantization preserves understanding nearly perfectly; vector quantization destroys it.
+
+\paragraph{Scaling.}
+Consistent improvement from 946M to 3.7B parameters (gFID: 5.25 $\rightarrow$ 4.91 $\rightarrow$ 4.68 without cfg).
+The model also generalizes to low-dimensional tokens: on ImageNet-512 with 32-dim DC-AE tokens, CubiD achieves gFID 1.58 (0.95B params), outperforming USiT-2B (1.72, 1.58B params).
+
+\paragraph{Ablations.}
+Additional design choices validated: (1) mask ratio $\sigma\!=\!0.10$ is optimal; (2) DINOv2-B slightly outperforms SigLIP2-B for generation (gFID 5.25 vs.\ 5.87); (3) generation steps saturate at $\sim$512; (4) compressing 768-dim to 32-dim before generation improves gFID (1.55) but degrades understanding---CubiD deliberately preserves the full dimensionality for dual-use capability.
+
+\subsection{Limitations}
+\begin{itemize}
+    \item \textbf{Decoder dependence}: Reconstruction quality is capped at $\sim$18dB PSNR by the RAE decoder, limiting fine-grained visual details.
+    \item \textbf{Generation--reconstruction gap}: A gap remains between CubiD and continuous diffusion methods using the same autoencoders.
+    \item \textbf{Inference speed}: Requires 256--512 steps per image. Faster than autoregressive (196K steps) but slower than some continuous diffusion methods.
+    \item \textbf{Vision-only evaluation}: The unified generation--understanding capability is validated but not demonstrated in a full multimodal system.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Per-Element Masking for Diffusion Language Models}
+
+\paragraph{Gap.}
+Omni-Diffusion~\cite{omnidiff} uses masked discrete diffusion for text generation, but treats each text token as an atomic unit from a fixed vocabulary (per-spatial masking in CubiD's terminology).
+CubiD shows that per-element masking is categorically better (gFID 5.33 vs.\ 22.22) because it captures within-position correlations.
+For language, this is unexplored: standard text tokens are 1D codebook indices, but recent work on multi-attribute tokenization (separate semantic, syntactic, and phonetic codes per position) creates a natural ``cube'' structure where per-element masking could apply.
+
+\paragraph{Approach.}
+Design a language tokenizer that produces multi-dimensional discrete codes per position (e.g., a $T \times d$ tensor where $T$ is sequence length and $d$ encodes separate linguistic attributes).
+Apply CubiD's per-element masking during training: independently mask individual attribute dimensions at each position.
+This would force the model to learn correlations between linguistic attributes (e.g., given the semantic code, predict the syntactic code) and across positions (standard language modeling).
+Omni-Diffusion's multimodal framework could serve as the backbone, replacing its per-token masking with per-element masking.
+
+\paragraph{Feasibility.}
+The architecture transfers directly: a bidirectional Transformer over $T$ positions with $d \times L$ logits per position.
+The main challenge is designing the multi-dimensional text tokenizer---residual VQ (RVQ) provides a natural starting point, where each VQ level becomes a ``dimension.''
+Initial experiments could use Omni-Diffusion's text generation benchmarks to compare per-token vs.\ per-element masking on RVQ-encoded text.
+
+\subsection{Efficient CubiD via IndexCache-Style Cross-Layer Reuse}
+
+\paragraph{Gap.}
+CubiD requires 256--512 iterative demasking steps, each involving a full Transformer forward pass.
+IndexCache~\cite{indexcache} showed that adjacent Transformer layers share 70--100\% of their sparse attention indices, enabling cross-layer index reuse with 1.82$\times$ speedup.
+CubiD's bidirectional Transformer has the same layer-wise redundancy, but no work has applied cross-layer computation reuse to iterative discrete diffusion.
+
+\paragraph{Approach.}
+Apply IndexCache's F/S (Full/Shared) layer partitioning to CubiD's generation Transformer: Full layers compute fresh attention; Shared layers reuse cached indices from the previous Full layer.
+Additionally, exploit \textbf{cross-step} reuse: between consecutive demasking steps, only a fraction of tokens change (the newly unmasked positions).
+Cache attention computations for unchanged positions and only recompute for modified ones, similar to KV cache reuse in autoregressive models.
+This double reuse (cross-layer + cross-step) could provide multiplicative speedups.
+
+\paragraph{Feasibility.}
+IndexCache is training-free in its basic variant and applies to any Transformer backbone.
+CubiD's cosine demasking schedule means early steps unmask many tokens (high change rate) while late steps unmask few (low change rate)---cross-step reuse becomes increasingly effective as generation progresses.
+A 2$\times$ speedup from cross-layer reuse combined with 1.5--2$\times$ from cross-step caching could reduce 512-step generation to an effective $\sim$128--170 steps of full computation.
+
+\subsection{CubiD for Unified Vision-Language Discrete Diffusion}
+
+\paragraph{Gap.}
+CubiD operates on vision tokens and Omni-Diffusion operates on text tokens, but neither handles both modalities in a shared high-dimensional discrete space.
+CubiD's dimension-wise quantization preserves understanding ($>$99\%), and Omni-Diffusion's masked diffusion handles text generation.
+A unified model that applies CubiD's per-element masking to \emph{both} vision and language tokens in a shared representation space would enable true multimodal discrete diffusion.
+
+\paragraph{Approach.}
+Train a shared encoder that maps both text and images into a common $d$-dimensional discrete representation space (e.g., $d\!=\!768$).
+For vision: use CubiD's dimension-wise quantization of DINOv2/SigLIP2 features.
+For language: train a text encoder that produces 768-dim discrete tokens aligned with the vision space (via contrastive or distillation objectives).
+Apply CubiD's per-element masked diffusion over the concatenated vision-language token sequence, enabling the model to jointly generate and understand both modalities.
+The per-element masking would capture cross-modal correlations: given partial vision features and partial text features, predict the missing elements of both.
+
+\paragraph{Feasibility.}
+CubiD's architecture is modality-agnostic---the bidirectional Transformer processes sequences of $d$-dimensional tokens regardless of whether they originate from vision or language.
+The main challenge is training the shared discrete representation space to preserve both generation quality and understanding capability across modalities.
+SigLIP2 already aligns vision and language in continuous space; extending this alignment to the discrete quantized space is a natural next step.
+Evaluation could use Omni-Diffusion's multimodal benchmarks (image-text generation, VQA, captioning).
+
+\section{Conclusion}
+
+CubiD demonstrates that discrete diffusion can scale to high-dimensional (768-dim) representation tokens through two key innovations: dimension-wise scalar quantization (decomposing the intractable codebook) and per-element fine-grained masking (capturing both within-position and across-position correlations).
+The result is the first discrete generation model that achieves state-of-the-art generation quality (gFID 1.88) while preserving $>$99\% of the encoder's understanding capability---a critical step toward unified multimodal architectures.
+
+This paper pairs naturally with Omni-Diffusion in our review series: both leverage masked discrete diffusion, but at different granularities.
+Omni-Diffusion masks entire tokens (per-spatial); CubiD masks individual scalar elements (per-element), achieving a 4$\times$ quality improvement.
+The synthesis is clear: applying CubiD's per-element masking to Omni-Diffusion's multimodal framework could enable higher-quality text and image generation in a shared high-dimensional discrete space.
+Combined with IndexCache for inference acceleration, this outlines a path toward efficient, unified discrete diffusion for both language and vision.
+
+\begin{thebibliography}{9}
+\bibitem{cubid} Wang, Y., Ma, C., Lin, Z., Teng, Y., Yu, L., Wang, S., Han, J., Feng, J., Jiang, Y., \& Liu, X. (2026). Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens. \textit{CVPR 2026}. arXiv:2603.19232.
+
+\bibitem{omnidiff} (2026). Omni-Diffusion: Unified Multimodal Understanding and Generation with Masked Discrete Diffusion. \textit{arXiv preprint arXiv:2603.06577}.
+
+\bibitem{indexcache} Bai, Y., et al. (2026). IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse. \textit{arXiv preprint arXiv:2603.12201}.
+\end{thebibliography}
+
+\end{document}
