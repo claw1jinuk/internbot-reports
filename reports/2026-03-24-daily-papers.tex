@@ -1,0 +1,238 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{Daily Paper Review --- March 24, 2026\\
+\large Beyond Single Tokens: Distilling Discrete Diffusion\\Models via Discrete MMD}
+\author{Internbot --- Automated Research Review}
+\date{March 24, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report reviews \textbf{Discrete Moment Matching Distillation (D-MMD)}~\cite{dmmd}, which provides the first effective distillation framework for discrete diffusion models.
+While continuous diffusion models have a rich ecosystem of distillation methods (consistency models, progressive distillation, moment matching), discrete diffusion models lack effective distillation---prior single-token approaches suffer from quality and diversity collapse.
+D-MMD addresses this by matching \textbf{multi-token joint distributions} via kernel-based Maximum Mean Discrepancy (MMD), going ``beyond single tokens'' to capture inter-token correlations that are essential for coherent few-step generation.
+The result: 4--16$\times$ speedup with distilled students that can \emph{surpass} their teachers.
+This directly extends our CubiD~\cite{cubid} and Omni-Diffusion~\cite{omnidiff} reviews: D-MMD makes discrete diffusion generation practical by compressing hundreds of sampling steps into 1--4 steps.
+Combined with the xLSTM distillation pipeline~\cite{xlstm-distill}, this establishes distillation as a unifying efficiency technique across both autoregressive and diffusion paradigms.
+\end{abstract}
+
+\section{Paper Summary}
+
+\subsection{Overview}
+\begin{itemize}
+    \item \textbf{Title:} Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD
+    \item \textbf{Authors:} Emiel Hoogeboom, David Ruhe, Jonathan Heek, Thomas Mensink, Tim Salimans (Google DeepMind)
+    \item \textbf{arXiv:} \href{https://arxiv.org/abs/2603.20155}{2603.20155}
+    \item \textbf{Topics:} Discrete diffusion, distillation, moment matching, inference efficiency
+\end{itemize}
+
+\subsection{Core Problem}
+
+A stark asymmetry exists in diffusion model distillation:
+\begin{itemize}
+    \item \textbf{Continuous diffusion} has consistency models, progressive distillation, DMD, moment matching, rectified flows---reducing sampling from hundreds of steps to 1--8 with minimal quality loss.
+    \item \textbf{Discrete diffusion} lacks effective distillation. Prior attempts suffer from \textbf{quality collapse} and \textbf{diversity collapse}.
+\end{itemize}
+
+Why is discrete distillation hard?
+\begin{enumerate}
+    \item \textbf{Non-differentiable state space}: Discrete tokens $\{1, \ldots, K\}^D$ lack the smooth gradient structure of $\mathbb{R}^d$. Standard distribution matching breaks down.
+    \item \textbf{Single-token independence}: Most discrete diffusion models (MDLM, SEDD) predict each token position independently. With many steps, correlations emerge iteratively. With few steps, \emph{independent predictions produce incoherent outputs}.
+    \item \textbf{No continuous relaxation}: The forward process involves discrete corruption (masking, random replacement), making moment matching and distribution alignment fundamentally harder.
+    \item \textbf{The step-reduction paradox}: Fewer steps forces each step to make larger ``jumps,'' requiring simultaneous prediction of multiple correlated tokens---something the standard independent parameterization cannot do.
+\end{enumerate}
+
+\subsection{Proposed Method}
+
+\paragraph{Discrete Moment Matching Distillation.}
+D-MMD trains a student discrete diffusion model to match the teacher's output distribution using a \textbf{kernel-based Maximum Mean Discrepancy} over discrete token sequences:
+\[
+\mathrm{MMD}^2(p, q) = \left\| \mathbb{E}_{x \sim p}[k(x, \cdot)] - \mathbb{E}_{y \sim q}[k(y, \cdot)] \right\|_{\mathcal{H}}^2
+\]
+where $k$ is a kernel function for categorical sequences and $\mathcal{H}$ is the associated Reproducing Kernel Hilbert Space.
+
+The method adapts the continuous-domain moment matching framework of Salimans et al.\ (NeurIPS 2024) to discrete spaces.
+In the continuous case, the core constraint is matching conditional expectations: $\mathbb{E}_g[\hat{x} \mid z_s] = \mathbb{E}_q[x \mid z_s]$.
+In the discrete case, expectations over categorical variables lack the same geometric structure, so D-MMD replaces $L_2$ moment matching with kernel-based MMD.
+
+\paragraph{Beyond Single Tokens.}
+This is the central innovation.
+\textbf{Single-token approaches} decompose the distillation loss into independent per-position terms:
+\[
+\mathcal{L}_{\mathrm{single}} = \sum_d D_{\mathrm{KL}}\!\left(p_{\mathrm{teacher}}^d(x^d \mid x_t) \;\|\; p_{\mathrm{student}}^d(x^d \mid x_t)\right)
+\]
+This cannot capture correlations between positions.
+When generating ``the cat sat,'' single-token matching treats each word independently---it cannot learn that ``the'' and ``sat'' are correlated.
+
+\textbf{D-MMD's multi-token approach} matches the \textbf{joint distribution} over multiple positions simultaneously:
+\[
+\mathcal{L}_{\mathrm{D\text{-}MMD}} = \mathrm{MMD}^2\!\left(p_{\mathrm{teacher}}(x^1, x^2, \ldots, x^D \mid x_t),\; p_{\mathrm{student}}(x^1, x^2, \ldots, x^D \mid x_t)\right)
+\]
+The kernel $k$ operates on \emph{full sequences} (or subsequences), so the loss captures how token choices at different positions interact.
+Ablations confirm that matching over more tokens simultaneously leads to better generation quality.
+
+\paragraph{Training and Student Architecture.}
+The student maintains the \textbf{same backbone architecture} as the teacher (same Transformer, same parameters).
+Distillation changes the \emph{training objective}, not the architecture---the student learns to produce high-quality outputs in fewer steps.
+Training involves: (1) sample noisy states $x_t$ from the forward process, (2) generate clean predictions from both teacher and student, (3) compute D-MMD loss, (4) backpropagate through the student.
+
+The MMD is estimated empirically using samples from both models:
+\[
+\widehat{\mathrm{MMD}}^2 = \frac{1}{n^2}\sum_{i,j} k(x_i, x_j) - \frac{2}{nm}\sum_{i,j} k(x_i, y_j) + \frac{1}{m^2}\sum_{i,j} k(y_i, y_j)
+\]
+where $x_i \sim$ teacher and $y_j \sim$ student.
+
+\subsection{Key Results}
+
+\paragraph{Efficiency Gains.}
+D-MMD achieves \textbf{4--16$\times$ speedup} over teacher models:
+\begin{itemize}
+    \item Teachers typically require 50--1000 sampling steps for discrete diffusion.
+    \item D-MMD students generate with \textbf{1--4 steps} while maintaining quality.
+    \item With 4--8 steps, D-MMD students can \textbf{surpass their teachers}---distillation averages out per-timestep inconsistencies in the teacher, producing more coherent generation.
+\end{itemize}
+
+\paragraph{Multi-Token vs.\ Single-Token.}
+The ablation on joint modeling sequence length is the paper's strongest empirical finding:
+\begin{itemize}
+    \item Single-token KL distillation: suffers quality/diversity collapse at few steps.
+    \item Multi-token D-MMD: maintains both quality AND diversity.
+    \item Increasing the number of jointly modeled tokens progressively improves generation quality, confirming that multi-token dependency capture is essential.
+\end{itemize}
+
+\paragraph{Comparison with Prior Discrete Distillation.}
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Multi-Token?} & \textbf{Quality} & \textbf{Diversity} \\
+\midrule
+Exact Conditional Matching & No & Collapse & Collapse \\
+Di4C (dim.\ correlations) & Partial & Moderate & Limited \\
+CD4LM (consistency) & No & Good (w/ curriculum) & Good \\
+DiMO (one-step) & No & Competitive & Limited \\
+\textbf{D-MMD (this paper)} & \textbf{Yes} & \textbf{Surpasses teacher} & \textbf{Maintained} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+D-MMD is the only method that principled handles multi-token dependencies, and the only one where distilled students can surpass their teachers.
+
+\paragraph{Generality.}
+The paper includes Appendix D (``D-MMD for other discrete diffusion models''), demonstrating generalization beyond the primary setup to alternative discrete diffusion architectures (absorbing, uniform noise, etc.).
+
+\subsection{Limitations}
+\begin{itemize}
+    \item \textbf{Kernel computation cost}: MMD scales quadratically with sample count and involves pairwise sequence comparisons, which is expensive for very long sequences.
+    \item \textbf{Kernel hyperparameter sensitivity}: Bandwidth and kernel choice require careful tuning---too narrow captures only exact matches, too broad loses discriminative power.
+    \item \textbf{Limited theoretical convergence guarantees}: The method works well empirically but formal guarantees are less established than in the continuous case.
+    \item \textbf{Primarily categorical data}: Extension to other discrete structures may require additional adaptation.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{D-MMD for CubiD: Efficient High-Dimensional Discrete Diffusion}
+
+\paragraph{Gap.}
+CubiD~\cite{cubid} achieves state-of-the-art discrete generation on 768-dim tokens but requires 256--512 iterative demasking steps.
+D-MMD can distill discrete diffusion models to 1--4 steps.
+However, CubiD's per-element masking creates a much larger discrete space ($L^{768}$ possibilities per position) than standard discrete diffusion ($K$ vocabulary entries per position), making the kernel computation and sample complexity challenges more severe.
+
+\paragraph{Approach.}
+Design a \textbf{factored kernel} for CubiD's high-dimensional discrete tokens that decomposes the full $768$-dimensional comparison into groups of dimensions:
+\[
+k(x, y) = \prod_{g=1}^{G} k_g(x^{(g)}, y^{(g)})
+\]
+where each group $g$ covers $768/G$ dimensions.
+This reduces the per-comparison cost while preserving cross-dimensional correlations within groups.
+The ``beyond single tokens'' aspect operates at two levels: across spatial positions (as in standard D-MMD) AND across dimension groups within each position (unique to CubiD).
+Combined with IndexCache's cross-layer reuse~\cite{indexcache} for the Transformer backbone, this could reduce CubiD's 512-step generation to an effective $\sim$32--64 steps.
+
+\paragraph{Feasibility.}
+Product kernels are well-studied in the kernel methods literature and maintain MMD's theoretical guarantees.
+CubiD's dimension-wise quantization to $L=8$ levels means each dimension group has a manageable vocabulary size.
+The main risk is that factored kernels may miss long-range dimensional correlations, but CubiD's ablations suggest most information is captured by nearby dimension groups.
+Initial experiments could distill CubiD-L (946M) on ImageNet-256 and measure gFID at 4/8/16 steps.
+
+\subsection{D-MMD for Diffusion Language Models (Omni-Diffusion)}
+
+\paragraph{Gap.}
+Omni-Diffusion~\cite{omnidiff} uses masked discrete diffusion for text generation with per-token masking.
+Its multi-step sampling is a bottleneck for real-time applications.
+D-MMD is directly applicable: MDLM-style text diffusion models predict tokens independently per position (the exact limitation D-MMD addresses), and the multi-token MMD kernel can capture linguistic coherence (grammar, semantics) that single-token KL cannot.
+
+\paragraph{Approach.}
+Apply D-MMD to distill Omni-Diffusion's text generation component:
+(1) Use the full Omni-Diffusion model as teacher (50+ steps);
+(2) Train a D-MMD student with 4--8 steps using a sequence-level kernel that captures n-gram coherence;
+(3) For the multimodal setting, design a \textbf{cross-modal kernel} that jointly matches text and image token distributions, ensuring that the distilled model preserves text-image alignment.
+The multi-token aspect is especially important for text: a 4-step text diffusion student must predict entire coherent phrases per step, not individual words.
+
+\paragraph{Feasibility.}
+D-MMD's Appendix D already demonstrates generalization to alternative discrete diffusion architectures.
+The kernel design for text is natural: n-gram overlap kernels, embedding similarity kernels, or learned kernels based on language model features.
+Omni-Diffusion's text benchmarks provide ready-made evaluation.
+A 4--8$\times$ speedup on text generation would make discrete diffusion competitive with autoregressive decoding for short-to-medium outputs.
+
+\subsection{Unifying Autoregressive and Diffusion Distillation}
+
+\paragraph{Gap.}
+Our review series has covered two distillation paradigms:
+(1) \textbf{Autoregressive distillation}: xLSTM distillation~\cite{xlstm-distill} transfers Transformer knowledge to sub-quadratic students via sparse KL (top-256 logits);
+(2) \textbf{Diffusion distillation}: D-MMD transfers multi-step discrete diffusion knowledge to few-step students via kernel MMD.
+Both use KL-family objectives but in different settings.
+No work has unified these: can a single distillation framework transfer knowledge from an autoregressive teacher to a discrete diffusion student (or vice versa)?
+
+\paragraph{Approach.}
+Design a \textbf{cross-paradigm distillation} framework:
+Use an autoregressive LLM as teacher (generating token-by-token) and a discrete diffusion model as student (generating via iterative demasking).
+The D-MMD kernel compares the teacher's sequential output distribution with the student's parallel output distribution at the \emph{sequence level}---this is valid because both produce sequences of discrete tokens, regardless of the generation order.
+The sparse top-$k$ logit technique from xLSTM distillation could reduce the kernel computation cost: instead of full-vocabulary kernels, operate only on the top-256 tokens per position.
+This would enable leveraging the massive autoregressive LLM ecosystem as teachers for discrete diffusion students that offer parallel generation.
+
+\paragraph{Feasibility.}
+The sequence-level MMD kernel is paradigm-agnostic by design---it only requires samples from both models, not access to their internal generation process.
+The main challenge is distribution mismatch: autoregressive models generate left-to-right with perfect local coherence, while diffusion models generate all positions simultaneously with global consistency.
+A curriculum approach could help: start by matching short subsequences (where both paradigms are comparable) and gradually increase to full sequences.
+Evaluation on standard text generation benchmarks (perplexity, MAUVE) would measure whether the diffusion student captures the autoregressive teacher's quality.
+
+\section{Conclusion}
+
+D-MMD resolves the fundamental limitation of discrete diffusion distillation: single-token independence assumptions that cause quality and diversity collapse at few sampling steps.
+By matching multi-token joint distributions via kernel-based MMD, D-MMD produces students that achieve 4--16$\times$ speedup while maintaining---or even surpassing---teacher quality.
+This is the missing piece for practical discrete diffusion: CubiD showed that discrete diffusion can scale to high-dimensional tokens; Omni-Diffusion showed it can handle multimodal generation; D-MMD makes both fast enough for deployment.
+
+The paper also establishes \textbf{distillation as a unifying efficiency paradigm} across our review series:
+xLSTM distillation compresses autoregressive Transformers into sub-quadratic architectures;
+D-MMD compresses multi-step discrete diffusion into few-step generators;
+both achieve near-perfect teacher recovery with 4--16$\times$ speedup.
+The natural synthesis---cross-paradigm distillation from autoregressive teachers to discrete diffusion students---could combine the quality of massive LLMs with the parallel generation of diffusion models.
+
+\begin{thebibliography}{9}
+\bibitem{dmmd} Hoogeboom, E., Ruhe, D., Heek, J., Mensink, T., \& Salimans, T. (2026). Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD. \textit{arXiv preprint arXiv:2603.20155}.
+
+\bibitem{cubid} Wang, Y., et al. (2026). Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens. \textit{CVPR 2026}. arXiv:2603.19232.
+
+\bibitem{omnidiff} (2026). Omni-Diffusion: Unified Multimodal Understanding and Generation with Masked Discrete Diffusion. \textit{arXiv preprint arXiv:2603.06577}.
+
+\bibitem{xlstm-distill} Hauzenberger, L., et al. (2026). Effective Distillation to Hybrid xLSTM Architectures. \textit{arXiv preprint arXiv:2603.15590}.
+
+\bibitem{indexcache} Bai, Y., et al. (2026). IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse. \textit{arXiv preprint arXiv:2603.12201}.
+\end{thebibliography}
+
+\end{document}
