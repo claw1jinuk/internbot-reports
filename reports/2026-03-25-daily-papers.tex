@@ -1,0 +1,139 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Generalized Discrete Diffusion from Snapshots (GDDS)}
+\author{Internbot --- Automated Research Review}
+\date{March 25, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Generalized Discrete Diffusion from Snapshots \\
+\textbf{Authors:} Oussama Zekri, Th\'{e}o Uscidda, Nicolas Boull\'{e}, Anna Korba \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2603.21342}{2603.21342} \\
+\textbf{Topics:} Diffusion LLM, Discrete Diffusion, Text Generation
+
+\subsection{Problem}
+
+Discrete diffusion models have emerged as a promising alternative to autoregressive (AR) models for sequence generation over discrete state spaces. However, existing approaches suffer from two fundamental limitations: (1)~\textit{restrictive corruption structures}---methods like D3PM, SEDD, MDLM, and UDLM are locked into simple noising processes (masking or uniform corruption), preventing them from exploiting semantic structure in the data; and (2)~\textit{path-wise training objectives}---the standard Evidence Lower Bound (ELBO) for continuous-time Markov chain (CTMC) diffusion conditions on the entire noising trajectory, creating a mismatch with standard transformer architectures that only observe a single snapshot $(x_t, t)$ at training time.
+
+\subsection{Method}
+
+GDDS introduces a unified \textit{interpolating framework} for discrete diffusion with two core contributions:
+
+\paragraph{Arbitrary Corruption via Uniformization.}
+The forward process is parameterized as a CTMC with transition kernel $K_t = \alpha_t I_m + (1 - \alpha_t) \Pi_t$, where $\alpha_t$ is a mixing coefficient decaying from 1 to 0, $I_m$ is the identity, and $\Pi_t$ is a column-stochastic mixing matrix encoding the corruption structure. An \textit{expressiveness proposition} proves that for any valid rate matrix $Q_t$ and schedule $\alpha_t$, a unique $\Pi_t$ exists, making the framework fully general---it can represent any CTMC-based discrete diffusion process.
+
+To handle large vocabularies ($m \sim 50{,}000$ for BPE), GDDS employs \textit{uniformization}: the mixing matrix is decomposed as a Poisson-weighted sum of sequential jump operations, requiring only column access to the rate matrix rather than full matrix exponentiation. This enables tractable sampling even with semantically-informed corruption kernels.
+
+\paragraph{Snapshot-Based ELBO.}
+Rather than the path-wise ELBO of prior work, GDDS derives a \textit{snapshot ELBO}:
+\begin{equation}
+\mathcal{L}_{\mathrm{snap}}(\theta) = \int_0^1 \mathbb{E}_{x_t \sim q_t(\cdot | x_0)} \left[ -\log \mu_\theta(x_t, t)_{x_0} \right] dt
+\end{equation}
+This reduces to a simple cross-entropy loss: given a noised token $x_t$ at time $t$, predict the clean token $x_0$. No knowledge of the full forward path is needed---only the ability to \textit{sample} from it. The paper proves that the NLL gap between snapshot and path-wise objectives decomposes as $\Delta_{\mathrm{NLL}} = \mathrm{IPG} + \mathrm{CG}$, where IPG is the information path gap and CG is the calibration gap. Empirically, the snapshot objective achieves \textit{better calibration}, often yielding tighter bounds than the path-wise objective.
+
+\paragraph{Semantic-Informed Kernels (SIK).}
+The key empirical innovation is the \textit{Gaussian SIK}: instead of uniform or absorbing corruption, tokens are corrupted to semantically similar tokens based on pretrained embedding distances. Specifically, $\Pi_t$ is constructed using a Gaussian kernel over token embeddings with a temperature schedule $\tau(t)$, approximated via $k$-nearest neighbors ($k=64$). This semantically-informed corruption forces the model to make finer-grained denoising decisions, improving the learned representations.
+
+\subsection{Results}
+
+GDDS establishes new state-of-the-art results for discrete diffusion across all benchmarks:
+
+\begin{table}[h]
+\centering
+\caption{Language modeling results (all diffusion results are variational upper bounds).}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{Text8 (BPC $\downarrow$)} & \textbf{OWT (PPL $\downarrow$)} \\
+\midrule
+AR (retrained) & 1.35 & 20.49 \\
+\midrule
+SEDD Absorb & $\leq$1.39 & $\leq$24.10 \\
+GenMD4 & $\leq$1.34 & $\leq$21.80 \\
+MDM (retrained) & --- & $\leq$31.03 \\
+UDLM (retrained) & --- & $\leq$36.82 \\
+\midrule
+GDDS Absorb & $\leq$1.16 & $\leq$8.98 \\
+GDDS Uniform & $\leq$1.50 & $\leq$10.97 \\
+\textbf{GDDS Gauss} & --- & $\leq$\textbf{7.65} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}
+    \item \textbf{First discrete diffusion to beat AR:} GDDS Absorb achieves $\leq$1.16 BPC on Text8 vs.\ 1.35 for the retrained AR model---a 14\% improvement.
+    \item \textbf{Dramatic PPL gains:} GDDS Gauss achieves $\leq$7.65 PPL on OpenWebText vs.\ 20.49 for the AR baseline (2.7$\times$ improvement) and $\leq$21.80 for GenMD4 (2.8$\times$ improvement with half the training tokens).
+    \item \textbf{Strong zero-shot transfer:} On 7 downstream datasets, GDDS Gauss dominates with 2--3$\times$ improvements (e.g., PTB: 53.65 vs.\ 147.90 for AR; arXiv: 28.49 vs.\ 76.29).
+    \item \textbf{Sampling efficiency:} GDDS Absorb at $K=64$ decoding steps matches MDM quality at $K=1024$ steps (16$\times$ fewer steps).
+    \item \textbf{Snapshot $>$ path-wise:} The snapshot ELBO consistently outperforms the path-wise ELBO, validating the theoretical analysis of the calibration gap.
+\end{itemize}
+
+All experiments use $\sim$96M-parameter DDiT models under matched compute, with the OpenWebText experiments using 262B training tokens (half that of some prior work like GenMD4's 524B tokens).
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Variational bounds vs.\ exact likelihood:} All diffusion model results are upper bounds ($\leq$), while AR models report exact likelihoods. The dramatic improvements could partly reflect bound tightness rather than true generative quality differences.
+    \item \textbf{Scale:} Experiments are limited to $\sim$96M-parameter models. Whether gains persist at 1B+ scale is unverified.
+    \item \textbf{Semantic kernel sampling cost:} GDDS Gauss currently requires full ancestral sampling (more expensive than shortcut sampling available for masking/uniform corruption), limiting practical generation speed.
+    \item \textbf{No human evaluation:} Generation quality is measured only via GPT-2--scored perplexity and Distinct-$n$, not human judgments or downstream task performance on generated text.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+GDDS directly extends our discrete diffusion thread: it provides a \textit{unifying theoretical framework} that encompasses CubiD~\cite{cubid}'s high-dimensional token diffusion and Omni-Diffusion~\cite{omnidiffusion}'s masked diffusion, while the snapshot ELBO resolves the architecture--objective mismatch that D-MMD~\cite{dmmd} sidesteps via distillation. The semantic-informed kernel concept opens new directions for exploiting token-level structure in all these systems.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: GDDS Framework for CubiD's High-Dimensional Tokens}
+
+\textbf{Gap:} CubiD operates on high-dimensional ($d=768$) discrete tokens obtained via residual quantization, but uses standard absorbing-state diffusion. GDDS's Gaussian SIK exploits embedding-space structure for improved denoising, but has only been tested on standard BPE vocabularies. Applying semantic-informed corruption to CubiD's structured codebook tokens---where the embedding space has rich geometric structure from the VQ-VAE---could yield significant gains.
+
+\textbf{Approach:} Construct a SIK over CubiD's codebook embeddings, where the Gaussian kernel naturally respects the codebook's learned metric structure. Use GDDS's uniformization to handle the large codebook size ($m = 8{,}192$ per quantization level). The snapshot ELBO simplifies training since CubiD already uses a standard transformer backbone. For multi-level residual quantization, design a hierarchical SIK where coarse levels use broader kernels and fine levels use tighter kernels.
+
+\textbf{Feasibility:} High. CubiD's codebook embeddings provide a natural distance metric for the Gaussian SIK, and the uniformization machinery handles the vocabulary size. The main challenge is adapting the SIK to the multi-level residual quantization structure---a clean extension of GDDS's framework. Expected benefit: improved sample quality and reduced decoding steps (from CubiD's 512 steps toward 64--128, as GDDS shows 16$\times$ step reduction is achievable).
+
+\subsection{Direction 2: Snapshot ELBO + D-MMD Distillation Pipeline}
+
+\textbf{Gap:} D-MMD distills discrete diffusion models from many steps to few by matching multi-token joint distributions via kernel-based MMD. However, D-MMD's teacher models are trained with the standard path-wise ELBO, which GDDS shows to be suboptimal. A stronger teacher (trained with the snapshot ELBO) should produce better students, and the GDDS framework's support for arbitrary corruption kernels could enable more effective distillation targets.
+
+\textbf{Approach:} Train a GDDS Gauss teacher with the snapshot ELBO on text generation, then apply D-MMD's multi-token MMD distillation to obtain a 1--4 step student. The semantic kernel in GDDS provides a natural kernel function for D-MMD's MMD objective---instead of using a generic kernel for token distribution matching, use the same Gaussian SIK that defines the teacher's corruption process. This creates a unified kernel space shared between the diffusion process and the distillation objective. Additionally, explore whether the snapshot ELBO's better calibration translates to students that more faithfully preserve the teacher's distribution.
+
+\textbf{Feasibility:} High. Both GDDS and D-MMD are compatible frameworks operating on discrete token spaces. The main implementation effort is training a GDDS teacher and plugging it into D-MMD's distillation pipeline. The shared kernel idea is a natural extension. Expected outcome: 1--4 step discrete diffusion text generation that approaches or matches AR quality, combining GDDS's training improvements with D-MMD's inference speedup.
+
+\subsection{Direction 3: Learned Adaptive Corruption Kernels via Meta-Learning}
+
+\textbf{Gap:} GDDS's Gaussian SIK uses static pretrained embeddings (e.g., GPT-2 embeddings) with a fixed KNN structure ($k=64$). The corruption kernel is not adapted during training, meaning the noising process cannot co-evolve with the denoising model. MetaClaw~\cite{metaclaw}'s meta-learning framework demonstrates how agents can adapt their learning strategies online. Applying similar principles to learn the corruption kernel jointly with the denoising model could further improve GDDS.
+
+\textbf{Approach:} Formulate corruption kernel learning as a bi-level optimization problem: the outer loop optimizes kernel parameters (embedding transformations, temperature schedules, KNN structure) to minimize the denoising model's validation loss, while the inner loop trains the denoising model with the current kernel. Drawing from MetaClaw's continual meta-learning paradigm, maintain a memory of effective kernel configurations across different data domains (code, scientific text, dialogue) and adapt the kernel at test time based on the input distribution. The Online Experiential Learning~\cite{oel} framework's episodic memory could store domain-specific kernel snapshots for rapid adaptation.
+
+\textbf{Feasibility:} Medium. Bi-level optimization for kernel learning adds training complexity, and the interaction between kernel adaptation and model training requires careful stabilization. However, the theoretical framework is well-defined (GDDS already supports arbitrary $\Pi_t$, so learned kernels are a natural extension), and MetaClaw's meta-learning techniques provide a proven approach to online adaptation. Start with a simpler version: learn a linear transformation of pretrained embeddings for the SIK, optimized end-to-end with the denoising model.
+
+\section{Conclusion}
+
+GDDS represents a significant theoretical and empirical advance for discrete diffusion, providing the first unified framework that supports arbitrary corruption processes while achieving state-of-the-art results. The semantic-informed Gaussian kernel demonstrates that exploiting embedding-space structure in the noising process is a powerful lever---one that our lab's work on discrete diffusion (CubiD, D-MMD, Omni-Diffusion) can directly benefit from. The snapshot ELBO's superior performance over the path-wise ELBO has practical implications for all discrete diffusion training, and the combination of GDDS's improved training with D-MMD's distillation offers a path toward practical, few-step discrete diffusion text generation that matches or exceeds AR quality. The claim of beating AR models for the first time---while caveated by the variational bound comparison---marks a milestone for the discrete diffusion paradigm.
+
+\begin{thebibliography}{9}
+\bibitem{gdds} Zekri, O., Uscidda, T., Boull\'{e}, N., \& Korba, A. (2026). Generalized Discrete Diffusion from Snapshots. \textit{arXiv:2603.21342}.
+\bibitem{cubid} (2026). Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens. \textit{arXiv:2603.19232}.
+\bibitem{dmmd} Hoogeboom, E., Ruhe, D., Heek, J., Mensink, T., \& Salimans, T. (2026). Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD. \textit{arXiv:2603.20155}.
+\bibitem{omnidiffusion} (2026). Omni-Diffusion: Unified Multimodal Understanding and Generation with Masked Discrete Diffusion. \textit{arXiv:2603.06577}.
+\bibitem{metaclaw} (2026). MetaClaw: Just Talk -- An Agent That Meta-Learns and Evolves in the Wild. \textit{arXiv:2603.17187}.
+\bibitem{oel} (2026). Online Experiential Learning for Language Models. \textit{arXiv:2603.16856}.
+\bibitem{sedd} Lou, A., Meng, C., \& Ermon, S. (2024). Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution. \textit{ICML 2024}.
+\bibitem{mdlm} Sahoo, S., Arriola, M., \& Schuurmans, D. (2024). Simple and Effective Masked Diffusion Language Models. \textit{NeurIPS 2024}.
+\bibitem{d3pm} Austin, J., Johnson, D.D., Ho, J., Tarlow, D., \& van den Berg, R. (2021). Structured Denoising Diffusion Models in Discrete State-Spaces. \textit{NeurIPS 2021}.
+\end{thebibliography}
+
+\end{document}
