@@ -1,0 +1,136 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Abstraction as a Memory-Efficient Inductive Bias\\for Continual Learning (AAT)}
+\author{Internbot --- Automated Research Review}
+\date{March 26, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Abstraction as a Memory-Efficient Inductive Bias for Continual Learning \\
+\textbf{Authors:} Elnaz Rahmati, Nona Ghazizadeh, Zhivar Sourati, Nina Rouhani, Morteza Dehghani \\
+\textbf{Affiliation:} University of Southern California \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2603.17198}{2603.17198} \\
+\textbf{Topics:} Continual Learning, Online Learning, Catastrophic Forgetting
+
+\subsection{Problem}
+
+Online continual learning requires models to absorb new information from non-stationary data streams, seeing each example exactly once. Two pathologies dominate: \textit{catastrophic forgetting} (new updates overwrite prior knowledge) and \textit{plasticity loss} (the model becomes rigid over time). Most practical methods rely on \textit{experience replay} (ER)---maintaining a buffer of past examples for periodic re-training---which imposes linear memory overhead and raises data-retention concerns. The key question: can we achieve the benefits of replay without storing any past data?
+
+The authors draw on cognitive schema theory: humans extract \textit{abstract relational schemas}---structural patterns that generalize across episodes---rather than memorizing raw experiences. These schemas resist forgetting because they are reinforced by structurally similar future experiences. AAT operationalizes this principle as a training-time inductive bias.
+
+\subsection{Method}
+
+\paragraph{Abstraction-Augmented Training.}
+For each batch of concrete training instances, AAT constructs a parallel \textit{abstract representation} by \textbf{entity masking}: replacing specific named entities with generic placeholders (e.g., ``Albert Einstein'' $\to$ \texttt{[ENTITY\_1]}). This forces the model to process the underlying relational structure without relying on entity-specific associations. The model is optimized on both representations simultaneously via a dual-objective loss:
+\begin{equation}
+\mathcal{L}(\theta) = \alpha \cdot \mathrm{NLL}(\hat{y}_{\mathrm{abs}}, y_{\mathrm{abs}}) + (1 - \alpha) \cdot \mathrm{NLL}(\hat{y}_{\mathrm{inst}}, y_{\mathrm{inst}})
+\end{equation}
+where $\alpha = 0.5$ by default. No data from prior batches is stored---the abstract representation is constructed on-the-fly.
+
+\paragraph{Local Replay.}
+Within each batch, AAT performs $n$ optimization steps ($n \in [1, 5]$): step $j=0$ uses the combined abstract + concrete loss, while steps $j \geq 1$ use only the concrete loss. This design ensures abstraction biases the \textit{direction} of the initial gradient, while local replay reinforces the factual details of the current batch.
+
+\paragraph{Gradient Reweighting.}
+The model's representation decomposes into a relational component $\phi_r$ and an entity-specific component $\phi_e$. Under entity masking, the abstract input zeroes out $\phi_e$, yielding a combined gradient proportional to $(1 + \alpha) \nabla_\theta \phi_r + \nabla_\theta \phi_e$. The factor $(1 + \alpha) = 1.5$ amplifies structural gradients relative to entity-specific ones, encouraging the model to learn transferable relational patterns that are consistent across sequential domains.
+
+\paragraph{Abstraction Levels.}
+Three levels are tested: \textit{entity masking} (strongest---pure relational reasoning), \textit{category-based} (entities replaced with semantic categories), and \textit{random} (control). Entity masking works best, confirming the benefit comes from relational structure preservation, not data augmentation.
+
+\subsection{Results}
+
+AAT is evaluated on two new benchmarks designed to decouple factual retention from structural generalization:
+
+\begin{itemize}
+    \item \textbf{Relational Cycle Benchmark (RCB):} 3,295 Wikidata knowledge triples across 8 domains with 51 relational typologies. Tasks: retain ``known edges'' (memorization) and predict ``unknown edges'' (structural generalization).
+    \item \textbf{Narrative Abstraction Benchmark (NAB):} 250 proverbs with narratives. Task: select the ending consistent with the proverb's abstract meaning over a distractor.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{RCB results on SmolLM-1.7B. ``Unknown'' measures structural generalization; ``Known'' measures retention.}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{Cumul-Unkn.} & \textbf{Cumul-Known} & \textbf{Cumul-All} & \textbf{Forget-Unkn.} & \textbf{Forget-Known} \\
+\midrule
+Standard SFT & 0.5565 & 0.7098 & 0.6619 & 0.0300 & 0.0158 \\
+ER (buf=100, n=5) & 0.6371 & 0.7152 & 0.6908 & 0.0146 & 0.0099 \\
+\textbf{AAT} & \textbf{0.6559} & \textbf{0.7200} & \textbf{0.7000} & \textbf{0.0060} & \textbf{0.0099} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}
+    \item \textbf{Matches/beats ER with zero memory:} AAT achieves the highest cumulative accuracy (0.7000 vs.\ 0.6908 for best ER) on SmolLM-1.7B, with \textbf{80\% forgetting reduction} on unknown edges (0.0300 $\to$ 0.0060).
+    \item \textbf{Model-agnostic:} Consistent improvements on both Qwen2.5-1.5B (0.5025 vs.\ 0.4993 for best ER) and SmolLM-1.7B.
+    \item \textbf{ER can hurt abstract reasoning:} On NAB, ER improves known-narrative retention (0.8940 vs.\ 0.8674) but \textit{increases} forgetting of abstract structure (0.1730 vs.\ 0.1460). AAT reduces both (0.0557, 0.1429).
+    \item \textbf{Smoother loss landscape:} Abstraction reduces loss surface variance by 17\%, contributing to flatter minima that resist forgetting.
+    \item \textbf{Replay without replay hurts:} ER with single-pass ($n=1$) actually degrades below standard SFT---naive replay without local replay is counterproductive.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Scale:} Experiments limited to 1.5B--7B parameters. A non-monotonic scaling result (3B underperforms 1.5B) raises questions about interactions with model capacity.
+    \item \textbf{Abstraction quality:} Relies on explicit, repetitive relational patterns extractable via entity masking. Extension to domains where relevant abstractions are implicit or ambiguous is open.
+    \item \textbf{Data order sensitivity:} AAT shows higher variance across data orderings than ER (std 0.0323 vs.\ 0.0061), suggesting greater sensitivity to curriculum effects.
+    \item \textbf{Manual abstraction:} The entity-masking procedure is hand-designed. Automating abstraction discovery for arbitrary data streams is a significant open problem.
+    \item \textbf{Constructed benchmarks:} Both RCB and NAB have known relational structure; performance on messier real-world continual learning streams is not evaluated.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+AAT directly addresses the continual learning thread in our reviews: OAKS~\cite{oaks} benchmarks knowledge stream adaptation, OEL~\cite{oel} proposes experiential learning with episodic memory, and MetaClaw~\cite{metaclaw} demonstrates continual meta-learning for agents. AAT offers a complementary mechanism---\textit{structural abstraction as implicit replay}---that could augment all three systems. The finding that experience replay can actually \textit{harm} abstract generalization while helping memorization is particularly relevant for agent-based continual learning, where structural transfer across tasks matters more than rote memorization.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Automated Abstraction Discovery via LLM Self-Distillation}
+
+\textbf{Gap:} AAT's abstraction construction (entity masking) is hand-designed and limited to domains with explicit named entities. For LLM agent continual learning---where tasks involve code, tool use, multi-step reasoning, and dialogue---the relevant abstractions are not entity-level but \textit{procedural} (task decomposition patterns, tool selection strategies, error recovery heuristics). MetaClaw~\cite{metaclaw} learns meta-strategies but does not explicitly extract reusable abstractions.
+
+\textbf{Approach:} Use the LLM itself to generate abstractions via self-distillation. For each training batch, prompt the model to produce a ``task template'' that strips instance-specific details (concrete API endpoints, specific error messages, particular file paths) while preserving the procedural skeleton. Train with AAT's dual-objective loss using these self-generated templates. The abstraction quality can be regularized by requiring that the template, when re-instantiated with different surface details, produces valid task completions.
+
+\textbf{Feasibility:} Medium-high. LLMs are already capable of producing procedural abstractions (chain-of-thought, task decomposition). The main challenges are (1)~ensuring the self-generated abstractions are sufficiently general without being vacuous, and (2)~preventing degenerate templates that collapse to trivial patterns. Temperature-controlled generation and diversity penalties can mitigate collapse. This extends AAT from knowledge-graph facts to the agent domain central to our lab's focus.
+
+\subsection{Direction 2: AAT + OEL Episodic Memory for Hybrid Continual Learning}
+
+\textbf{Gap:} AAT achieves zero-memory continual learning but shows higher variance than ER across data orderings. OEL~\cite{oel}'s episodic memory stores experience traces for retrieval-augmented learning, effectively implementing experience replay at the representation level. Combining AAT's structural bias with OEL's selective memory could yield a system that is both memory-efficient (storing only high-value episodes) and structurally robust (maintaining relational transfer even when memory is limited).
+
+\textbf{Approach:} Use AAT's dual-objective training as the base learning algorithm, augmented with OEL's episodic memory as a \textit{selective replay buffer}. The key insight: the memory should store not raw experiences but \textit{(concrete, abstract) pairs}---each episode paired with its structural template. During replay, both the concrete instance and its abstraction are retrieved, maintaining the dual-objective structure. Memory selection prioritizes episodes where the concrete and abstract losses diverge most, indicating structurally informative examples. This reduces buffer size (only structurally rich episodes are stored) while maintaining AAT's relational bias.
+
+\textbf{Feasibility:} High. Both AAT and OEL operate on standard LLM architectures with loss-level modifications. The combination requires only modifying OEL's memory storage format to include abstract representations and adjusting the retrieval criterion. Expected outcome: lower variance than pure AAT (via selective replay) with smaller buffer requirements than pure ER (since abstraction reduces the amount of replay needed for stability).
+
+\subsection{Direction 3: Abstraction-Guided Knowledge Stream Adaptation for OAKS}
+
+\textbf{Gap:} OAKS~\cite{oaks} benchmarks LLMs on continual knowledge streams but finds that all current methods struggle with both retention and integration. AAT's gradient reweighting mechanism---amplifying relational structure by factor $(1+\alpha)$---could directly improve OAKS performance by biasing models toward structural patterns in knowledge updates rather than entity-specific facts that quickly become outdated.
+
+\textbf{Approach:} Apply AAT to the OAKS benchmark by constructing entity-masked versions of each knowledge update. For knowledge graph-style updates (which OAKS draws from Wikidata), entity masking is directly applicable. For free-text knowledge streams, use NER-based masking with the model's own entity recognition capabilities. Evaluate whether AAT's structural bias helps models better integrate new knowledge (by learning the relational pattern of the update) while retaining old knowledge (by reinforcing shared relational structure). Additionally, test whether AAT reduces the ``conflicting knowledge'' problem in OAKS, where new facts contradict old ones---the structural abstraction may help the model distinguish between structural patterns (which should be retained) and entity-level facts (which may need updating).
+
+\textbf{Feasibility:} High. OAKS already uses Wikidata-based knowledge updates compatible with AAT's entity masking. The main effort is integrating AAT's training loop with OAKS's streaming evaluation protocol. This directly addresses the gap OAKS identified: current methods fail because they treat all information equally, whereas AAT provides a principled mechanism for differentiating structural knowledge (retain) from entity-specific knowledge (update).
+
+\section{Conclusion}
+
+AAT introduces a cognitively-grounded alternative to experience replay: rather than storing past data, it biases the model toward learning relational abstractions that naturally resist forgetting. The 80\% forgetting reduction on structural generalization---with zero memory overhead---is a strong result, and the finding that experience replay can actually \textit{harm} abstract reasoning adds important nuance to the continual learning literature. For our lab's continual learning thread, AAT offers a mechanism orthogonal to OEL's episodic memory and MetaClaw's meta-learning: where those systems learn \textit{what to remember} and \textit{how to adapt}, AAT shapes \textit{what kind of representations to learn} in the first place. The combination of all three---structurally biased representations (AAT), selective episodic memory (OEL), and meta-learned adaptation strategies (MetaClaw)---points toward a more complete continual learning system for LLM agents.
+
+\begin{thebibliography}{9}
+\bibitem{aat} Rahmati, E., Ghazizadeh, N., Sourati, Z., Rouhani, N., \& Dehghani, M. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv:2603.07392}.
+\bibitem{oel} (2026). Online Experiential Learning for Language Models. \textit{arXiv:2603.16856}.
+\bibitem{metaclaw} (2026). MetaClaw: Just Talk -- An Agent That Meta-Learns and Evolves in the Wild. \textit{arXiv:2603.17187}.
+\bibitem{spot} (2026). Surgical Post-Training: Cutting Errors, Keeping Knowledge. \textit{arXiv:2603.01683}.
+\bibitem{ewc} Kirkpatrick, J., et al. (2017). Overcoming Catastrophic Forgetting in Neural Networks. \textit{PNAS}, 114(13), 3521--3526.
+\bibitem{er} Chaudhry, A., et al. (2019). On Tiny Episodic Memories in Continual Learning. \textit{arXiv:1902.10486}.
+\end{thebibliography}
+
+\end{document}
