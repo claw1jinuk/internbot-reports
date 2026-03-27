@@ -1,0 +1,171 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Why Does Self-Distillation (Sometimes)\\Degrade the Reasoning Capability of LLMs?}
+\author{Internbot --- Automated Research Review}
+\date{March 27, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \\
+\textbf{Authors:} Jeonghye Kim, Xufang Luo, Minbeom Kim, Sangmook Lee, Dohyung Kim, Jiwon Jeon, Dongsheng Li, Yuqing Yang \\
+\textbf{Affiliations:} Microsoft Research, KAIST, Seoul National University \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2603.24472}{2603.24472} \\
+\textbf{Topics:} Distillation, Reasoning, Reinforcement Learning
+
+\subsection{Problem}
+
+Self-distillation has become a popular post-training paradigm where a single LLM acts as both teacher and student: the teacher receives rich conditioning context (e.g., the correct solution) and generates a high-quality reasoning trace, while the student learns to replicate that trace without extra context. While this shortens reasoning traces and often improves in-domain performance, the authors discover that in mathematical reasoning, self-distillation can \textit{reduce response length while simultaneously degrading performance}---with drops of up to 40\% on out-of-distribution (OOD) benchmarks.
+
+The root cause: \textbf{suppression of epistemic verbalization}. The teacher, conditioned on the correct answer, produces confident traces with almost no uncertainty markers. The student, trained on these traces, loses its capacity for self-correction on novel problems.
+
+\subsection{Method}
+
+\paragraph{Epistemic Verbalization.}
+The authors define epistemic verbalization as the model's expression of uncertainty during reasoning, operationalized via 10 marker tokens: \{\textit{wait, hmm, perhaps, maybe, actually, alternatively, seems, might, likely, check}\}. The epistemic token count is:
+\begin{equation}
+E(y) = \sum_{t \in T} \mathrm{count}(t, y)
+\end{equation}
+These markers function as internal checkpoints that trigger self-correction---tokens like ``wait'' signal the model to reconsider a flawed reasoning path.
+
+\paragraph{Information Richness Framework.}
+The informativeness of the conditioning context $c$ is formalized via conditional mutual information $I(y; c \mid x) = H(y \mid x) - H(y \mid x, c)$. Four settings are tested with increasing richness:
+
+\begin{table}[h]
+\centering
+\caption{Effect of conditioning context on DeepSeek-R1-Distill-Qwen-7B (100 DAPO-Math problems).}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Setting} & \textbf{Avg Score} & \textbf{Avg Length} & \textbf{Epistemic Tokens} \\
+\midrule
+Unguided & 0.30 & 13,054 & 182.5 \\
+Solution w/o thinking tags & 0.78 & 12,036 & 159.8 \\
+Regeneration-conditioned & 0.95 & 2,808 & 24.1 \\
+Full solution-guided & 0.98 & 1,873 & 8.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Response length and epistemic marker count decrease \textit{monotonically} with information richness. The richer the teacher's context, the more compressed and confident the output---and the more harmful the student traces become for OOD generalization.
+
+\paragraph{Self-Distillation via Policy Optimization (SDPO).}
+The training loss minimizes KL divergence between student and teacher:
+\begin{equation}
+\mathcal{L}_{\mathrm{SD}}(\theta) = \sum_t \mathrm{KL}\!\left(\pi_\theta(\cdot \mid x, y_{<t}) \;\|\; \mathrm{stopgrad}\!\left(\pi_\theta(\cdot \mid x, c, y_{<t})\right)\right)
+\end{equation}
+The teacher (with context $c$) is compared against Group Relative Policy Optimization (GRPO), which uses reward-based RL without teacher-student asymmetry.
+
+\paragraph{Task Coverage Analysis.}
+The critical moderating variable is \textit{task coverage}---how well training data covers the evaluation domain:
+\begin{itemize}
+    \item \textbf{Limited coverage} (e.g., Chemistry with 6 problem types): Self-distillation succeeds because confidence is warranted---the model has seen the problem space.
+    \item \textbf{Broad coverage} (e.g., DAPO-Math with 14K distinct problems, non-overlapping train/eval): Self-distillation degrades because novel problems require adaptive reasoning that depends on uncertainty expression.
+\end{itemize}
+
+\subsection{Results}
+
+\paragraph{Catastrophic degradation from confident training data.}
+SFT on solution-guided (confident) traces vs.\ unguided (uncertain) traces (DeepSeek-R1-Distill-Qwen-7B):
+
+\begin{table}[h]
+\centering
+\caption{SFT results showing the effect of training data confidence level.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Configuration} & \textbf{AIME24} & \textbf{AMC23} & \textbf{MATH500} \\
+\midrule
+Base model & 54.79\% & 89.06\% & 92.19\% \\
+SFT on confident traces & 20.21\% & 57.03\% & 65.52\% \\
+SFT on uncertain traces & 51.04\% & 87.66\% & 90.93\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Training on confident traces caused \textbf{$-$34.6 points on AIME24}. Training on uncertain traces preserved performance almost entirely.
+
+\paragraph{SDPO vs.\ GRPO.}
+Across three model families:
+\begin{itemize}
+    \item \textbf{DeepSeek-R1-Distill-Qwen-7B:} GRPO improved AIME24 from 54.7\% to 56.0\%; SDPO dropped it by $\sim$40\%.
+    \item \textbf{Qwen3-8B (thinking mode):} GRPO maintained stable OOD performance; SDPO showed progressive degradation.
+    \item \textbf{OLMo-3-7B-Instruct:} SDPO degraded reasoning below the base model, confirming model-independence.
+\end{itemize}
+
+\paragraph{Task coverage scaling.}
+At small dataset sizes (1--8 problems), SDPO briefly outperforms GRPO via rapid compression. At 512 problems, GRPO substantially surpasses SDPO on OOD benchmarks. SDPO achieves 8$\times$ response compression but at the cost of adaptive reasoning.
+
+\paragraph{Moving vs.\ fixed teacher.}
+EMA-updated teachers (rate 0.05) create a feedback loop: as the student becomes more confident, the teacher also becomes more confident, amplifying epistemic suppression. Fixed teachers produce less severe degradation.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Diagnostic, not prescriptive:} The paper identifies the problem but does not propose a concrete mitigation algorithm. Hyperparameter tuning (learning rate, top-$k$) only delays degradation.
+    \item \textbf{Heuristic marker set:} The 10 epistemic markers are reasonable but not principled. Different models prefer different markers (DeepSeek favors ``wait''; Qwen favors ``perhaps,'' ``maybe'').
+    \item \textbf{Scale:} All experiments use 7B--8B models. Whether the phenomenon persists at 70B+ is unknown.
+    \item \textbf{Domain scope:} Focused on mathematical reasoning. Chemistry and code serve as contrast cases but broader domains (legal, scientific reasoning) are untested.
+    \item \textbf{No optimal balance:} The paper shows some confidence is good (in-domain efficiency) while too much is harmful (OOD), but does not identify the optimal level of epistemic verbalization.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper has direct implications for our distillation research thread. The xLSTM distillation work~\cite{xlstm} trains student architectures on teacher-generated data---if those traces suppress epistemic verbalization, the distilled xLSTM models may fail on OOD tasks. D-MMD~\cite{dmmd} distills discrete diffusion models via distribution matching---while operating in a different modality, the same principle applies: if the teacher's multi-token distributions lack uncertainty-driven diversity, the student may overfit to confident generation modes. The connection to GRPO also links to our RL thread (BandPO~\cite{bandpo}, URLVR~\cite{urlvr}), where the paper shows that reward-based RL \textit{preserves} epistemic verbalization while distillation suppresses it.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Epistemic-Preserving Distillation for LLM Efficiency}
+
+\textbf{Gap:} Our xLSTM distillation~\cite{xlstm} work trains efficient student architectures on teacher-generated traces. This paper shows that solution-guided teacher traces suppress epistemic verbalization, causing up to 40\% OOD degradation. Current distillation pipelines (including xLSTM's) do not account for the \textit{reasoning style} of training data---only answer correctness.
+
+\textbf{Approach:} Introduce an \textit{epistemic preservation regularizer} during distillation. Augment the standard KL divergence loss with a term that penalizes the suppression of epistemic markers in the student's output distribution:
+\begin{equation}
+\mathcal{L}_{\mathrm{EP}}(\theta) = \mathcal{L}_{\mathrm{KL}}(\theta) + \lambda \cdot \max\!\left(0, E_{\mathrm{teacher}} - E_{\mathrm{student}}(\theta)\right)
+\end{equation}
+where $E_{\mathrm{teacher}}$ is the epistemic token count in unguided teacher traces and $E_{\mathrm{student}}(\theta)$ is the student's epistemic count. Alternatively, use a mixture of confident (solution-guided) and uncertain (unguided) teacher traces, weighted by a curriculum that starts uncertain and gradually increases confidence as the student masters each domain. Apply this to xLSTM distillation and measure OOD generalization on held-out mathematical reasoning benchmarks.
+
+\textbf{Feasibility:} High. The regularizer is a simple addition to existing distillation losses. The main challenge is calibrating $\lambda$ to balance compression (shorter, more efficient traces) with OOD robustness (preserved epistemic verbalization). The curriculum approach is more principled but requires domain-aware scheduling.
+
+\subsection{Direction 2: Uncertainty-Aware D-MMD for Discrete Diffusion Distillation}
+
+\textbf{Gap:} D-MMD~\cite{dmmd} distills discrete diffusion models by matching multi-token joint distributions between teacher and student. The teacher generates with many denoising steps (high quality, diverse), while the student learns to match this in few steps. This paper's finding suggests that if the teacher's distribution is overly concentrated (confident), the student may collapse to a narrow mode---analogous to epistemic suppression but in the token-distribution space rather than the reasoning-trace space.
+
+\textbf{Approach:} Introduce \textit{uncertainty-aware kernel weighting} in D-MMD's MMD objective. When computing the kernel distance between teacher and student multi-token distributions, upweight regions of the distribution where the teacher exhibits high entropy (uncertainty) and downweight regions of confident agreement. This encourages the student to preserve the teacher's distributional diversity---the diffusion analog of preserving epistemic verbalization. Formally, modify the MMD kernel $k(x, y)$ to $k(x, y) \cdot w(x)$ where $w(x) \propto H_{\mathrm{teacher}}(x)$ is proportional to the teacher's token-level entropy at position $x$. Combined with GDDS~\cite{gdds}'s semantic-informed kernels, this creates a distillation pipeline that preserves both semantic structure and distributional diversity.
+
+\textbf{Feasibility:} Medium-high. The entropy-weighted kernel is a straightforward modification to D-MMD's objective. The challenge is that computing teacher entropy requires multiple forward passes or maintaining running statistics. For GDDS teachers specifically, the snapshot ELBO provides a natural calibration signal that could proxy for entropy.
+
+\subsection{Direction 3: Epistemic Verbalization as a Signal for Continual Learning}
+
+\textbf{Gap:} Our continual learning thread (OAKS~\cite{oaks}, OEL~\cite{oel}, MetaClaw~\cite{metaclaw}, AAT~\cite{aat}) focuses on preventing catastrophic forgetting during sequential learning. This paper reveals that epistemic verbalization serves as an internal self-correction mechanism. In continual learning, when the model encounters a new domain, its uncertainty \textit{should} increase---but if prior training has suppressed epistemic verbalization (e.g., through distillation-based updates), the model cannot signal its own uncertainty, leading to confident but incorrect predictions on the new domain.
+
+\textbf{Approach:} Use epistemic token frequency as a \textit{domain-shift detector} for continual learning. Monitor the model's epistemic marker count during inference: a sudden increase signals that the model is encountering unfamiliar patterns (potential domain shift), triggering adaptive mechanisms---AAT's abstraction bias, OEL's episodic memory retrieval, or MetaClaw's meta-learning adaptation. Conversely, design continual learning objectives that explicitly preserve epistemic capacity: augment AAT's dual-objective loss with an epistemic preservation term ensuring that abstraction training does not suppress the model's ability to express uncertainty on novel instances. This creates a system where the model's own uncertainty expression drives the continual learning strategy selection.
+
+\textbf{Feasibility:} Medium. The monitoring component is straightforward (count epistemic tokens during inference). The integration with AAT/OEL/MetaClaw requires modifying their training objectives to include epistemic preservation, which adds complexity. The main risk is that epistemic markers are surface-level proxies for deeper uncertainty---the model might learn to produce epistemic tokens without genuine uncertainty, gaming the regularizer.
+
+\section{Conclusion}
+
+This paper delivers a critical warning for the distillation community: self-distillation can systematically destroy the model's capacity for self-correction by suppressing epistemic verbalization. The finding is robust across three model families and is not fixable through hyperparameter tuning. For our lab, this has immediate implications for xLSTM distillation (ensuring student architectures retain OOD reasoning capacity), D-MMD (preserving distributional diversity during diffusion model distillation), and continual learning (using epistemic signals as domain-shift detectors). The central message---that \textit{how} a model reasons matters as much as \textit{whether} it gets the right answer---connects our distillation efficiency work with our RL and continual learning threads, suggesting that preserving reasoning process quality should be a first-class objective alongside answer correctness.
+
+\begin{thebibliography}{9}
+\bibitem{selfdistill} Kim, J., Luo, X., Kim, M., Lee, S., Kim, D., Jeon, J., Li, D., \& Yang, Y. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{xlstm} (2026). Effective Distillation to Hybrid xLSTM Architectures. \textit{arXiv:2603.15590}.
+\bibitem{dmmd} Hoogeboom, E., Ruhe, D., Heek, J., Mensink, T., \& Salimans, T. (2026). Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD. \textit{arXiv:2603.20155}.
+\bibitem{gdds} Zekri, O., Uscidda, T., Boull\'{e}, N., \& Korba, A. (2026). Generalized Discrete Diffusion from Snapshots. \textit{arXiv:2603.21342}.
+\bibitem{bandpo} (2026). BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning. \textit{arXiv:2603.04918}.
+\bibitem{urlvr} (2026). How Far Can Unsupervised RLVR Scale LLM Training? \textit{arXiv:2603.08660}.
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv:2603.07392}.
+\bibitem{oel} (2026). Online Experiential Learning for Language Models. \textit{arXiv:2603.16856}.
+\bibitem{metaclaw} (2026). MetaClaw: Just Talk -- An Agent That Meta-Learns and Evolves in the Wild. \textit{arXiv:2603.17187}.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\end{thebibliography}
+
+\end{document}
