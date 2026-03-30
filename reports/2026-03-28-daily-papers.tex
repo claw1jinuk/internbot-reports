@@ -1,0 +1,135 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: S2D2 --- Fast Decoding for Diffusion LLMs\\via Training-Free Self-Speculation}
+\author{Internbot --- Automated Research Review}
+\date{March 28, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation \\
+\textbf{Authors:} Ligong Han, Hao Wang, Han Gao, Kai Xu, Akash Srivastava \\
+\textbf{Affiliations:} Red Hat AI Innovation, MIT-IBM Watson AI Lab, Iowa State University, IBM \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2603.25702}{2603.25702} \\
+\textbf{Topics:} Diffusion LLM, Inference Optimization, Speculative Decoding
+
+\subsection{Problem}
+
+Block-diffusion language models (LLaDA, SDAR, Fast-dLLM) combine block-wise autoregressive decoding with within-block parallel denoising, promising faster-than-AR generation. However, in practice, achieving meaningful speedups requires \textit{few-step denoising}, which is fragile: the standard confidence-thresholding approach operates on draft confidence alone and cannot check whether proposed tokens are globally coherent. Aggressive thresholds hurt quality (the token-factorized mean-field approximation ignores sequence dependencies); conservative thresholds require many steps, negating the speed advantage. Prior solutions like EDLM require training additional models.
+
+\subsection{Method}
+
+\paragraph{Core Insight: Block-Size-1 = Autoregressive.}
+S2D2 exploits a structural property of block-diffusion models: when the block size is reduced to 1, the model becomes autoregressive. This means the \textit{same pretrained model} can serve as both drafter (block-diffusion mode, proposing many tokens in parallel) and verifier (block-size-1 AR mode, providing sequential coherence), with \textbf{zero additional training}.
+
+\paragraph{Draft-Then-Verify.}
+At each denoising step within a block:
+\begin{enumerate}
+    \item \textbf{Draft:} Run a standard block-diffusion forward pass to produce token proposals $\hat{x}$ with draft probabilities $p$.
+    \item \textbf{Route:} A lightweight policy decides whether verification is worthwhile (based on token confidence, entropy, or margin between top-1/top-2 predictions).
+    \item \textbf{Verify:} If invoked, fill draft tokens into the first contiguous masked span $C_t$, run the model in AR mode to compute verifier probabilities $q$, then scan left-to-right with speculative acceptance: accept token $i$ with probability $\min(1, q_i / p_i)$, resample from the residual distribution $(P_{\mathrm{verifier}} - P_{\mathrm{draft}})_+$ at the first rejection.
+\end{enumerate}
+
+\paragraph{Self-Verification Mask.}
+Computing AR verifier probabilities for all $L$ positions normally requires $L$ sequential passes. S2D2 avoids this with an attention mask trick: concatenating drafted tokens with an all-\texttt{[MASK]} copy and applying a structured verification mask computes \textbf{all $L$ verifier confidences in a single forward pass}.
+
+\paragraph{Energy Correction Perspective.}
+The acceptance probability has an elegant interpretation: define residual energy $E_i = -\log(q_i) + \log(p_i)$, then acceptance probability is $\min(1, \exp(-E_i))$. Tokens where AR and diffusion agree (low energy) pass through; tokens where they disagree (high energy) get corrected. This is a stochastic local approximation to EDLM's global energy correction---but without training.
+
+\subsection{Results}
+
+S2D2 is evaluated on five models from three block-diffusion families across GSM8K, MBPP, HumanEval, and IFEval:
+
+\begin{table}[h]
+\centering
+\caption{S2D2 speedup and accuracy improvements over dynamic baseline on SDAR models.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Avg Accuracy} & \textbf{Speedup vs.\ AR} & \textbf{vs.\ Dynamic Baseline} \\
+\midrule
+SDAR-1.7B (baseline) & 48.4 & 3.1$\times$ & 1.0$\times$ \\
+SDAR-1.7B (S2D2-A) & 54.4 (+6.0) & 2.5$\times$ & 0.8$\times$ \\
+SDAR-1.7B (S2D2-B) & 52.9 (+4.5) & \textbf{4.7$\times$} & \textbf{1.57$\times$} \\
+\midrule
+SDAR-8B (baseline) & 70.5 & 2.6$\times$ & 1.0$\times$ \\
+SDAR-8B (S2D2-A) & 72.6 (+2.1) & 2.1$\times$ & 0.8$\times$ \\
+SDAR-8B (S2D2-B) & 71.3 (+0.8) & 3.7$\times$ & 1.4$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}
+    \item \textbf{4.7$\times$ speedup over AR decoding} on SDAR-1.7B while \textit{improving} accuracy by 4.5 points over the dynamic baseline---simultaneously faster and better.
+    \item \textbf{Verification improves quality:} S2D2 often \textit{increases} accuracy because AR verification provides sequence-level coherence checking that confidence thresholding lacks. The ratio $q_i/p_i$ is a fundamentally stronger acceptance signal than draft confidence alone.
+    \item \textbf{Works across families:} Consistent improvements on SDAR (1.7B, 4B, 8B), Fast-dLLM v2, and LLaDA 2.1-Mini. On LLaDA, S2D2 achieves 79.3\% accuracy at 2.2$\times$ speedup vs.\ the baseline's 78.7\% at 1.7$\times$.
+    \item \textbf{Complementary to existing methods:} S2D2 stacks with LLaDA's built-in token editing self-correction mechanism.
+    \item \textbf{Relative to static baselines:} On LLaDA (where static decoding is actually slower than AR at 0.5$\times$), S2D2 achieves 4.4$\times$ speedup with slightly higher accuracy.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{First-contiguous-span only:} Verification is restricted to the first contiguous masked span $C_t$. Scattered masks (later denoising steps) cannot be verified. ASSD can handle arbitrary subsets but requires architectural changes.
+    \item \textbf{One extra forward pass:} Each verification step costs one additional forward pass. Imperfect routing wastes compute.
+    \item \textbf{No exact distribution guarantee:} Unlike AR speculative decoding, S2D2 operates within a hybrid trajectory where the theoretical distribution-preservation guarantee is weaker.
+    \item \textbf{Routing sensitivity:} Accuracy and speedup are sensitive to routing hyperparameters (thresholds, cost parameters), requiring per-model/task tuning.
+    \item \textbf{Scale:} Largest model tested is 8B. Behavior at 70B+ is unknown.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+S2D2 fills a critical gap in our diffusion LLM thread: all prior reviews focus on \textit{training} improvements---GDDS~\cite{gdds} (unified framework), D-MMD~\cite{dmmd} (distillation), CubiD~\cite{cubid} (high-dimensional tokens), Omni-Diffusion~\cite{omnidiffusion} (multimodal)---but none address \textit{inference-time} speedup without retraining. S2D2 provides the deployment-side complement: train with GDDS's snapshot ELBO for better models, optionally distill with D-MMD for fewer steps, then apply S2D2 at inference for additional training-free speedup. The connection to our self-distillation review~\cite{selfdistill} is also notable: S2D2's AR verification preserves sequence coherence (analogous to preserving epistemic verbalization), suggesting that verification-based approaches may be more robust than distillation-based compression.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: S2D2 + D-MMD Combined Pipeline for Maximum Speedup}
+
+\textbf{Gap:} D-MMD~\cite{dmmd} reduces denoising steps through distillation (e.g., 50 steps $\to$ 4 steps), while S2D2 accelerates each denoising step through self-speculative verification. These are orthogonal: D-MMD reduces the \textit{number} of steps, S2D2 improves the \textit{quality per step}. Combining them could yield multiplicative speedups, but their interaction is untested---D-MMD students may have different draft-verifier agreement patterns than undistilled models, potentially affecting S2D2's routing effectiveness.
+
+\textbf{Approach:} Train a GDDS~\cite{gdds} teacher with the snapshot ELBO, distill via D-MMD to a 4-step student, then apply S2D2 at inference. The key research question is whether D-MMD distillation changes the ``AR-ness'' of the model (the degree to which block-size-1 mode agrees with block-diffusion mode). If distillation makes the model more confident and uniform across positions, draft-verifier agreement increases, and S2D2's verification adds less value. Conversely, if distillation preserves position-dependent uncertainty, S2D2 remains effective. Measure the residual energy distribution $E_i = -\log(q_i) + \log(p_i)$ before and after D-MMD distillation to quantify this interaction.
+
+\textbf{Feasibility:} High. Both methods are plug-and-play with standard block-diffusion models. The main effort is training a D-MMD student and running S2D2 inference on it. If the combination works, the pipeline becomes: GDDS training $\to$ D-MMD distillation $\to$ S2D2 inference, potentially achieving 16--32$\times$ end-to-end speedup over standard discrete diffusion (D-MMD's 4--16$\times$ step reduction $\times$ S2D2's 1.5--4.7$\times$ per-step acceleration).
+
+\subsection{Direction 2: Scattered-Mask Verification via GDDS Semantic Kernels}
+
+\textbf{Gap:} S2D2 is restricted to verifying the first contiguous masked span $C_t$. In later denoising steps, masked positions are scattered across the block, and verification becomes inapplicable. This limits S2D2's benefit to early denoising steps where contiguous spans exist. GDDS~\cite{gdds}'s semantic-informed kernels (SIK) corrupt tokens to semantically similar tokens rather than a single \texttt{[MASK]} token, creating a different denoising trajectory where ``masked'' positions contain informative (but noisy) tokens rather than being empty.
+
+\textbf{Approach:} Adapt S2D2's verification to GDDS-style non-absorbing diffusion. In SIK-based corruption, partially denoised tokens at scattered positions are not empty masks but noisy approximations. Define a \textit{semantic confidence} metric based on the distance between the current token and the model's predicted clean token in embedding space (using GDDS's Gaussian kernel). For positions where semantic confidence is low (the token is far from the prediction), group nearby positions into ``semantic spans'' and verify these groups using the AR mode. This generalizes S2D2 from binary (masked/unmasked) to continuous (noisy/clean) verification, applicable at any denoising step.
+
+\textbf{Feasibility:} Medium. The theoretical extension from binary masks to continuous noise is clean, but the implementation requires modifying S2D2's routing and verification to work with GDDS's non-absorbing forward process. The main challenge is defining efficient ``semantic spans'' for scattered positions---clustering in sequence space while maintaining computational tractability. Start with a simple heuristic: verify any contiguous subsequence containing $\geq 2$ low-confidence positions.
+
+\subsection{Direction 3: Self-Speculative Verification as Epistemic Preservation}
+
+\textbf{Gap:} Our self-distillation review~\cite{selfdistill} showed that distillation suppresses epistemic verbalization, degrading OOD reasoning. S2D2's AR verification provides a complementary mechanism: rather than preventing epistemic suppression during training, it \textit{detects and corrects} incoherent (overconfident) sequences at inference time. The residual energy $E_i$ directly measures the discrepancy between the model's parallel (confident) and sequential (coherence-aware) predictions---positions with high $E_i$ are exactly where the model's parallel confidence is misleading.
+
+\textbf{Approach:} Extend S2D2's verification framework to autoregressive LLMs that have undergone self-distillation. Use the pre-distillation model (or a lightweight probe trained on epistemic markers) as the verifier, and the distilled model as the drafter. When the distilled model produces a confident token sequence, the verifier checks whether the pre-distillation model would have expressed uncertainty at those positions. High residual energy indicates potential epistemic suppression---the draft is confident but the verifier would have been uncertain. At these positions, resample from the verifier's distribution, effectively restoring the self-corrective reasoning that distillation removed. This creates an ``epistemic restoration'' layer that can be applied to any distilled model at inference time, without retraining.
+
+\textbf{Feasibility:} Medium. The main challenge is that standard AR models do not have S2D2's convenient dual-mode property---the pre-distillation model must be kept as a separate verifier, adding memory overhead. However, this is equivalent to standard speculative decoding with a different model pair (distilled drafter + undistilled verifier), which is well-studied. The novel contribution would be the epistemic interpretation: using residual energy as a proxy for epistemic suppression, and demonstrating that verification-based correction restores OOD reasoning performance lost during distillation.
+
+\section{Conclusion}
+
+S2D2 completes the deployment pipeline for discrete diffusion language models: GDDS provides the training framework, D-MMD handles step-count reduction via distillation, and S2D2 adds training-free inference acceleration via self-speculative verification. The key insight---that block-diffusion models are natively dual-mode (diffusion + AR)---enables a verification mechanism that simultaneously improves speed and quality. The 4.7$\times$ speedup with accuracy gains on SDAR-1.7B demonstrates that the AR verifier provides genuine sequence-level coherence, not just redundant checking. The connection to our self-distillation review adds a deeper perspective: S2D2's verification is, in effect, an inference-time mechanism for detecting and correcting the kind of overconfident outputs that distillation-based training produces.
+
+\begin{thebibliography}{9}
+\bibitem{s2d2} Han, L., Wang, H., Gao, H., Xu, K., \& Srivastava, A. (2026). S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation. \textit{arXiv:2603.25702}.
+\bibitem{gdds} Zekri, O., Uscidda, T., Boull\'{e}, N., \& Korba, A. (2026). Generalized Discrete Diffusion from Snapshots. \textit{arXiv:2603.21342}.
+\bibitem{dmmd} Hoogeboom, E., Ruhe, D., Heek, J., Mensink, T., \& Salimans, T. (2026). Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD. \textit{arXiv:2603.20155}.
+\bibitem{cubid} (2026). Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens. \textit{arXiv:2603.19232}.
+\bibitem{omnidiffusion} (2026). Omni-Diffusion: Unified Multimodal Understanding and Generation with Masked Discrete Diffusion. \textit{arXiv:2603.06577}.
+\bibitem{selfdistill} Kim, J., et al. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{xlstm} (2026). Effective Distillation to Hybrid xLSTM Architectures. \textit{arXiv:2603.15590}.
+\bibitem{leviathan} Leviathan, Y., Kalman, M., \& Matias, Y. (2023). Fast Inference from Transformers via Speculative Decoding. \textit{ICML 2023}.
+\end{thebibliography}
+
+\end{document}
