@@ -1,0 +1,138 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Trace2Skill --- Distill Trajectory-Local Lessons\\into Transferable Agent Skills}
+\author{Internbot --- Automated Research Review}
+\date{March 31, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Trace2Skill: Distill Trajectory-Local Lessons into Transferable Agent Skills \\
+\textbf{Authors:} Jingwei Ni, Yihao Liu, Xinpeng Liu, Yutao Sun, Mengyu Zhou, Pengyu Cheng, Dexin Wang, Xiaoxi Jiang, Guanjun Jiang \\
+\textbf{Affiliations:} ETH Zurich, Peking University, Zhejiang University, Alibaba (Qwen) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2603.25158}{2603.25158} \\
+\textbf{Topics:} Continual Learning, LLM Agents, Skill Acquisition
+
+\subsection{Problem}
+
+Manual skill authoring for LLM agents does not scale: as agents deploy across specialized domains, hand-crafting structured skill documents becomes infeasible. Automated alternatives face two pathologies: (1)~\textit{skill fragmentation}---online paradigms create many narrow, per-trajectory snippets requiring retrieval infrastructure; (2)~\textit{sequential overfitting}---sequential update methods react prematurely to individual trajectory lessons before building holistic domain understanding. Meanwhile, simply prompting an LLM to generate skills from parametric knowledge produces near-zero benefit (26.17\% vs.\ 27.67\% with no skill on SpreadsheetBench-Vrf).
+
+The key insight: human experts analyze experience broadly first, then consolidate into a single comprehensive guide. Trace2Skill operationalizes this methodology.
+
+\subsection{Method}
+
+\paragraph{Skill Formalization.}
+A skill $S = (M, R)$ consists of a root markdown document $M$ (procedural knowledge, failure modes, step-by-step strategies) and auxiliary resources $R$ (executable scripts, domain references). The goal: given a frozen agent $\pi_\theta$, initial skill $S_0$, and evolve/test task splits, produce $S^*$ with $P(S^*) > P(S_0)$ \textit{without updating model parameters}.
+
+\paragraph{Three-Stage Pipeline.}
+
+\begin{enumerate}
+    \item \textbf{Trajectory Generation:} The frozen agent runs on evolve tasks using $S_0$, producing labeled trajectories partitioned into failures ($\mathcal{T}^-$) and successes ($\mathcal{T}^+$). Fully parallelizable; $\sim$200 trajectories in $<$2 GPU-hours.
+
+    \item \textbf{Parallel Multi-Agent Patch Proposal:} 128 analyst sub-agents each examine a single trajectory independently and propose edits to the skill:
+    \begin{itemize}
+        \item \textit{Success Analyst} ($A^+$): Single-pass workflow identifying generalizable behavior patterns.
+        \item \textit{Error Analyst} ($A^-$): Multi-turn ReAct-style agent that inspects traces, compares outputs to ground truth, and iteratively narrows root causes before proposing patches. Quality gate: trajectories without valid causal analysis are excluded.
+    \end{itemize}
+    All analysts operate on a \textbf{frozen copy of $S_0$} with no visibility into other agents' patches.
+
+    \item \textbf{Conflict-Free Patch Consolidation:} Patches are merged hierarchically in $L = \lceil \log_{B_{\mathrm{merge}}} |P| \rceil$ levels. The merge operator deduplicates, resolves conflicts, and applies \textit{prevalence-weighted consolidation}: edits appearing consistently across independent patches (reflecting systematic domain properties) are retained; edits appearing in only one patch (potentially idiosyncratic) are discarded.
+\end{enumerate}
+
+\paragraph{Trajectory-Local Lessons.}
+Each analyst extracts lessons grounded in a single execution trace---specific failure diagnoses or generalizable success patterns. The hierarchical merge transforms these local observations into domain-level skills via inductive reasoning over the full population.
+
+\subsection{Results}
+
+Evaluated on Qwen3.5-122B-A10B and Qwen3.5-35B-A3B across spreadsheets, math, and document QA:
+
+\begin{table}[h]
+\centering
+\caption{Trace2Skill performance gains (absolute pp) over no-skill baseline.}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Setting} & \textbf{SprBench-Vrf} & \textbf{WikiTQ (OOD)} & \textbf{DAPO-Math} & \textbf{DocVQA Acc.} \\
+\midrule
+122B Deepening +Combined & +21.50 & +4.56 & --- & --- \\
+122B Creation +Error & +22.83 & +7.89 & +3.0 & +15.3 \\
+35B-authored $\to$ 122B & +1.00 & \textbf{+57.65} & +5.0 & --- \\
+35B Deepening +Combined & +20.00 & +42.20 & +4.0 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}
+    \item \textbf{+57.65 pp OOD transfer:} Skills evolved by a 35B model on SpreadsheetBench improved a 122B agent by 57.65 absolute pp on WikiTableQuestions---an out-of-distribution benchmark the skill was never evolved on.
+    \item \textbf{Cross-model transfer:} Skills transfer across model scales. A 35B-authored skill improves 122B performance (and vice versa), challenging the assumption that experience is model-specific.
+    \item \textbf{Beats retrieval-based memory:} Outperforms ReasoningBank by +13.8 pp on Vrf (122B). ReasoningBank on 35B barely exceeds no-skill (20.50\% vs.\ 19.00\%), indicating retrieval fails when query representations misalign with stored embeddings.
+    \item \textbf{Beats sequential editing:} +4.0 pp over sequential $B=1$ at 20$\times$ faster speed ($\sim$3 min vs.\ $\sim$60 min on 8-GPU A800 node).
+    \item \textbf{Agentic error analysis matters:} Multi-turn ReAct error analysts outperform single-LLM-call analysis by +12.2 pp. They agree on only 12.1\% of shared error cases; the single-call analyzer over-attributes parse failures as root causes in 57\% of cases (vs.\ 14\% for agentic).
+    \item \textbf{Skill authoring $\neq$ task execution:} The 35B model outperforms 122B on raw DocVQA but is a far worse skill author ($-6.2$ pp when using self-authored skills vs.\ $+15.3$ pp for 122B-authored skills).
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{No causal patch attribution:} Patches are consolidated holistically; isolating the marginal contribution or interference of individual edits is not possible.
+    \item \textbf{No runtime skill tracing:} No mechanism tracks which skill sections the agent actually relies on during inference, preventing automated pruning.
+    \item \textbf{Success analyst instability:} The +Success condition has highest variance---produces the largest gains (+17.6 pp) but also drops below baseline ($-0.9$ pp) in one setting.
+    \item \textbf{Domain-dependent gains:} Spreadsheet gains (+21 pp) far exceed math gains (+3 pp), suggesting the approach is most powerful in procedurally rich domains and less impactful where raw reasoning is the bottleneck.
+    \item \textbf{Single-round evolution:} Whether iterating the pipeline yields diminishing or compounding returns is unexplored.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+Trace2Skill directly extends our continual learning for LLM agents thread. Where MetaClaw~\cite{metaclaw} learns \textit{how to adapt} via meta-learning and OEL~\cite{oel} stores \textit{what to remember} in episodic memory, Trace2Skill addresses \textit{how to consolidate experience into reusable knowledge}---transforming trajectory-local lessons into portable declarative artifacts. The prevalence-weighted consolidation is a form of structural abstraction reminiscent of AAT~\cite{aat}: both methods separate systematic patterns (retain) from instance-specific noise (discard), though AAT operates at the representation level during training while Trace2Skill operates at the artifact level post-hoc. The finding that skill authoring and task execution are dissociable capabilities also connects to our self-distillation review~\cite{selfdistill}---both papers reveal that the \textit{meta-cognitive} capacity (self-reflection, skill articulation, epistemic awareness) can diverge from raw task performance.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Iterative Trace2Skill with OEL Episodic Memory}
+
+\textbf{Gap:} Trace2Skill performs a single round of evolution: generate trajectories $\to$ analyze $\to$ consolidate. But real-world agent deployment is ongoing---new tasks, new failure modes, and evolving domains require \textit{continual skill refinement}. OEL~\cite{oel}'s episodic memory provides a mechanism for selectively storing high-value experiences, but lacks the consolidation machinery to transform accumulated episodes into structured skills.
+
+\textbf{Approach:} Combine OEL's episodic memory as a \textit{trajectory buffer} with Trace2Skill's parallel consolidation as a periodic \textit{skill update} mechanism. During deployment, the agent stores execution traces in OEL's episodic memory with retrieval-augmented support for immediate decisions. Periodically (e.g., every 100 episodes), Trace2Skill's pipeline runs on the buffered traces to update the declarative skill. The key innovation: use OEL's memory importance scoring to prioritize which traces enter the consolidation pipeline---structurally informative failures (high retrieval frequency, high surprise) get analyzed first. After consolidation, traces whose lessons have been absorbed into the skill are pruned from memory, maintaining a bounded buffer. This creates a two-tier continual learning system: fast episodic retrieval for short-term adaptation, slow skill consolidation for long-term knowledge accumulation.
+
+\textbf{Feasibility:} High. Both systems are training-free and operate on the same LLM backbone. The integration requires only scheduling Trace2Skill consolidation runs and adding a pruning criterion to OEL's memory. The main research question is the update frequency---too frequent updates risk sequential overfitting (Trace2Skill's original concern), while too infrequent updates delay skill improvement.
+
+\subsection{Direction 2: AAT-Style Structural Abstraction for Patch Consolidation}
+
+\textbf{Gap:} Trace2Skill's prevalence-weighted consolidation uses an LLM merge operator to identify recurring patterns. This is effective but opaque---the merge is a black-box LLM call that may miss subtle structural similarities between patches phrased differently. AAT~\cite{aat} showed that explicit entity masking amplifies relational structure by 1.5$\times$ over entity-specific noise. Applying analogous abstraction to Trace2Skill's patches could improve consolidation quality.
+
+\textbf{Approach:} Before merging, transform each patch into an ``abstract patch'' by masking domain-specific entities (file paths, column names, specific error codes) with generic placeholders. Merge operates on both concrete and abstract versions simultaneously (AAT's dual-objective approach). The abstract merge identifies structural patterns (``always verify after write'' appears across all spreadsheet patches regardless of which column is written), while the concrete merge preserves domain-specific details. The merged output inherits the structural confidence of the abstract merge with the specificity of the concrete merge. This should reduce the variance of the success analyst (which produces the most domain-specific, least generalizable patches) and improve cross-domain transfer.
+
+\textbf{Feasibility:} Medium-high. The abstraction step is straightforward---NER-based masking or template extraction from patches. The dual-objective merge requires modifying Trace2Skill's merge operator but not the overall pipeline. The main challenge is calibrating the abstraction level: too abstract loses actionable detail, too concrete misses structural patterns.
+
+\subsection{Direction 3: Skill-Guided Curriculum for MetaClaw's Continual Meta-Learning}
+
+\textbf{Gap:} MetaClaw~\cite{metaclaw} learns meta-strategies for adapting to new tasks but does not generate persistent, transferable skill artifacts. Trace2Skill generates skills but does not learn \textit{how to generate better skills} over time. Combining them: MetaClaw's meta-learning could optimize Trace2Skill's skill evolution process itself, learning which analyst configurations, merge strategies, and trajectory selection criteria produce the highest-quality skills across domains.
+
+\textbf{Approach:} Treat Trace2Skill's pipeline as MetaClaw's inner loop: for each new domain, MetaClaw selects the analyst configuration (error-only vs.\ combined, single-call vs.\ agentic, merge batch size), Trace2Skill generates the skill, and the resulting agent performance provides the meta-learning signal. Over multiple domains, MetaClaw learns a meta-policy for skill evolution---e.g., ``use error-only analysis for procedurally rich domains, combined analysis for reasoning-heavy domains.'' The evolved meta-policy transfers to new domains without re-running the full configuration search. Additionally, MetaClaw's memory stores the \textit{skill evolution history}---which patch patterns were most impactful across domains---enabling zero-shot initial skill generation for new domains by recombining previously successful patterns.
+
+\textbf{Feasibility:} Medium. MetaClaw's meta-learning framework is compatible with Trace2Skill's pipeline, but the meta-learning loop requires multiple domain-level evaluations, which is computationally expensive. Start with a simplified version: meta-learn only the analyst type selection (error-only vs.\ combined) and merge batch size, using the paper's existing multi-domain results as training signal.
+
+\section{Conclusion}
+
+Trace2Skill introduces a principled methodology for transforming agent execution traces into portable, declarative skills via parallel multi-agent analysis and prevalence-weighted consolidation. The +57.65 pp OOD transfer result is striking---demonstrating that trajectory-derived skills can generalize far beyond their evolution domain. For our continual learning thread, Trace2Skill fills the ``knowledge consolidation'' gap: MetaClaw learns \textit{how to adapt}, OEL remembers \textit{what happened}, AAT shapes \textit{what representations to learn}, and now Trace2Skill distills experience into \textit{reusable declarative knowledge}. The dissociation between skill authoring and task execution adds an important dimension---meta-cognitive capabilities (reflection, articulation, abstraction) deserve study as first-class objectives alongside raw task performance.
+
+\begin{thebibliography}{9}
+\bibitem{trace2skill} Ni, J., Liu, Y., Liu, X., Sun, Y., Zhou, M., Cheng, P., Wang, D., Jiang, X., \& Jiang, G. (2026). Trace2Skill: Distill Trajectory-Local Lessons into Transferable Agent Skills. \textit{arXiv:2603.25158}.
+\bibitem{metaclaw} (2026). MetaClaw: Just Talk -- An Agent That Meta-Learns and Evolves in the Wild. \textit{arXiv:2603.17187}.
+\bibitem{oel} (2026). Online Experiential Learning for Language Models. \textit{arXiv:2603.16856}.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{selfdistill} Kim, J., et al. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv:2603.07392}.
+\bibitem{reasoningbank} (2025). ReasoningBank: Retrieval-Augmented Memory for LLM Agents. \textit{Prior work}.
+\end{thebibliography}
+
+\end{document}
