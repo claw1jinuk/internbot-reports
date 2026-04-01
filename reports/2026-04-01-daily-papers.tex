@@ -1,0 +1,146 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: LLaVA-DyMoE --- Dynamic MoE with Drift-Aware\\Token Assignment for Continual Learning of LVLMs}
+\author{Internbot --- Automated Research Review}
+\date{April 1, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large Vision Language Models \\
+\textbf{Authors:} Chongyang Zhao, Mingsong Li, Haodong Lu, Dong Gong \\
+\textbf{Affiliation:} UNSW Sydney \\
+\textbf{Venue:} CVPR 2026 \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2603.27481}{2603.27481} \\
+\textbf{Topics:} Continual Learning, Mixture-of-Experts, Vision-Language Models
+
+\subsection{Problem}
+
+Dynamic Mixture-of-Experts (MoE) is a natural architecture for continual learning: when a new task arrives, add new expert modules (LoRA adapters) and freeze old ones, providing parameter isolation. In principle, old knowledge should be preserved since old experts are never modified. However, the paper identifies a devastating failure mode: \textbf{routing drift}. The router must still be updated to accommodate new experts, and this update inadvertently teaches the router to \textit{attract old-task tokens} to new experts that were never trained on those patterns.
+
+The core insight is the \textbf{token's dilemma}: not all tokens in new-task data contribute equally. Through controlled experiments, three token types are identified:
+\begin{itemize}
+    \item \textbf{New tokens:} High affinity to new experts. Drive new-task learning with minimal forgetting.
+    \item \textbf{Old tokens:} High affinity to old experts. Offer minimal new-task benefit but bias the new router toward old-task patterns.
+    \item \textbf{Ambiguous tokens:} Similar affinity to both groups. Most dangerous---minimal learning value yet directly induce routing drift.
+\end{itemize}
+
+\subsection{Method}
+
+LLaVA-DyMoE proposes a two-fold regularization framework applied only during training (zero inference overhead):
+
+\paragraph{Token Assignment Guidance (TAG).}
+For each token at each MoE layer, compute the maximum routing logit within old ($c_{\mathrm{old}}$) and new ($c_{\mathrm{new}}$) expert groups. Define relative ambiguity:
+\begin{equation}
+D_{\mathrm{rel}} = \frac{|c_{\mathrm{new}} - c_{\mathrm{old}}|}{\max(|c_{\mathrm{new}}|, |c_{\mathrm{old}}|) + \epsilon}
+\end{equation}
+A token routes to new experts \textit{only if} both conditions hold: (1)~$D_{\mathrm{rel}} > \tau$ (not ambiguous, default $\tau = 20\%$) and (2)~$c_{\mathrm{new}} > c_{\mathrm{old}}$ (new-dominant). Otherwise, new-expert logits are set to $-\infty$, steering the token exclusively to frozen old experts.
+
+\paragraph{Routing Score Regularization (RSR).}
+Two complementary soft losses:
+\begin{itemize}
+    \item \textbf{Exclusivity loss:} $\mathcal{L}_{\mathrm{exc}} = g_{\mathrm{old}} \cdot g_{\mathrm{new}}$, where $g_{\mathrm{old}}, g_{\mathrm{new}}$ are total routing probability to each expert group. Minimizing the product encourages tokens to route to \textit{one} group, not both.
+    \item \textbf{Specialization loss:} $\mathcal{L}_{\mathrm{spe}} = -y \log(g_{\mathrm{new}}) - (1-y)\log(1 - g_{\mathrm{new}})$ with $y = 1 - \max_i w_i^{\mathrm{old}}$. Promotes new-expert utilization when old experts are not strongly activated, preventing under-use of newly added capacity.
+\end{itemize}
+
+The overall loss is $\mathcal{L} = \mathcal{L}_{\mathrm{NTP}} + \lambda \mathcal{L}_{\mathrm{aux}} + \alpha(\mathcal{L}_{\mathrm{exc}} + \mathcal{L}_{\mathrm{spe}})$ with $\alpha = \lambda = 10^{-3}$.
+
+\paragraph{Architecture.}
+Built on LLaVA-v1.5-7B/13B. Each new task adds 16 rank-4 LoRA experts per MoE layer. Old experts and their router parameters are frozen; only new experts and new router dimensions are trained. Top-$K$ routing ($K=16$) over all experts.
+
+\subsection{Results}
+
+Evaluated on the CoIN benchmark (8 sequential VQA tasks, 569K training / 261K test samples):
+
+\begin{table}[h]
+\centering
+\caption{Main results on CoIN benchmark (LLaVA-v1.5-7B). Higher MFN/MAA = better; higher BWT = less forgetting.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{MFN (\%)} & \textbf{MAA (\%)} & \textbf{BWT} \\
+\midrule
+LoRA & 41.79 & 43.99 & $-$23.12 \\
+EWC & 40.86 & 43.75 & $-$21.76 \\
+LWF & 43.98 & 44.89 & $-$19.69 \\
+O-LoRA & 49.53 & 46.65 & $-$17.54 \\
+IncMoELoRA (baseline) & 49.68 & 49.50 & $-$16.67 \\
+\textbf{LLaVA-DyMoE} & \textbf{57.03} & \textbf{57.70} & $\mathbf{-4.67}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}
+    \item \textbf{+7.35\% MFN, +12 BWT improvement} over IncMoELoRA baseline, with only 4.4\% training overhead and zero inference overhead.
+    \item \textbf{Dramatic per-task gains:} ImageNet 95.80\% vs.\ 68.42\% (+27.38\%), VizWiz 52.35\% vs.\ 39.46\% (+12.89\%).
+    \item \textbf{TAG is the largest contributor:} Alone improves BWT from $-$15.44 to $-$7.04 (ablation). RSR adds further gains ($-$7.04 $\to$ $-$4.67).
+    \item \textbf{Composable:} Combined with replay (buffer=1000), achieves BWT of $-$0.64 (near-zero forgetting). Combined with task-specific routers, MFN reaches 60.02\%.
+    \item \textbf{Scales to 13B:} MFN 60.39\%, BWT $-$4.64 at 13B scale.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Single benchmark:} All experiments on CoIN (8 VQA tasks). Generality to other task types (generation, captioning, dialogue) or longer task sequences is unverified.
+    \item \textbf{Linear expert growth:} 16 experts per task $\times$ 8 tasks $= 128$ total experts. For dozens or hundreds of tasks, memory grows linearly. Expert consolidation/pruning is explored only superficially.
+    \item \textbf{Threshold sensitivity:} $\tau$ must be tuned per domain ($10$--$20\%$ works well but may shift for different distributions).
+    \item \textbf{RefCOCO remains low:} Even with LLaVA-DyMoE, grounding accuracy is only 9.25\%---suggesting the approach benefits some task types more than others.
+    \item \textbf{No forward transfer analysis:} Potential for old knowledge to help new tasks via MoE routing is not studied.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+LLaVA-DyMoE introduces the \textit{architectural} dimension to our continual learning thread, complementing representation-level (AAT~\cite{aat}), memory-level (OEL~\cite{oel}), meta-learning (MetaClaw~\cite{metaclaw}), artifact-level (Trace2Skill~\cite{trace2skill}), and benchmark (OAKS~\cite{oaks}) approaches. The routing drift phenomenon is structurally analogous to the epistemic suppression identified in our self-distillation review~\cite{selfdistill}: both are subtle failure modes where training dynamics corrupt internal decision-making (router assignments vs.\ uncertainty expression) without obviously degrading training-set performance. The token-level analysis (new/old/ambiguous) also parallels AAT's gradient decomposition (relational vs.\ entity-specific components)---both papers identify that not all training signals are equal, and selectively filtering harmful signals is key.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Drift-Aware Routing for Text-Only LLM Continual Learning}
+
+\textbf{Gap:} LLaVA-DyMoE addresses routing drift in multimodal MoE models, but the phenomenon is general---any dynamic MoE system with shared routing faces drift when expanding. Our continual learning reviews (OAKS~\cite{oaks}, OEL~\cite{oel}, AAT~\cite{aat}) focus on text-only LLMs that are increasingly adopting MoE architectures (Mixtral, Qwen-MoE). Routing drift in text-only MoE continual learning is unstudied.
+
+\textbf{Approach:} Port LLaVA-DyMoE's TAG and RSR to text-only MoE LLMs (e.g., Qwen3.5-MoE) and evaluate on OAKS's knowledge stream benchmark. The token classification (new/old/ambiguous) transfers directly to text tokens. However, text-only MoE models typically have pre-trained expert routing (unlike LLaVA-DyMoE's from-scratch LoRA experts), so TAG must account for the pre-existing routing structure. Specifically, measure drift as the KL divergence between the pre-training routing distribution and the post-CL routing distribution for held-out old-task tokens, and use this as a regularization target.
+
+\textbf{Feasibility:} High. TAG and RSR are architecture-agnostic regularizations that apply to any MoE router. The main effort is adapting to pre-trained MoE models (where experts already have established roles) rather than tabula rasa LoRA experts. Expected benefit: reduced forgetting on OAKS knowledge streams, directly addressing the gap identified in our OAKS review.
+
+\subsection{Direction 2: Combining AAT's Structural Abstraction with TAG's Token Filtering}
+
+\textbf{Gap:} AAT~\cite{aat} amplifies relational gradients via entity masking to resist forgetting, operating at the representation level. TAG filters tokens at the routing level based on expert affinity. These are complementary mechanisms: AAT shapes \textit{what the model learns} from each token, TAG controls \textit{where each token is routed}. Combining them could yield a system that simultaneously learns more transferable representations and routes them to the correct experts.
+
+\textbf{Approach:} In a dynamic MoE setup, apply AAT's dual-objective loss (concrete + abstract) within each expert's training. For tokens routed to new experts by TAG, train the expert on both the concrete input and its entity-masked abstract version. The abstract training biases the new expert toward relational structure (which transfers across tasks), while TAG ensures only genuinely new-pattern tokens reach the new expert. The interaction is synergistic: TAG prevents drift-inducing tokens from reaching new experts (routing-level stability), and AAT prevents the new expert from overfitting to entity-specific patterns within the tokens it does process (representation-level stability). Evaluate on CoIN and compare against each method alone.
+
+\textbf{Feasibility:} High. Both methods are training-time regularizations with minimal implementation overhead. AAT's entity masking applies to the input sequence before it enters the MoE layer, while TAG operates on the routing logits within the layer---they are non-interfering by design. The main question is whether the combined regularization is too conservative (hurting plasticity), which can be tuned via $\alpha$ (AAT's abstract weight) and $\tau$ (TAG's ambiguity threshold).
+
+\subsection{Direction 3: Expert Consolidation via Trace2Skill-Style Skill Merging}
+
+\textbf{Gap:} LLaVA-DyMoE adds 16 LoRA experts per task, growing linearly. For long-lived agents (MetaClaw~\cite{metaclaw}'s setting with hundreds of tasks), this becomes unsustainable. Expert pruning (tested superficially in the paper) removes underutilized experts but does not consolidate knowledge from redundant experts. Trace2Skill~\cite{trace2skill}'s prevalence-weighted consolidation offers a template: merge diverse trajectory-local lessons into a single skill by identifying shared patterns.
+
+\textbf{Approach:} After every $K$ tasks, run a consolidation phase: identify expert groups with high routing overlap (experts frequently co-activated by the same tokens), analyze their weight matrices to extract shared subspaces, and merge them into a single expert that preserves the shared knowledge. Use Trace2Skill's consolidation principle: weight matrices that are similar across multiple experts reflect systematic patterns (retain), while expert-specific deviations reflect task-specific quirks (compress). Concretely, apply SVD to the concatenated LoRA weight matrices of overlapping experts, retain the top-$r$ singular vectors (shared structure), and create a merged expert. Update the router to route to the merged expert instead of the original group.
+
+\textbf{Feasibility:} Medium. SVD-based LoRA merging is well-studied, and routing overlap analysis is straightforward given the router's softmax outputs. The challenge is ensuring the merged expert preserves the combined knowledge without losing task-specific capabilities. Start with a conservative approach: only merge experts with $>90\%$ routing overlap (nearly identical function), gradually lowering the threshold based on validation performance.
+
+\section{Conclusion}
+
+LLaVA-DyMoE identifies routing drift as the mechanistic cause of forgetting in dynamic MoE continual learning and resolves it through token-level analysis and drift-aware routing. The +7.35\% MFN and 12-point BWT improvement demonstrate that the problem was not parameter interference (old experts are frozen) but \textit{routing interference}---a subtler failure mode at the decision-making level. For our lab, this adds the architectural dimension to a now-comprehensive continual learning framework: OAKS evaluates, OEL remembers, MetaClaw adapts, AAT shapes representations, Trace2Skill consolidates knowledge, and LLaVA-DyMoE controls routing. The composability result (combining with replay for BWT $-$0.64, near-zero forgetting) suggests these approaches are not alternatives but building blocks of a unified continual learning system.
+
+\begin{thebibliography}{9}
+\bibitem{dymoe} Zhao, C., Li, M., Lu, H., \& Gong, D. (2026). On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large Vision Language Models. \textit{CVPR 2026}. arXiv:2603.27481.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{oel} (2026). Online Experiential Learning for Language Models. \textit{arXiv:2603.16856}.
+\bibitem{metaclaw} (2026). MetaClaw: Just Talk -- An Agent That Meta-Learns and Evolves in the Wild. \textit{arXiv:2603.17187}.
+\bibitem{trace2skill} Ni, J., et al. (2026). Trace2Skill: Distill Trajectory-Local Lessons into Transferable Agent Skills. \textit{arXiv:2603.25158}.
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv:2603.07392}.
+\bibitem{selfdistill} Kim, J., et al. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{ewc} Kirkpatrick, J., et al. (2017). Overcoming Catastrophic Forgetting in Neural Networks. \textit{PNAS}, 114(13), 3521--3526.
+\end{thebibliography}
+
+\end{document}
