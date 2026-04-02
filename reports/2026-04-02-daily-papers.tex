@@ -1,0 +1,153 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: FIPO --- Eliciting Deep Reasoning with\\Future-KL Influenced Policy Optimization}
+\author{Internbot --- Automated Research Review}
+\date{April 2, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization \\
+\textbf{Authors:} Chiyu Ma, Shuo Yang, Kexin Huang, Jinda Lu, et al.\ (Qwen Pilot Team, Alibaba) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2603.19835}{2603.19835} \\
+\textbf{Topics:} Reinforcement Learning, Policy Optimization, LLM Reasoning
+
+\subsection{Problem}
+
+Modern RL-for-reasoning methods (GRPO, DAPO) rely on outcome-based rewards: a binary verifier checks whether the final answer is correct, and this single reward is broadcast \textit{uniformly} across every token. A token representing a critical logical pivot receives exactly the same credit as a trivial formatting token. This coarse-grained credit assignment causes \textbf{length stagnation}---chain-of-thought lengths plateau at $\sim$4,000 tokens, the model converges to single-pass linear reasoning, and never develops self-reflection or multi-pass verification.
+
+The prior remedy is PPO with a learned value function (GAE for token-specific advantages), but this requires training an additional critic network. Recent critic-augmented methods (VC-PPO, VAPO) pre-train the critic on SFT data containing long-CoT traces, introducing a confounding knowledge prior. FIPO achieves \textbf{dense, token-level credit assignment without a critic model}, staying within the efficient GRPO framework.
+
+\subsection{Method}
+
+\paragraph{Probability Shift.}
+The atomic signal is the token-level log-probability shift between current and old policy:
+\begin{equation}
+\Delta \log p_t = \log \pi_\theta(o_t \mid q, o_{<t}) - \log \pi_{\theta_{\mathrm{old}}}(o_t \mid q, o_{<t})
+\end{equation}
+Prior work shows RL updates are extremely sparse: over 98\% of generation steps see identical distributions. RL only intervenes at a few critical tokens.
+
+\paragraph{Discounted Future-KL.}
+The key insight: a token's true significance depends on the trajectory it initiates. Future-KL aggregates the cumulative signed probability shift from step $t$ to the end:
+\begin{equation}
+\mathrm{FutureKL}_t = \sum_{k=t}^{T} M_k \cdot \gamma^{k-t} \cdot \Delta \log p_k
+\end{equation}
+where $\gamma = 2^{-1/\tau}$ with half-life $\tau = 32$ (a token 32 steps ahead contributes half the weight), and $M_k$ masks tokens with importance ratios exceeding a dual-clip threshold $c \geq 10$.
+
+\begin{itemize}
+    \item $\mathrm{FutureKL}_t > 0$: The policy has reinforced the entire subsequent trajectory---this token anchors good reasoning.
+    \item $\mathrm{FutureKL}_t < 0$: The policy is suppressing the future tokens following $t$---this trajectory branch is disfavored.
+\end{itemize}
+
+\paragraph{Influence Weight.}
+FutureKL modulates the token-level advantage:
+\begin{equation}
+f_t = \mathrm{clip}\!\left(\exp(\mathrm{FutureKL}_t),\; 1 - \epsilon_f^{\mathrm{low}},\; 1 + \epsilon_f^{\mathrm{high}}\right), \qquad \tilde{A}_t = \hat{A}_t \cdot f_t
+\end{equation}
+The $\exp(\cdot)$ maps accumulated log-space signals to multiplicative weights. Clipping bounds the modulation ($[1.0, 1.2]$ for 32B; $[0.8, 1.2]$ for 7B).
+
+\paragraph{Stability.}
+Without safeguards, vanilla FutureKL causes training collapse ($\sim$step 70: gradient explosion, length divergence). Two mechanisms prevent this: (1)~masking tokens with extreme importance ratios; (2)~resetting $f_t = 1$ for negative-advantage tokens with excessive importance ratios.
+
+\paragraph{Relationship to Standard KL Penalty.}
+Standard RLHF KL says ``don't change too much'' (regularization). FutureKL says ``here's how much the future trajectory has been reinforced/suppressed, use this to weight credit'' (information signal). FutureKL is signed, sample-specific, and forward-looking---fundamentally different from the always-non-negative, position-local KL penalty.
+
+\subsection{Results}
+
+Primary model: Qwen2.5-32B-Base (clean base, no prior long-CoT exposure), trained on DAPO-17K:
+
+\begin{table}[h]
+\centering
+\caption{AIME results (Avg@32 = average accuracy over 32 samples).}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{AIME 2024} & \textbf{AIME 2024 Cons@32} & \textbf{AIME 2025} & \textbf{AIME 2025 Cons@32} \\
+\midrule
+DAPO (baseline) & 50.0\% & 60.0\% & 38.0\% & 47.0\% \\
+\textbf{FIPO} & \textbf{56.0\%} & \textbf{73.0\%} & \textbf{43.0\%} & \textbf{50.0\%} \\
+\midrule
+DeepSeek-R1-Zero-32B & $\sim$47.0\% & --- & --- & --- \\
+o1-mini & $\sim$56.0\% & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}
+    \item \textbf{+6\% over DAPO} on AIME 2024 (56\% vs.\ 50\%), surpassing DeepSeek-R1-Zero-32B and matching o1-mini---achieved through pure RL on a clean base model with no distillation or critic.
+    \item \textbf{Breaks length stagnation:} DAPO plateaus at $\sim$4K tokens; FIPO extends to \textbf{10K+ tokens} (all percentiles shift, not just outliers).
+    \item \textbf{Progressive reasoning depth:} Four emergent stages---superficial planning $\to$ linear execution $\to$ self-reflection $\to$ systematic multi-pass auditing with symbolic re-derivation.
+    \item \textbf{Reliability gains:} Cons@32 (consensus accuracy) improves by +13\% on AIME 2024 (60\% $\to$ 73\%), indicating more consistent reasoning rather than lucky hits.
+    \item \textbf{7B model:} FIPO achieves 40\% on AIME 2024 vs.\ 36\% DAPO and 22\% GRPO.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Cost:} Extending CoT to 10K+ tokens significantly increases training and inference cost. The paper frames compression as future work.
+    \item \textbf{Math-only evaluation:} Validated only on AIME. Generalization to coding, symbolic logic, or open-ended reasoning is untested.
+    \item \textbf{Scale-dependent hyperparameters:} 7B and 32B require different clipping ranges and exhibit different entropy dynamics. Optimal configuration is not plug-and-play.
+    \item \textbf{Coverage improvement is modest:} Pass@32 improves only 80\% $\to$ 83\%. FIPO mostly makes the model more consistently correct on solvable problems, rather than expanding the frontier of solvable ones.
+    \item \textbf{Reproducibility:} Mini-batch size 32 shows ``severe reproducibility issues''; mini-batch 64 is more stable but the sensitivity is concerning.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+FIPO directly extends our RL thread: BandPO~\cite{bandpo} addresses trust-region bounds for stable optimization, URLVR~\cite{urlvr} scales unsupervised RL, and FIPO solves the credit assignment bottleneck that limits both. The connection to our self-distillation review~\cite{selfdistill} is particularly striking: FIPO's emergent deep reasoning (self-reflection, multi-pass verification) is precisely the kind of \textit{epistemic verbalization} that self-distillation suppresses. Where self-distillation compresses reasoning into confident single-pass traces (losing OOD robustness), FIPO's dense credit assignment actively \textit{rewards} exploratory reasoning, creating a virtuous cycle that extends chains rather than shortening them.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: FIPO for Epistemic-Preserving RL Training}
+
+\textbf{Gap:} Our self-distillation review~\cite{selfdistill} showed that distillation suppresses epistemic verbalization (uncertainty markers like ``wait,'' ``hmm''), degrading OOD reasoning by up to 40\%. FIPO's dense credit assignment provides a mechanism to \textit{explicitly reward} epistemic verbalization---but the current formulation is agnostic to token semantics (it weights by future probability shift, not by token type). If epistemic markers are at reasoning pivots where the model reconsiders its approach, FutureKL should naturally identify them as high-influence tokens; but this is not verified.
+
+\textbf{Approach:} Analyze the correlation between FutureKL values and epistemic token positions in FIPO-trained reasoning traces. If epistemic tokens consistently receive high positive FutureKL (confirming they anchor productive self-correction), this validates FutureKL as an implicit epistemic preservation signal. If not, augment the influence weight with an explicit epistemic bonus: $f_t' = f_t \cdot (1 + \beta \cdot \mathbb{I}[o_t \in \mathcal{E}])$ where $\mathcal{E}$ is the set of epistemic markers. Apply this to post-distillation models: after distillation (which suppresses epistemic verbalization), run FIPO with the epistemic-augmented influence to restore the self-corrective reasoning that distillation removed.
+
+\textbf{Feasibility:} High. The analysis component (correlating FutureKL with epistemic positions) requires only inference on existing FIPO traces. The augmented influence weight is a minor modification to FIPO's objective. The main research question is whether FIPO can \textit{restore} epistemic capacity that has been suppressed, or whether distillation causes irreversible representational damage.
+
+\subsection{Direction 2: FutureKL as Token-Level Credit for BandPO's Trust Regions}
+
+\textbf{Gap:} BandPO~\cite{bandpo} bridges trust regions and ratio clipping via probability-aware bounds, providing theoretically grounded optimization stability. However, like GRPO, BandPO uses uniform advantages---the trust region constrains \textit{how much} each token can change but not \textit{which} tokens should change most. FIPO's FutureKL provides the complementary signal: dense credit assignment that identifies \textit{which} tokens to prioritize. Combining BandPO's principled trust regions with FIPO's dense credit could yield both stable \textit{and} efficient optimization.
+
+\textbf{Approach:} Replace FIPO's standard PPO-style clipping with BandPO's probability-aware bounds while retaining FutureKL's influence weights. The combined objective becomes:
+\begin{equation}
+J(\theta) = \mathbb{E}\!\left[\sum_t \min\!\left(r_{i,t} \cdot f_{i,t} \cdot \hat{A}_{i,t},\; \mathrm{BandClip}(r_{i,t}) \cdot f_{i,t} \cdot \hat{A}_{i,t}\right)\right]
+\end{equation}
+where $\mathrm{BandClip}$ is BandPO's adaptive trust-region clipping. The hypothesis: BandPO provides token-level stability (preventing any single token update from being too large), while FutureKL provides token-level priority (concentrating updates on reasoning-critical tokens). This should reduce FIPO's sensitivity to clipping hyperparameters (currently scale-dependent) by replacing ad-hoc clipping with principled bounds.
+
+\textbf{Feasibility:} Medium-high. Both FIPO and BandPO are modifications to the PPO/GRPO objective that can be composed. The main challenge is tuning the interaction between BandPO's adaptive bounds and FutureKL's influence weights. Start with FIPO's 7B setting (where reproducibility issues are documented) and test whether BandPO's trust regions improve stability.
+
+\subsection{Direction 3: Dense Credit Assignment for Continual RL Training}
+
+\textbf{Gap:} URLVR~\cite{urlvr} demonstrates that unsupervised RL can scale LLM training, but its credit assignment is still outcome-based (uniform advantages). In a continual learning setting (OAKS~\cite{oaks}-style knowledge streams), the agent must learn new reasoning patterns while retaining old ones. Uniform credit assignment is particularly harmful here: new-task training equally reinforces all tokens, including those using old-task reasoning patterns that should be preserved unchanged. This is analogous to LLaVA-DyMoE~\cite{dymoe}'s routing drift---but at the advantage level rather than the routing level.
+
+\textbf{Approach:} Apply FutureKL in a continual RL setting where the model is sequentially trained on different reasoning domains. Use the FutureKL signal to identify tokens representing \textit{domain-specific reasoning pivots} (high FutureKL on the current domain) versus \textit{shared reasoning infrastructure} (stable FutureKL across domains). Design a domain-aware advantage modulation: amplify credit for domain-specific pivots (accelerate new-domain learning) while attenuating credit for shared infrastructure tokens (prevent overwriting). Combined with AAT~\cite{aat}'s structural abstraction (which biases toward transferable relational patterns), this creates a continual RL system that learns new reasoning domains while preserving the common reasoning substrate.
+
+\textbf{Feasibility:} Medium. The FutureKL computation generalizes directly to continual settings. The domain-aware modulation requires maintaining FutureKL statistics across domains to classify tokens as domain-specific vs.\ shared, adding bookkeeping overhead. Start with a two-domain pilot (e.g., math $\to$ code reasoning) and measure whether FutureKL-based domain classification reduces forgetting.
+
+\section{Conclusion}
+
+FIPO elegantly solves the credit assignment problem in GRPO-family RL by using the policy's own probability shifts, aggregated forward in time, as dense token-level advantage weights. The discounted Future-KL mechanism distinguishes reasoning-critical tokens from trivial ones without requiring a critic network, breaking the 4K-token length stagnation ceiling and progressively scaling chain-of-thought to 10K+ tokens with emergent self-reflection. For our lab, FIPO's dense credit assignment is the missing component for our RL and continual learning threads: it provides the token-level signal that BandPO's trust regions can constrain, that URLVR's unsupervised scaling can leverage, and that our continual learning systems (AAT, LLaVA-DyMoE) need to selectively preserve or update reasoning patterns during sequential training. The finding that dense credit assignment \textit{elicits} the very reasoning behaviors (self-reflection, multi-pass verification) that distillation \textit{suppresses} closes a conceptual loop: RL with proper credit assignment builds reasoning depth, while distillation without epistemic preservation destroys it.
+
+\begin{thebibliography}{9}
+\bibitem{fipo} Ma, C., Yang, S., Huang, K., Lu, J., et al. (2026). FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization. \textit{arXiv:2603.19835}.
+\bibitem{bandpo} (2026). BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning. \textit{arXiv:2603.04918}.
+\bibitem{urlvr} (2026). How Far Can Unsupervised RLVR Scale LLM Training? \textit{arXiv:2603.08660}.
+\bibitem{selfdistill} Kim, J., et al. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{oaks} (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv:2603.07392}.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{dymoe} Zhao, C., et al. (2026). On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning. \textit{CVPR 2026}. arXiv:2603.27481.
+\bibitem{grpo} Shao, Z., et al. (2024). DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. \textit{arXiv:2402.03300}.
+\end{thebibliography}
+
+\end{document}
