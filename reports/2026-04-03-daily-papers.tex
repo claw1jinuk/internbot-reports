@@ -1,0 +1,162 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: QuitoBench --- A High-Quality Open\\Time Series Forecasting Benchmark}
+\author{Internbot --- Automated Research Review}
+\date{April 3, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} QuitoBench: A High-Quality Open Time Series Forecasting Benchmark \\
+\textbf{Authors:} Siqiao Xue, Zhaoyang Zhu, Wei Zhang, Rongyao Cai, Rui Wang, Yixiang Mu, Fan Zhou, Jianguo Li, Peng Di, Hang Yu \\
+\textbf{Affiliation:} Ant Group (Alipay) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2603.26017}{2603.26017} \\
+\textbf{Topics:} Time Series Forecasting, Benchmarking, Foundation Models
+
+\subsection{Problem}
+
+Time series forecasting (TSF) suffers from a \textbf{benchmark crisis}: among four major AI domains surveyed on arXiv (2020--2025), time series has the lowest rate of benchmark-dedicated publications at 4.2\%, compared to 9.9\% (NLP), 7.0\% (speech), and 6.8\% (vision). While NLP has GLUE and vision has ImageNet, TSF has no comparable standard. The two most widely used evaluation suites---GIFT-Eval and the Timer benchmark---exhibit four structural flaws:
+
+\begin{enumerate}
+    \item \textbf{Coarse categorization:} Series are grouped by application domain (electricity, traffic, weather), but domain labels are poor predictors of forecasting difficulty. Two ``traffic'' series can differ far more in predictability than a traffic and an electricity series with similar structure.
+    \item \textbf{Distributional skew:} GIFT-Eval concentrates 50.7\% of series in a single TSF regime; the Timer benchmark concentrates 76.2\% (65.8\% in one cell). Aggregate metrics are dominated by the most prevalent data type.
+    \item \textbf{Information leakage:} Assembling heterogeneous public datasets creates both direct overlap (multi-purpose reuse across training and evaluation) and indirect leakage (temporally correlated series sharing common causal drivers).
+    \item \textbf{Short-series bias:} 50\% of GIFT-Eval series contain fewer than 200 time points, precluding long-context evaluation---precisely the regime where foundation models claim advantage.
+\end{enumerate}
+
+With 20+ time series foundation models (TSFMs) published in two years---including Timer-S1~\cite{timers1}, Chronos-2, TimesFM-2.5---these flaws mean current benchmarks cannot answer the fundamental deployment question: \textit{when is a 200M-parameter foundation model worth deploying over a 1M-parameter deep learning model?}
+
+\subsection{Method}
+
+\paragraph{The Quito Corpus.}
+QuitoBench draws from \textbf{Quito}, a billion-scale, single-provenance time series corpus from Alipay's production platform spanning nine business verticals (finance, commerce, advertising, infrastructure, risk, etc.). Two subsets from disjoint pools: Quito-Min (22,522 series at 10-minute frequency, 5,904 steps each, 0.7B tokens) and Quito-Hour (12,544 series at 1-hour frequency, 15,356 steps each, 1.0B tokens). Each series records traffic workload of a distinct application service with 5 variates (anonymized traffic subtypes), aggregated via max-pooling to preserve bursty peaks. Total: \textbf{1.6 billion tokens}.
+
+\paragraph{TSF Regimes.}
+The key methodological contribution is a \textit{regime-based} characterization of time series difficulty. Each series is profiled by a triple $(T, S, F) \in [0,1]^3$:
+\begin{itemize}
+    \item $T$ (Trend strength): Fraction of variance explained by the trend component of an STL decomposition.
+    \item $S$ (Seasonality strength): Fraction of variance explained by the seasonal component.
+    \item $F$ (Forecastability): Signal regularity, defined as $F = 1 - H$ where $H$ is the normalized spectral entropy via Welch's method. $F=1$ means energy concentrated in few frequencies (highly predictable); $F=0$ means white noise.
+\end{itemize}
+Each diagnostic is binarized at threshold $\tau = 0.4$, yielding $2^3 = 8$ \textbf{TSF regime cells} (e.g., high\_high\_high = strong trend, strong seasonality, high forecastability). For multivariate series, $T$, $S$, $F$ are averaged across all 5 variates before binarization.
+
+\paragraph{Balanced Benchmark Construction.}
+A five-stage pipeline ensures quality: (1)~raw collection from Alipay production; (2)~sanitization via deterministic hashing and near-duplicate detection (Pearson $r > 0.99$); (3)~leakage-free temporal splitting at a global cutoff (2023-07-28); (4)~TSF diagnostic computation and regime labeling; (5)~stratified sampling drawing $\sim$162 series per regime cell, yielding \textbf{1,290 test series} distributed near-uniformly across all 8 cells (10.5--13.2\% each). The single proprietary provenance eliminates both direct and indirect information leakage by construction.
+
+\paragraph{Dense Evaluation Protocol.}
+Rolling windows with \textbf{unit stride} (one step at a time) produce $\sim$1.6$\times$10$^7$ predictions per model---1--2 orders of magnitude more than GIFT-Eval's sparse scheme of max 20 windows. This yields 232,200 evaluation instances across 18 configurations: 3 context lengths ($L=96, 576, 1024$) $\times$ 3 forecast horizons ($H=48, 288, 512$) $\times$ 2 modes (multivariate, univariate).
+
+\paragraph{Diversity Validation.}
+Quito achieves 1.24--1.57$\times$ higher standard deviation on every TSF axis and \textbf{1.67$\times$ higher regime entropy} (1.99 bits vs.\ Timer's 1.19 bits) than the multi-provenance Timer benchmark---a single-source corpus that is more diverse than a multi-source one, precisely because balanced construction replaces domain-based grouping.
+
+\subsection{Results}
+
+Ten models spanning three families are evaluated: 5 deep learning (CrossFormer $\sim$1M params, DLinear $\sim$300K, iTransformer $\sim$2M, PatchTST $\sim$5M, TSMixer $\sim$1M), 3 foundation models (Chronos-2 100M, TimesFM-2.5 200M, TiRex 30M), and 2 statistical baselines (Exponential Smoothing, Seasonal Naive).
+
+\begin{table}[h]
+\centering
+\caption{Overall performance on QuitoBench (mean across 18 configurations).}
+\begin{tabular}{llcc}
+\toprule
+\textbf{Model} & \textbf{Category} & \textbf{Mean Rank} & \textbf{Mean MAE} \\
+\midrule
+\textbf{CrossFormer} & Deep learning & \textbf{2.86} & \textbf{0.279} \\
+Chronos-2 & Foundation & 3.36 & 0.314 \\
+TimesFM-2.5 & Foundation & 4.21 & 0.319 \\
+PatchTST & Deep learning & 4.35 & 0.299 \\
+TiRex & Foundation & 4.36 & 0.322 \\
+iTransformer & Deep learning & 4.67 & 0.301 \\
+TSMixer & Deep learning & 5.51 & 0.311 \\
+DLinear & Deep learning & 7.26 & 0.369 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{Context-length crossover:} At short context ($L=96$), deep learning outperforms foundation models by 24.6\% in MAE (0.343 vs.\ 0.455). At long context ($L \geq 576$), foundation models overtake, leading by up to 18.1\% at $L=1024$ (0.245 vs.\ 0.299). Foundation models improve 43--50\% from short to long context; deep learning only 7--12\%. \textit{History length is the primary factor in model selection.}
+
+    \item \textbf{Forecastability dominates difficulty:} Mean MAE of 0.278 on high-forecastability series vs.\ 0.505 on low-forecastability (1.81$\times$ gap). The easiest regime (high\_high\_high, MAE 0.205) is \textbf{3.64$\times$ easier} than the hardest (high\_low\_low, MAE 0.749). Even series with no trend and no seasonality but high forecastability (low\_low\_high, MAE 0.220) are nearly as easy as the best case---forecastability is the dominant axis.
+
+    \item \textbf{Parameter efficiency gap:} CrossFormer ($\sim$1M params, MAE 0.279) outperforms Chronos-2 (100M params, MAE 0.314)---\textbf{100$\times$ fewer parameters} for better accuracy. Deep learning models average 1.9M params vs.\ foundation models' 110M, a 58$\times$ gap with comparable MAE (0.312 vs.\ 0.319; Cohen's $d = -0.067$, not practically significant).
+
+    \item \textbf{Data scaling $\gg$ model scaling:} CrossFormer MAE drops 66\% (0.725 $\to$ 0.248) from 10K to 100M training tokens, following a near-linear log-log curve. TimesFM-2.5 drops only 24\% over the same range. Model size scaling plateaus beyond 1M parameters for both families. \textit{More data is far more valuable than more parameters.}
+
+    \item \textbf{Regime specialization:} Foundation models win 6 of 8 regimes (high-seasonality or high-forecastability). Deep learning wins the remaining 4 (low-seasonality), with CrossFormer achieving a 48.5\% advantage over Chronos-2 on high\_low\_high. Foundation models are more robust under low forecastability ($\sim$1.75$\times$ degradation vs.\ $\sim$2.3$\times$ for deep learning).
+
+    \item \textbf{Ranking robustness:} Cross-metric Spearman $\rho = 0.733$ (MAE vs.\ MSE); cross-benchmark $\rho = 0.865$ (QuitoBench vs.\ Timer). CrossFormer retains top rank under all metrics and benchmarks.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Single-provenance data:} All data originates from Alipay. While the corpus spans 9 business verticals and achieves higher TSF diversity than multi-provenance benchmarks, certain workload patterns (batch-heavy HPC, CDN edge caches) may be under-represented.
+    \item \textbf{Point forecasting only:} No probabilistic forecasting, prediction intervals, or distributional metrics (CRPS, calibration). Timer-S1~\cite{timers1} reports CRPS on GIFT-Eval; QuitoBench cannot evaluate this dimension.
+    \item \textbf{No multivariate interaction analysis:} Series have 5 variates but the benchmark does not isolate cross-variate dependency exploitation as a performance factor.
+    \item \textbf{Limited foundation model fine-tuning:} Only TimesFM-2.5 was fine-tuned; Chronos-2's tokenization-based T5 architecture and TiRex's retrieval-augmented design do not support straightforward MSE fine-tuning. This leaves open whether fine-tuned foundation models would close the gap.
+    \item \textbf{Regime threshold sensitivity:} The $\tau = 0.4$ binarization threshold is validated over $[0.3, 0.5]$ but remains a design choice that affects regime balance.
+    \item \textbf{No causal or exogenous evaluation:} Pure endogenous forecasting; no assessment of how models handle external covariates or causal interventions.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+QuitoBench directly challenges the evaluation foundation on which Timer-S1~\cite{timers1} claims state-of-the-art. Timer-S1 reports MASE 0.693 and CRPS 0.485 on GIFT-Eval---but QuitoBench shows GIFT-Eval concentrates 50.7\% of series in a single regime and suffers from information leakage. The cross-benchmark correlation ($\rho = 0.865$) suggests Timer-S1's rankings would likely transfer, but the \textit{magnitude} of its advantage over smaller models may be inflated by GIFT-Eval's distributional skew toward regimes where foundation models excel (high-seasonality, high-forecastability).
+
+The ``data scaling $\gg$ model scaling'' finding has profound implications for our time series thread. Timer-S1's approach---scaling to 8.3B parameters with a 1T-token TimeBench corpus---invests heavily in both dimensions. QuitoBench suggests the \textit{data} component (TimeBench curation) may be more valuable than the \textit{architecture} component (billion-scale MoE). This connects to our self-distillation review~\cite{selfdistill}: just as distillation quality depends more on what knowledge is transferred than on model capacity, forecasting quality depends more on training data diversity than on parameter count.
+
+The regime-based evaluation framework also provides the missing diagnostic tool for our RL post-training direction from the Timer-S1 review: RL rewards can now be \textit{regime-conditioned}, applying different reward functions to different TSF regimes rather than using a single uniform objective.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Regime-Conditioned Evaluation for Timer-S1}
+
+\textbf{Gap:} Timer-S1~\cite{timers1} is evaluated on GIFT-Eval, which QuitoBench shows is heavily skewed (50.7\% in one regime). Timer-S1's 8.3B-parameter MoE architecture with Serial-Token Prediction is designed for complex multi-horizon forecasting, but its advantages may be concentrated in specific regimes while being unnecessary (or even harmful) in others. The regime-based framework provides the diagnostic granularity to decompose Timer-S1's performance and identify where its architectural innovations genuinely help.
+
+\textbf{Approach:} Evaluate Timer-S1 on QuitoBench's 8 balanced regimes. Specifically: (1)~Run Timer-S1 inference across all 18 QuitoBench configurations and compute per-regime MAE. (2)~Compare against CrossFormer (the QuitoBench champion) at matched context lengths, particularly at $L=1024$ where foundation models excel. The hypothesis: Timer-S1's STP blocks provide the most benefit in \textit{low-forecastability} regimes (the hardest cells where QuitoBench shows all models struggle), because serial refinement can progressively denoise chaotic signals---analogous to diffusion models iteratively refining noisy images. (3)~If confirmed, develop a regime-aware inference strategy: use Timer-S1's full STP depth for hard regimes but truncate to fewer STP blocks for easy regimes (exploiting Timer-S1's adaptive-depth property), reducing inference cost without sacrificing accuracy.
+
+\textbf{Feasibility:} High. QuitoBench is publicly available (CC-BY 4.0), and Timer-S1 inference requires only a single forward pass per window. The analysis is purely empirical with no training required. The main challenge is obtaining Timer-S1 model weights (listed as ``will be released''); if unavailable, Chronos-2 and TimesFM-2.5 can serve as proxies for the regime decomposition analysis.
+
+\subsection{Direction 2: Regime-Conditioned RL Post-Training for Time Series Foundation Models}
+
+\textbf{Gap:} Our Timer-S1 review proposed RL-based post-training with domain-specific reward functions but lacked a principled way to define reward heterogeneity. QuitoBench's TSF regime framework solves this: different regimes require fundamentally different forecasting strategies (seasonal exploitation vs.\ trend extrapolation vs.\ noise reduction), and a single uniform reward function cannot capture these distinctions. The data-scaling finding further motivates this: if more data helps more than more parameters, then RL post-training should focus on \textit{efficient data utilization} (learning regime-specific strategies from existing data) rather than parameter expansion.
+
+\textbf{Approach:} Define regime-conditioned reward functions for GRPO-style~\cite{grpo} post-training of Timer-S1. For each TSF regime $r$, define reward $R_r$ that emphasizes the regime's dominant challenge: high-trend regimes reward trend-following accuracy (penalizing level shifts), high-seasonality regimes reward phase alignment (penalizing temporal misalignment), and low-forecastability regimes reward conservative predictions (penalizing overconfident point estimates). Use QuitoBench's regime labels as the conditioning signal. Timer-S1's STP blocks serve as natural ``reasoning steps'' for process reward modeling: intermediate forecasts at each STP block $j$ are evaluated against ground truth with regime-specific metrics, providing dense credit assignment---analogous to FIPO's~\cite{fipo} FutureKL mechanism but applied to forecasting horizons rather than reasoning tokens.
+
+\textbf{Feasibility:} Medium-high. The regime classification is cheap (STL + spectral entropy on the context window). GRPO infrastructure from LLM post-training transfers to time series with minimal modification (replace token-level log-probabilities with per-step forecast distributions). The main research question is whether RL post-training provides meaningful gains over supervised post-training given that forecasting rewards are continuous rather than binary. Start with the pathological high\_low\_low regime (MAE 0.749, 3.64$\times$ harder than easiest) where the largest room for improvement exists.
+
+\subsection{Direction 3: Data-Efficient Foundation Model Training via Regime-Balanced Curricula}
+
+\textbf{Gap:} QuitoBench's most striking finding is that data scaling dominates model scaling: CrossFormer's MAE drops 66\% from 10K to 100M tokens while model scaling plateaus beyond 1M parameters. Timer-S1's TimeBench contains 1T tokens, but if this corpus has the same distributional skew as GIFT-Eval (concentrated in easy regimes), the marginal value of most training tokens is low. A regime-balanced training curriculum could achieve comparable performance with far fewer tokens by ensuring each training batch contains balanced representation across difficulty levels.
+
+\textbf{Approach:} Apply QuitoBench's TSF regime profiling to Timer-S1's TimeBench training corpus. Compute $(T, S, F)$ for each training series and identify the regime distribution. If skewed (as QuitoBench's analysis of Timer/GIFT-Eval suggests is likely), construct a regime-balanced curriculum: (1)~oversample rare/hard regimes (especially high\_low\_low and high\_high\_low, the two hardest cells); (2)~undersample dominant easy regimes; (3)~apply curriculum learning that gradually introduces harder regimes as training progresses. The hypothesis: a regime-balanced 100M-token subset of TimeBench can match the full 1T-token training, achieving a \textbf{10$\times$ data efficiency gain}. This connects to AAT's~\cite{aat} insight that not all training signals are equal---selectively filtering and balancing training data is more valuable than indiscriminate scaling. It also parallels LLaVA-DyMoE's~\cite{dymoe} token-level analysis (new/old/ambiguous tokens): regime profiling classifies entire \textit{series} by their informational value to the model, enabling selective training at the dataset level rather than the token level.
+
+\textbf{Feasibility:} Medium. TSF regime profiling of TimeBench is straightforward (STL + spectral entropy are cheap to compute). The curriculum design and retraining require significant compute but are conceptually simple. The main risk is that regime-balanced training may not transfer: models trained on balanced regimes might underperform on real-world deployments where some regimes are naturally rare. Validate by testing on both QuitoBench (balanced) and the original Timer benchmark (skewed) to ensure the curriculum improves hard-regime performance without degrading easy-regime performance.
+
+\section{Conclusion}
+
+QuitoBench establishes the first principled, leakage-free, regime-balanced benchmark for time series forecasting, revealing that the TSF evaluation landscape has been systematically biased toward easy, high-seasonality series where foundation models appear most dominant. The context-length crossover finding ($L < 576$: deep learning wins; $L \geq 576$: foundation models win) provides the first actionable model selection criterion. The data-scaling dominance ($66\%$ MAE reduction from more data vs.\ plateau from more parameters) challenges the ``scale the model'' paradigm that drives Timer-S1 and similar billion-parameter TSFMs.
+
+For our lab, QuitoBench transforms our time series thread from a single-model review (Timer-S1) into a structured evaluation framework. Timer-S1's Serial-Token Prediction, evaluated on GIFT-Eval, now needs regime-level validation on QuitoBench to determine whether its architectural innovations provide genuine advantages or merely benefit from benchmark skew. The regime framework also enables the RL post-training direction from our Timer-S1 review: regime-conditioned rewards can provide the heterogeneous supervision signal that uniform forecasting losses cannot. Most broadly, the ``data quality $>$ model size'' finding aligns with a recurring theme across our reviews---from self-distillation~\cite{selfdistill} (what you transfer matters more than capacity) to AAT~\cite{aat} (which gradients you amplify matters more than how many you compute) to LLaVA-DyMoE~\cite{dymoe} (which tokens you route matters more than how many experts you add)---and now QuitoBench extends this principle to the dataset level: which series you train on matters more than how many parameters you train.
+
+\begin{thebibliography}{9}
+\bibitem{quitobench} Xue, S., Zhu, Z., Zhang, W., Cai, R., Wang, R., Mu, Y., Zhou, F., Li, J., Di, P., \& Yu, H. (2026). QuitoBench: A High-Quality Open Time Series Forecasting Benchmark. \textit{arXiv:2603.26017}.
+\bibitem{timers1} Liu, Y., Su, X., Wang, S., Zhang, H., Liu, H., Wang, Y., Ye, Z., Xiang, Y., Wang, J., \& Long, M. (2026). Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling. \textit{arXiv:2603.04791}.
+\bibitem{fipo} Ma, C., Yang, S., Huang, K., Lu, J., et al. (2026). FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization. \textit{arXiv:2603.19835}.
+\bibitem{selfdistill} Kim, J., et al. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{dymoe} Zhao, C., Li, M., Lu, H., \& Gong, D. (2026). On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning. \textit{CVPR 2026}. arXiv:2603.27481.
+\bibitem{grpo} Shao, Z., et al. (2024). DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. \textit{arXiv:2402.03300}.
+\end{thebibliography}
+
+\end{document}
