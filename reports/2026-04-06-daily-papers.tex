@@ -1,0 +1,182 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: SKILL0 --- In-Context Agentic\\Reinforcement Learning for Skill Internalization}
+\author{Internbot --- Automated Research Review}
+\date{April 6, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization \\
+\textbf{Authors:} Zhengxi Lu, Zhiyuan Yao, Jinyang Wu, Chengcheng Han, Qi Gu, Xunliang Cai, Weiming Lu, Jun Xiao, Yueting Zhuang, Yongliang Shen \\
+\textbf{Affiliation:} Zhejiang University, Meituan, Tsinghua University \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.02268}{2604.02268} \quad \textbf{Code:} \href{https://github.com/ZJU-REAL/SkillZero}{GitHub} \\
+\textbf{Topics:} Reinforcement Learning, Agent Skill Learning, Continual Learning
+
+\subsection{Problem}
+
+Current LLM agents acquire complex behaviors through \textbf{inference-time skill augmentation}: structured procedural knowledge (``skills'') is retrieved from a skill bank and injected into the context at each decision step. This paradigm suffers from three fundamental limitations:
+
+\begin{enumerate}
+    \item \textbf{Retrieval noise:} Irrelevant or misleading skills corrupt the agent's context and degrade performance.
+    \item \textbf{Token overhead:} Injected skill content compounds across multi-turn interactions, consuming 2.21k tokens/step on ALFWorld and 0.87k on Search-QA (SkillRL baseline).
+    \item \textbf{No actual learning:} The model \emph{follows} skill descriptions in its prompt but never \emph{internalizes} them into parameters. Competence resides in the context, not in the weights, permanently anchoring agents in an ``explicit instruction phase'' rather than an ``internalized autonomous phase'' (Anderson, 1982).
+\end{enumerate}
+
+The core challenge: naive RL fails in both directions. Without skill context, the agent lacks structured guidance for complex multi-step behavior. With full skill context throughout training, the model remains dependent on external knowledge. What is needed is a training regime that \textit{starts with skills and ends without them}.
+
+\subsection{Method}
+
+\paragraph{In-Context Reinforcement Learning (ICRL).}
+Skills are provided as in-context guidance during training rollouts but \textbf{removed entirely at inference}. The agent operates in a sequential decision-making loop: given instruction $I$ and observation history $h_t = \{o_1, \ldots, o_t\}$, the policy $\pi_\theta(a_t \mid I, h_t)$ generates actions. Skills $S$ are organized in a hierarchical SkillBank with two levels: general strategic principles and task-specific procedural knowledge ($N=6$ skill files for ALFWorld, $N=5$ for Search-QA, initialized from SkillRL).
+
+\paragraph{Visual Context Compression.}
+A key innovation: textual interaction context (history $h_t$ and skills $S$) is \textbf{rendered as a compact RGB image} and processed by the vision encoder $\mathrm{Enc}$:
+\begin{equation}
+    V_t = \mathrm{Enc}(h_t, S; c_t), \quad (a_t, c_t) \sim \pi_\theta(a_t, c_t \mid I, V_t)
+\end{equation}
+where $c_t \in (0,1]$ is a \textit{self-generated} compression ratio---the policy learns to control its own context compression alongside action selection. Semantic color coding distinguishes observations (blue), actions (red), and instructions (black).
+
+\paragraph{Composite Reward.}
+The reward combines task success and compression efficiency:
+\begin{equation}
+    \tilde{r}_t = r_t + \lambda \cdot r_t^{\mathrm{comp}}, \quad r_t^{\mathrm{comp}} = \begin{cases} \ln(c_t) & \text{if task succeeds} \\ 0 & \text{otherwise} \end{cases}
+\end{equation}
+where $\ln(c_t)$ reflects diminishing marginal returns of higher compression, and $\lambda \geq 0$ controls the task-compression trade-off.
+
+\paragraph{Training Objective.}
+A PPO-style clipped objective with GRPO-style~\cite{grpo} group-normalized advantages:
+\begin{equation}
+    \mathcal{L}_{\mathrm{Skill0}}(\theta) = \mathbb{E}\!\left[\frac{1}{\sum|\tau_i|} \sum_i \sum_t \mathrm{clip}\!\big(r_{i,t}(\theta),\, A_i,\, \epsilon\big)\right] - \beta \cdot D_{\mathrm{KL}}[\pi_\theta \,\|\, \pi_{\mathrm{ref}}]
+\end{equation}
+where $A_i$ is computed by normalizing total rewards $\{\tilde{r}(\tau_i)\}_{i=1}^G$ within the sampled group, and $\beta$ controls KL divergence from a reference model.
+
+\paragraph{Adaptive Curriculum Learning.}
+The core mechanism for progressive skill removal follows a three-phase process:
+
+\begin{enumerate}
+    \item \textbf{Linear skill budget decay:} At stage $s \in \{1, \ldots, N_S\}$, the maximum number of retained skill files is $M^{(s)} = \lceil N \cdot (N_S - s) / (N_S - 1) \rceil$. For ALFWorld ($N\!=\!6$, $N_S\!=\!3$): budget schedule $[6, 3, 0]$.
+
+    \item \textbf{Helpfulness-driven selection:} Every $d=10$ training steps, each skill file $S_k$ is evaluated by measuring the accuracy gap:
+    \begin{equation}
+        \Delta_k = \mathrm{Acc}_k^{\text{w/ skill}} - \mathrm{Acc}_k^{\text{w/o skill}}
+    \end{equation}
+    Skills with $\Delta_k \leq 0$ (already internalized or unhelpful) are filtered out; remaining skills are ranked by $\Delta_k$ and the top $M^{(s)}$ are retained.
+
+    \item \textbf{Zero-shot final stage:} At stage $N_S$, $M^{(N_S)} = 0$, forcing fully autonomous operation without any skill context.
+\end{enumerate}
+
+The linear budget ensures bounded KL divergence between consecutive stages: $D_{\mathrm{KL}}(\pi^{(s)} \| \pi^{(s+1)}) \leq L_\pi \cdot L_E \cdot \lceil N/(N_S - 1) \rceil$, guaranteeing smooth distribution shifts during policy updates.
+
+\subsection{Results}
+
+Evaluated on Qwen2.5-VL-3B and 7B, trained on 4$\times$H800 GPUs ($\sim$180 training steps).
+
+\begin{table}[h]
+\centering
+\caption{Main results: accuracy (\%) and token cost (tokens/step) on ALFWorld and Search-QA.}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{ALF-3B} & \textbf{ALF-7B} & \textbf{SQA-3B} & \textbf{SQA-7B} \\
+\midrule
+Zero-Shot & 15.2 & --- & --- & --- \\
+GRPO & 79.9 (1.02k) & 81.8 (0.95k) & 36.4 (0.61k) & --- \\
+AgentOCR & 78.2 (0.38k) & 81.2 (0.43k) & 34.2 (0.26k) & --- \\
+SkillRL (w/ skills) & 82.4 (2.21k) & 89.9 & 38.9 (0.87k) & --- \\
+EvolveR & 44.1 (1.89k) & --- & 38.2 & 43.1 \\
+Search-R1 & --- & --- & --- & 38.5 \\
+\textbf{Skill0} & \textbf{87.9} (0.38k) & \textbf{89.8} (0.41k) & \textbf{40.8} (0.18k) & \textbf{44.4} (0.34k) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{Positive transfer from skill removal:} Skill0 is the \textit{only} method that improves (+1.6\%) when skills are removed at inference. Static skill injection [6,6,6] collapses by $-$13.3\% when skills are removed, confirming dependence rather than internalization.
+
+    \item \textbf{Dramatic efficiency gains:} 0.38k tokens/step on ALFWorld (5.8$\times$ less than SkillRL's 2.21k) and 0.18k on Search-QA (4.8$\times$ less), with \textit{higher} accuracy. The self-generated compression ratio $c_t$ enables the model to adaptively control its own context budget.
+
+    \item \textbf{Strong out-of-domain generalization:} On Bamboogle (out-of-domain multi-hop reasoning), Skill0-7B achieves 66.9\%---best across all methods including Search-R1 (36.8\%), ZeroSearch (27.8\%), and EvolveR (54.4\%). Internalized skills transfer better than retrieved skills.
+
+    \item \textbf{Helpfulness dynamics:} Skills exhibit a consistent rise-then-fall helpfulness pattern: low initially (policy hasn't learned to leverage skills), peak at mid-training (policy grounds actions in skill context), then dropping to zero as internalization completes. This validates the synergistic mechanism of ICRL + curriculum.
+
+    \item \textbf{Curriculum design is critical:} Removing the Filter step causes $-$2.7\% degradation; replacing Rank with random selection causes catastrophic $-$13.7\% collapse. The helpfulness-driven ranking is essential for stable internalization.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{SkillBank quality dependence:} The method relies on high-quality initial skills (from SkillRL). Poor or incomplete skills would propagate errors into internalization.
+    \item \textbf{Offline grouping:} The relevance-driven skill-to-subtask partitioning is performed offline and requires re-partitioning for new domains---not domain-agnostic.
+    \item \textbf{Vision-language model requirement:} The visual context rendering mechanism requires a VL model (Qwen2.5-VL); purely text-based LLMs cannot use this approach directly.
+    \item \textbf{Limited scale and scope:} Only tested on 3B and 7B models across two benchmarks (ALFWorld, Search-QA). No evaluation at 14B+ scale or on more diverse agent environments.
+    \item \textbf{No continual learning evaluation:} The paper does not test catastrophic forgetting, sequential domain learning, or skill evolution over time---precisely the scenarios where internalized skills would face the greatest challenge.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+Skill0 directly extends our Trace2Skill review~\cite{trace2skill}: where Trace2Skill distills trajectory-local lessons into \textit{retrievable} skills, Skill0 takes the next step by internalizing those skills into model parameters. The progression from trajectory $\to$ skill extraction (Trace2Skill) $\to$ skill internalization (Skill0) defines a complete pipeline for agent capability development, with a clear gap at the intersection: \textit{continual skill internalization} across evolving task distributions.
+
+The training objective builds directly on GRPO~\cite{grpo} with PPO-style clipping and KL constraints, connecting to our FIPO review~\cite{fipo}. FIPO's Future-KL mechanism provides dense credit assignment across reasoning tokens; Skill0's per-step compression reward $\ln(c_t)$ provides a different form of dense signal across action steps. Both address the same fundamental challenge---sparse task-level rewards in multi-step sequential decision-making---from complementary angles (reasoning depth vs.\ context efficiency).
+
+The ``data quality $>$ model size'' theme from QuitoBench~\cite{quitobench} resonates here: Skill0's 3B model (87.9\% on ALFWorld) vastly outperforms GPT-4o (48.0\%) and Gemini-2.5-Pro (60.3\%), suggesting that \textit{what the model learns} (internalized skills via curriculum) matters more than raw parameter count.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Continual Skill Internalization Across Task Streams}
+
+\textbf{Gap:} Skill0 internalizes a fixed SkillBank within a single training run. Real-world agents encounter new tasks continuously, requiring both internalization of new skills and retention of previously internalized ones. The paper explicitly does not evaluate catastrophic forgetting. Our AAT review~\cite{aat} showed that structural abstraction enables zero-memory continual learning by compressing task-specific information into shared representations; LLaVA-DyMoE~\cite{dymoe} demonstrated that dynamic expert routing can separate old and new knowledge. The missing piece is a \textit{continual internalization} framework that combines Skill0's curriculum with continual learning mechanisms.
+
+\textbf{Approach:} Extend Skill0's adaptive curriculum to a \textit{sequential task stream} setting. For each new task domain $\mathcal{T}_k$: (1)~Extract domain-specific skills from Trace2Skill~\cite{trace2skill} on new-domain trajectories. (2)~Run Skill0's ICRL with helpfulness-driven curriculum on $\mathcal{T}_k$. (3)~Apply AAT-style abstraction: after internalization, compress the domain-specific STP-like representations into shared ``skill primitives'' that reduce interference with previously internalized skills. The key insight from LLaVA-DyMoE applies: use the helpfulness metric $\Delta_k$ as a \textit{routing signal}---skills with high $\Delta_k$ for the new domain but low $\Delta_k$ for old domains should be routed to new expert parameters, while skills with cross-domain utility should update shared parameters. This creates a principled criterion for the expand-vs-share decision in continual learning.
+
+\textbf{Feasibility:} Medium. The curriculum infrastructure and helpfulness evaluation from Skill0 transfer directly. The main challenge is designing the abstraction/routing mechanism at the skill level (rather than token level as in LLaVA-DyMoE) and evaluating on a suitably long task stream. Start with a 3-domain sequence (ALFWorld $\to$ Search-QA $\to$ WebShop) where Skill0 already has baselines.
+
+\subsection{Direction 2: Future-KL Guided Skill Internalization}
+
+\textbf{Gap:} Skill0's composite reward $\tilde{r}_t = r_t + \lambda \ln(c_t)$ is effective but provides only a compression-based dense signal---it does not capture \textit{how well the agent is reasoning} at each step. FIPO's~\cite{fipo} Future-KL mechanism provides a fundamentally different dense signal: the KL divergence between the current policy and future states measures the ``reasoning influence'' of each action. Combining these two dense signals could accelerate internalization by rewarding not just efficiency ($c_t$) but also reasoning quality at each decision step.
+
+\textbf{Approach:} Replace Skill0's flat composite reward with a FIPO-inspired structured reward. Define the Future-KL component for agent actions as:
+\begin{equation}
+    r_t^{\mathrm{FK}} = D_{\mathrm{KL}}\!\left[\pi_\theta(\cdot \mid h_t) \,\|\, \pi_\theta(\cdot \mid h_{t+k})\right]
+\end{equation}
+measuring how much the agent's action distribution shifts after observing $k$ future steps. Actions with high Future-KL are ``pivotal decisions'' that deserve credit. The combined reward $\tilde{r}_t = r_t + \lambda_1 \ln(c_t) + \lambda_2 r_t^{\mathrm{FK}}$ provides three complementary signals: task success (sparse), context efficiency (per-step), and reasoning influence (per-step). During the curriculum's early stages (full skill context), Future-KL identifies which skill-guided actions are genuinely informative vs.\ which are redundant, providing a finer-grained signal for the Filter-Rank-Select procedure than the current accuracy-gap $\Delta_k$.
+
+\textbf{Feasibility:} Medium-high. Future-KL computation requires $k$-step rollouts for each action, increasing training cost by approximately $k\times$. However, since Skill0 already uses only $\sim$180 training steps on 4$\times$H800, the total compute remains manageable. Start with $k=3$ on ALFWorld where trajectories are short.
+
+\subsection{Direction 3: Text-Only Skill Internalization via Token-Level Curriculum}
+
+\textbf{Gap:} Skill0 requires a vision-language model (Qwen2.5-VL) because it renders context as RGB images for visual compression. This limits applicability to the small set of VL-capable models and adds the overhead of visual encoding. The self-distillation review~\cite{selfdistill} showed that token-level distribution reshaping (suppressing distractor tails, preserving useful diversity) can transfer knowledge without explicit teacher signals. This suggests a \textit{text-only} variant of skill internalization is possible by operating at the token level rather than the pixel level.
+
+\textbf{Approach:} Replace visual rendering with a \textbf{token-level skill injection and withdrawal curriculum}. Instead of rendering skills as images, inject skill text directly into the prompt but apply progressive \textit{token masking}: at stage $s$, randomly mask a fraction $1 - M^{(s)}/N$ of skill tokens (replacing with a learned [MASK] embedding), forcing the model to reconstruct the masked procedural knowledge from its parameters. This is analogous to MLM pre-training but applied to \textit{skill text} rather than general text. The compression ratio $c_t$ becomes a token-level masking ratio rather than a pixel-level resolution parameter. The self-distillation insight applies: the model learns to suppress tokens that merely restate obvious procedural steps (distractor tails) while preserving tokens that encode genuinely novel strategic knowledge (useful diversity). At the final stage, all skill tokens are masked, achieving zero-shot operation. This approach works with \textit{any} text LLM, dramatically broadening applicability.
+
+\textbf{Feasibility:} High. Token masking is trivially implementable, and the curriculum infrastructure (budget schedule, helpfulness evaluation) transfers from Skill0 unchanged. The main research question is whether token-level masking provides the same smooth internalization dynamics as visual rendering, or whether the discrete masking boundary causes training instability. Evaluate on Search-QA with Qwen2.5-3B-Instruct (text-only) vs.\ Qwen2.5-VL-3B to isolate the modality effect.
+
+\section{Conclusion}
+
+Skill0 establishes the principle that agent skills should be \textbf{training scaffolds, not inference crutches}. The adaptive curriculum with helpfulness-driven skill selection achieves the first demonstration of \textit{positive transfer} from skill removal: the agent performs \textit{better} without skills at inference than with them (+1.6\% on ALFWorld), while consuming 5.8$\times$ fewer tokens than skill-augmented baselines. The rise-then-fall helpfulness dynamic provides empirical evidence that RL can drive genuine knowledge internalization rather than mere prompt following.
+
+For our lab, Skill0 completes a three-paper arc: Trace2Skill~\cite{trace2skill} extracts skills from trajectories, Skill0 internalizes skills into parameters, and the missing piece---continual skill internalization (Direction 1)---would enable lifelong agent capability growth. The connection to FIPO~\cite{fipo} (Direction 2) offers a path to richer dense rewards for agent training, while the text-only variant (Direction 3) would remove the VL-model bottleneck. More broadly, Skill0 reinforces the recurring theme across our reviews: \textit{efficiency comes from selective knowledge compression}, whether through regime-balanced training (QuitoBench~\cite{quitobench}), structural abstraction (AAT~\cite{aat}), dynamic expert routing (LLaVA-DyMoE~\cite{dymoe}), or now skill internalization via adaptive curricula.
+
+\begin{thebibliography}{9}
+\bibitem{skill0} Lu, Z., Yao, Z., Wu, J., Han, C., Gu, Q., Cai, X., Lu, W., Xiao, J., Zhuang, Y., \& Shen, Y. (2026). SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization. \textit{arXiv:2604.02268}.
+\bibitem{trace2skill} Hu, J., Du, W., Xie, Y., et al. (2026). Trace2Skill: Distill Trajectory-Local Lessons into Transferable Agent Skills. \textit{arXiv:2603.25158}.
+\bibitem{fipo} Ma, C., Yang, S., Huang, K., Lu, J., et al. (2026). FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization. \textit{arXiv:2603.19835}.
+\bibitem{quitobench} Xue, S., Zhu, Z., Zhang, W., et al. (2026). QuitoBench: A High-Quality Open Time Series Forecasting Benchmark. \textit{arXiv:2603.26017}.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{dymoe} Zhao, C., Li, M., Lu, H., \& Gong, D. (2026). On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning. \textit{CVPR 2026}. arXiv:2603.27481.
+\bibitem{selfdistill} Kim, J., et al. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{grpo} Shao, Z., et al. (2024). DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. \textit{arXiv:2402.03300}.
+\end{thebibliography}
+
+\end{document}
