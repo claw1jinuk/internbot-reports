@@ -1,0 +1,179 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Self-Distilled RLVR --- Combining\\Reinforcement Learning with Self-Distillation for Dense Credit Assignment}
+\author{Internbot --- Automated Research Review}
+\date{April 7, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Self-Distilled RLVR (RLSD) \\
+\textbf{Authors:} Chenxu Yang, Chuanyu Qin, Qingyi Si, Minghui Chen, Naibin Gu, Dingyu Yao, Zheng Lin, Weiping Wang, Jiaqi Wang, Nan Duan \\
+\textbf{Affiliation:} Institute of Information Engineering (CAS), UCAS, JD.COM \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.03128}{2604.03128} \\
+\textbf{Topics:} Reinforcement Learning, Self-Distillation, Verifiable Rewards, Credit Assignment
+
+\subsection{Problem}
+
+Two paradigms for improving LLM reasoning have complementary strengths and weaknesses:
+
+\textbf{RLVR} (RL with Verifiable Rewards, e.g., GRPO~\cite{grpo}) provides \textbf{reliable direction}---the environment verifier determines whether each trajectory is correct or incorrect---but only \textbf{sparse magnitude}: every token in a response receives the identical group-normalized advantage $A^{(i)}$, whether it is the critical deductive step or filler text. Credit assignment is coarse.
+
+\textbf{OPSD} (On-Policy Self-Distillation) provides \textbf{dense magnitude}---token-level KL divergence between a teacher (same model conditioned on privileged information $r$, e.g., a verified reasoning trace) and a student (query-only)---but \textbf{unreliable direction}. The paper proves this failure is fundamental, not incidental:
+
+\begin{enumerate}
+    \item \textbf{Irreducible MI gap (Theorem 1):} The OPSD loss decomposes as $\mathcal{L}_{\mathrm{OPSD}} = \mathcal{L}^* + I(Y_t; R \mid X, Y_{<t})$, where $I(\cdot)$ is the conditional mutual information between the current token and the privileged information. This term is strictly positive, independent of $\theta$, and \textit{cannot be optimized away}---the student can never reach zero loss.
+
+    \item \textbf{Privileged information leakage:} OPSD-trained models begin explicitly referencing invisible ``reference solutions'' during inference (e.g., ``the reference solution says `No'\,''), with leakage counts increasing monotonically over training.
+
+    \item \textbf{Performance collapse:} OPSD peaks within 10--20 steps then progressively degrades, while on-policy KL between teacher and student stagnates rather than decreasing.
+\end{enumerate}
+
+The core insight: directional signal can be sparse but must be \textit{reliable}; magnitude signal benefits from being dense but need not determine update direction. GRPO satisfies the first; OPSD satisfies the second but catastrophically fails the first. RLSD combines both.
+
+\subsection{Method}
+
+\paragraph{Privileged Information Gain.}
+For each student-sampled trajectory $y = (y_1, \ldots, y_T)$, compute the log-probability gap between the teacher (conditioned on query $x$ + privileged info $r$) and student (query-only):
+\begin{equation}
+    \Delta_t = \mathrm{sg}\!\big(\log \pi_\theta(y_t \mid x, r, y_{<t}) - \log \pi_\theta(y_t \mid x, y_{<t})\big)
+\end{equation}
+where $\mathrm{sg}$ is stop-gradient. $\Delta_t$ isolates the marginal contribution of $r$ to predicting token $y_t$.
+
+\paragraph{Direction-Aware Evidence Reweighting.}
+The evidence ratio is exponentiated with the \textit{sign} of the environment advantage:
+\begin{equation}
+    w_t = \exp\!\big(\mathrm{sign}(A) \cdot \Delta_t\big) = \left(\frac{\pi_\theta(y_t \mid x, r, y_{<t})}{\pi_\theta(y_t \mid x, y_{<t})}\right)^{\!\mathrm{sign}(A)}
+\end{equation}
+When $A > 0$ (correct trajectory), tokens that the privileged info supports ($\Delta_t > 0$) get larger positive credit. When $A < 0$ (incorrect), tokens the privileged info disfavors bear greater blame. Crucially, since $w_t > 0$ always, the \textbf{sign of the advantage is never flipped}---the environment verifier retains exclusive authority over reinforcement vs.\ penalization.
+
+\paragraph{Bayesian Interpretation (Theorem 4).}
+Under mild assumptions, $w_t = P(r \mid x, y_{\leq t}) / P(r \mid x, y_{<t})$---the degree to which generating token $y_t$ increases the posterior belief that $r$ is consistent with the trajectory. The product telescopes: $\prod_t w_t = P(r \mid x, y) / P(r \mid x)$, recovering sequence-level evidence.
+
+\paragraph{Clipped Credit Assignment.}
+The per-token advantage with linear interpolation and clipping:
+\begin{equation}
+    \hat{A}_t^{(i)} = A^{(i)} \cdot \Big((1 - \lambda) + \lambda \cdot \mathrm{clip}(w_t, 1 - \epsilon_w, 1 + \epsilon_w)\Big)
+\end{equation}
+where $\lambda$ starts at 0.5 and linearly decays to 0 over the first 50 training steps (curriculum: early dense credit, later standard GRPO), and $\epsilon_w = 0.2$ bounds per-token deviation.
+
+\paragraph{Training Objective.}
+A drop-in replacement for the uniform advantage in standard GRPO:
+\begin{equation}
+    \mathcal{L}_{\mathrm{RLSD}}(\theta) = \mathbb{E}\!\left[\frac{1}{G}\sum_i \frac{1}{|y^{(i)}|}\sum_t \min\!\Big(\rho_t \cdot \hat{A}_t^{(i)},\; \mathrm{clip}(\rho_t, 1\!-\!\epsilon, 1\!+\!\epsilon) \cdot \hat{A}_t^{(i)}\Big)\right]
+\end{equation}
+No auxiliary loss, no auxiliary model. The only additional cost is one forward pass per response for teacher logits.
+
+\paragraph{Structural Guarantees (Theorem 5 --- Leakage-Free).}
+Three levels of isolation: (1)~\textbf{Directional isolation:} $\mathrm{sign}(\hat{A}_t) = \mathrm{sign}(A)$ always; $r$ cannot influence gradient sign. (2)~\textbf{Support isolation:} Gradients act only on student-sampled tokens. (3)~\textbf{Magnitude boundedness:} $w_t$ is clipped and attenuated by $\lambda$. This resolves the impossibility trilemma: RLSD simultaneously achieves objective stability, sustained improvement, and leakage-free training.
+
+\subsection{Results}
+
+Evaluated on Qwen3-VL-8B-Instruct, trained on MMFineReason-123K (difficulty-filtered subset), using 32$\times$H200 GPUs.
+
+\begin{table}[h]
+\centering
+\caption{Multimodal reasoning benchmarks (\%). RLSD uses only ground-truth answers as privileged info (least demanding).}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Method} & \textbf{MMMU} & \textbf{MathVista} & \textbf{MathVision} & \textbf{ZeroBench} & \textbf{WeMath} & \textbf{Avg.} \\
+\midrule
+Base LLM & 62.44 & 73.80 & 47.37 & 19.76 & 54.10 & 51.49 \\
+GRPO & 65.11 & 76.20 & 48.82 & 22.60 & 56.57 & 53.86 \\
+OPSD & 63.82 & 75.10 & 47.53 & 21.06 & 54.95 & 52.49 \\
+SDPO & 65.11 & 74.00 & 47.27 & 25.15 & 52.19 & 52.74 \\
+GRPO+OPSD & 63.22 & 75.90 & 48.52 & 22.16 & 54.76 & 52.91 \\
+\textbf{RLSD} & \textbf{67.22} & \textbf{78.10} & \textbf{52.73} & \textbf{24.85} & \textbf{58.00} & \textbf{56.18} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{RLSD vs.\ GRPO: +2.32\% average}, with the largest gain on MathVision (+3.91\%), the most challenging benchmark. This validates that dense credit assignment helps most on hard problems where coarse sequence-level rewards are least informative.
+
+    \item \textbf{OPSD degrades below the base model} on 3 of 5 benchmarks (MMMU, MathVision, WeMath), confirming the theoretical prediction of systematic collapse from privileged information leakage. Combining GRPO+OPSD also underperforms pure GRPO, showing that adding OPSD as an auxiliary loss \textit{hurts} rather than helps.
+
+    \item \textbf{2$\times$ convergence speedup:} RLSD at 200 training steps surpasses GRPO trained for 400 steps.
+
+    \item \textbf{Entropy preservation:} GRPO suffers rapid entropy collapse from uniform sequence-level reward; RLSD maintains higher entropy by selectively strengthening critical tokens without uniformly suppressing alternatives. Clip ratios stabilize at 3--6\%, confirming active but bounded per-token credit modulation.
+
+    \item \textbf{Minimal privileged information:} RLSD requires only the ground-truth \textit{answer} (not reasoning traces) as privileged info, while OPSD requires verified reasoning traces distilled from Qwen3-VL-235B. RLSD achieves superior results with less information.
+
+    \item \textbf{Token-level credit visualization:} Heatmaps confirm that decisive reasoning tokens (counting steps, key deductions) receive concentrated credit in correct trajectories, while error-causing tokens (misread relations, wrong computations) receive concentrated blame in incorrect ones.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Single model family:} Only Qwen3-VL-8B-Instruct is evaluated. The authors state preliminary validation on text-only reasoning, video understanding, and non-Qwen models shows consistent gains, but these results are deferred.
+    \item \textbf{Multimodal reasoning only:} No evaluation on text-only reasoning benchmarks (GSM8K, MATH, coding), limiting comparisons with the broader RLVR literature.
+    \item \textbf{No hyperparameter ablation:} The effects of $\epsilon_w$, $\lambda$ schedule, and teacher sync frequency are not ablated.
+    \item \textbf{Bayesian approximation quality:} The evidence ratio interpretation (Theorem 4) relies on a consistent conditional approximation assumption that may weaken with very long privileged information or limited model capacity.
+    \item \textbf{Lambda decay to zero:} The curriculum decays $\lambda \to 0$ over 50 steps, meaning RLSD eventually reduces to vanilla GRPO. The long-term benefit comes from early training dynamics rather than sustained dense credit.
+    \item \textbf{Work in progress:} Explicitly marked as such; the experimental scope is deliberately narrow for early release.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+RLSD resolves a tension that has spanned three of our reviews. Our self-distillation review~\cite{selfdistill} showed that self-distillation can \textit{degrade} reasoning by suppressing epistemic verbalization (up to 40\% OOD drops). RLSD's Theorem 1 provides the \textit{theoretical} explanation: the irreducible MI gap in OPSD means the student encodes spurious teacher-student correlations rather than genuine reasoning capacity. Our URLVR review~\cite{urlvr} showed that RL with verifiable rewards can scale without human annotation but is limited by coarse sequence-level credit. FIPO~\cite{fipo} proposed Future-KL for dense credit assignment in reasoning chains. RLSD offers a \textit{simpler} and \textit{provably leakage-free} alternative to both: one additional forward pass with the ground-truth answer provides token-level credit that is direction-anchored to environmental feedback.
+
+The unified policy gradient template (GRPO: $\hat{A}_t = A$; OPSD: $\hat{A}_t = \Delta_t$; RLSD: $\hat{A}_t = A \cdot \mathrm{clip}(w_t)$) cleanly positions all three paradigms on a single axis. This framework makes explicit why GRPO+OPSD underperforms: adding OPSD's $\Delta_t$ as an auxiliary loss introduces the leakage-prone teacher direction alongside the reliable environment direction, creating conflicting gradients.
+
+The connection to SKILL0~\cite{skill0} is also notable: both methods use privileged information during training and remove it at inference. SKILL0 removes skill context from the prompt; RLSD removes the ground-truth answer from the teacher conditioning. Both achieve ``training scaffolds, not inference crutches''---but RLSD provides the theoretical framework (leakage-free property) that SKILL0 achieves empirically.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: RLSD for Agent Skill Internalization}
+
+\textbf{Gap:} SKILL0~\cite{skill0} internalizes agent skills via a helpfulness-driven curriculum, but its composite reward ($r_t + \lambda \ln(c_t)$) provides only coarse credit: all tokens within a correct trajectory receive the same environment advantage, modulated only by the compression ratio. RLSD's evidence reweighting mechanism provides a fundamentally finer-grained signal. The gap: SKILL0 cannot distinguish which \textit{specific action tokens} in a multi-step trajectory are genuinely skill-informed vs.\ which are generic exploration.
+
+\textbf{Approach:} Replace SKILL0's uniform advantage with RLSD's direction-aware evidence reweighting. Use the skill-conditioned policy as the teacher ($\pi_\theta(a_t \mid I, h_t, S)$) and the skill-free policy as the student ($\pi_\theta(a_t \mid I, h_t)$). The evidence ratio $w_t = P_T(a_t)/P_S(a_t)$ then measures the marginal contribution of skills to each \textit{action}, providing token-level credit for skill-informed decisions. Combined with SKILL0's helpfulness-driven curriculum: during the early stages when skills are present, RLSD identifies which actions are skill-dependent (high $w_t$); as skills are removed, only those high-$w_t$ actions need to be internalized, providing a \textit{targeted} internalization signal rather than uniform curriculum pressure. The leakage-free property ensures that skill information informs credit magnitude but never flips the direction of task-success rewards.
+
+\textbf{Feasibility:} High. RLSD is a drop-in replacement for GRPO's advantage computation, and SKILL0 already uses GRPO-style training. The main implementation challenge is computing teacher logits with skill context at each agent step, which requires one additional forward pass per action. Given SKILL0's short training ($\sim$180 steps), this is manageable. Evaluate on ALFWorld where SKILL0 already shows strong baselines.
+
+\subsection{Direction 2: Sustained Dense Credit via Non-Decaying Evidence Reweighting}
+
+\textbf{Gap:} RLSD's $\lambda$ decays linearly to 0 over the first 50 steps, meaning the method effectively becomes vanilla GRPO for the remaining training. The paper argues this is intentional (early dense credit accelerates convergence), but it leaves open whether \textit{sustained} dense credit throughout training could yield further gains. The 2$\times$ convergence speedup suggests the dense phase is highly valuable; extending it might amplify the benefit. FIPO~\cite{fipo} maintains its Future-KL signal throughout training without decay, achieving sustained improvement.
+
+\textbf{Approach:} Replace the linear decay schedule with an \textbf{adaptive schedule} where $\lambda$ is maintained as long as the evidence weights provide useful signal. Define usefulness as the \textit{variance} of $w_t$ within each trajectory: $\sigma_{w}^{2} = \mathrm{Var}_t[w_t]$. When $\sigma_{w}^{2}$ is high, tokens receive differentiated credit (dense signal is informative); when $\sigma_{w}^{2} \to 0$, all tokens receive near-uniform credit (dense signal is redundant, degrade to GRPO). Set $\lambda = \min(\lambda_{\max}, \alpha \cdot \sigma_{w}^{2})$ adaptively per batch. Additionally, explore combining RLSD's evidence weights with FIPO's Future-KL: $\hat{A}_t = A \cdot \mathrm{clip}(w_{t}^{\mathrm{RLSD}}) \cdot (1 + \gamma \cdot D_{\mathrm{KL},t}^{\mathrm{future}})$, providing two complementary dense signals---backward-looking (how much did the answer support this token?) and forward-looking (how much did this token influence future reasoning?).
+
+\textbf{Feasibility:} Medium-high. The adaptive schedule is straightforward. The RLSD+FIPO combination requires both teacher forward pass and $k$-step future rollouts, roughly doubling the per-step cost. Start with the adaptive schedule alone on the existing Qwen3-VL-8B setup, then add Future-KL on a smaller model (3B) to evaluate the combined signal.
+
+\subsection{Direction 3: Evidence Reweighting for Continual RL Post-Training}
+
+\textbf{Gap:} Current RLVR methods assume single-task optimization. When applied sequentially across domains (math $\to$ coding $\to$ science), they suffer catastrophic forgetting because the uniform advantage in GRPO treats all tokens equally---there is no mechanism to distinguish domain-general reasoning tokens (which should be preserved) from domain-specific tokens (which can be updated). Our continual learning thread (AAT~\cite{aat}, LLaVA-DyMoE~\cite{dymoe}) addresses this at the parameter level; RLSD's evidence reweighting could address it at the \textit{gradient} level.
+
+\textbf{Approach:} Extend RLSD to sequential domain training by using \textbf{cross-domain evidence ratios}. When training on domain $\mathcal{D}_k$ after completing domain $\mathcal{D}_{k-1}$, define a ``preservation teacher'' conditioned on exemplars from $\mathcal{D}_{k-1}$: $\Delta_t^{\mathrm{old}} = \log \pi_\theta(y_t \mid x, r_{\mathrm{old}}, y_{<t}) - \log \pi_\theta(y_t \mid x, y_{<t})$ where $r_{\mathrm{old}}$ contains solved examples from the previous domain. Tokens with high $\Delta_t^{\mathrm{old}}$ (strongly supported by old-domain knowledge) should receive \textit{reduced} gradient magnitude on the new domain to prevent overwriting. This creates a soft, token-level elastic weight consolidation effect without explicitly computing Fisher information. Combined with RLSD's standard evidence ratio for the current domain, each token receives two signals: how important it is for the new task (amplify) and how important it is for retention (dampen). The direction remains anchored to the current domain's verifier, preserving the leakage-free property.
+
+\textbf{Feasibility:} Medium. The cross-domain evidence computation requires maintaining exemplar sets and computing teacher logits conditioned on old-domain privileged info, adding memory and compute overhead. However, the framework is architecturally identical to standard RLSD---no new modules or training phases. Evaluate on a math $\to$ science $\to$ coding sequence using Qwen3-VL-8B, measuring both forward transfer and backward retention via benchmark-specific metrics.
+
+\section{Conclusion}
+
+RLSD provides the theoretical foundation for why self-distillation in RL fails (irreducible MI gap causing privileged information leakage) and a clean solution: repurpose the self-distillation teacher from a generative target to a magnitude evaluator. The unified template ($\hat{A}_t$: uniform for GRPO, teacher-directed for OPSD, evidence-reweighted for RLSD) clarifies the design space and explains why hybrid approaches (GRPO+OPSD) underperform their components.
+
+For our lab, RLSD ties together three previously disconnected threads. The self-distillation degradation review~\cite{selfdistill} identified the \textit{empirical} failure of self-distillation for reasoning; RLSD provides the \textit{theoretical} cause (Theorem 1) and fix. FIPO~\cite{fipo} proposed Future-KL for dense credit; RLSD offers a simpler alternative (one forward pass, no rollouts) with formal leakage-free guarantees. SKILL0~\cite{skill0} achieves ``training scaffolds, not inference crutches'' empirically; RLSD provides the framework to make this principled. The most actionable direction is combining RLSD's evidence reweighting with SKILL0's skill internalization (Direction 1), which requires minimal engineering and leverages existing baselines. Longer-term, the continual RL post-training direction (Direction 3) connects our RL and continual learning threads, using token-level evidence ratios as a gradient-space analogue of elastic weight consolidation.
+
+\begin{thebibliography}{9}
+\bibitem{rlsd} Yang, C., Qin, C., Si, Q., Chen, M., Gu, N., Yao, D., Lin, Z., Wang, W., Wang, J., \& Duan, N. (2026). Self-Distilled RLVR. \textit{arXiv:2604.03128}.
+\bibitem{grpo} Shao, Z., et al. (2024). DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. \textit{arXiv:2402.03300}.
+\bibitem{selfdistill} Kim, J., et al. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{urlvr} Xu, J., et al. (2026). How Far Can Unsupervised RLVR Scale LLM Training? \textit{arXiv:2603.08660}.
+\bibitem{fipo} Ma, C., Yang, S., Huang, K., Lu, J., et al. (2026). FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization. \textit{arXiv:2603.19835}.
+\bibitem{skill0} Lu, Z., Yao, Z., Wu, J., et al. (2026). SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization. \textit{arXiv:2604.02268}.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{dymoe} Zhao, C., Li, M., Lu, H., \& Gong, D. (2026). On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning. \textit{CVPR 2026}. arXiv:2603.27481.
+\end{thebibliography}
+
+\end{document}
