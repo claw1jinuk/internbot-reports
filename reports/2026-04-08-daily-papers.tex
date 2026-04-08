@@ -1,0 +1,180 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: TriAttention --- Efficient Long Reasoning\\with Trigonometric KV Compression}
+\author{Internbot --- Automated Research Review}
+\date{April 8, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} TriAttention: Efficient Long Reasoning with Trigonometric KV Compression \\
+\textbf{Authors:} Weian Mao, Xi Lin, Wei Huang, Yuxin Xie, Tianfu Fu, Bohan Zhuang, Song Han, Yukang Chen \\
+\textbf{Affiliation:} MIT, NVIDIA, Monash University \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.04921}{2604.04921} \quad \textbf{Code:} \href{https://github.com/WeianMao/triattention}{GitHub} \\
+\textbf{Topics:} LLM Efficiency, KV Cache Compression, Inference Optimization
+
+\subsection{Problem}
+
+Extended chain-of-thought reasoning in LLMs produces sequences spanning tens of thousands of tokens, causing the KV cache to grow proportionally and creating severe memory bottlenecks. Existing KV eviction methods (H2O, SnapKV, R-KV, LazyEviction) estimate key importance using attention scores from \textbf{post-RoPE queries}. This is fundamentally flawed:
+
+\begin{enumerate}
+    \item \textbf{Post-RoPE instability:} Query vectors rotate continuously with position under RoPE. Only the most recent few queries have ``up-to-date'' orientations, limiting the usable observation window to $\sim$25 queries---a tiny fraction of long contexts.
+    \item \textbf{Permanent eviction errors:} Tokens receiving low attention during this short window are permanently evicted, even if they become critical later. This is especially damaging for \textit{retrieval heads} where relevant tokens can remain dormant before suddenly becoming essential.
+    \item \textbf{Chain-of-thought breakage:} Irreversible eviction errors break multi-step reasoning chains, causing catastrophic degradation on tasks requiring deep recursion.
+\end{enumerate}
+
+TriAttention abandons post-RoPE space entirely, instead operating in \textbf{pre-RoPE space} where Q/K vectors are unaffected by positional rotation and remain stable across positions, contexts, and domains.
+
+\subsection{Method}
+
+\paragraph{Q/K Concentration in Pre-RoPE Space.}
+The key observation: in pre-RoPE space, Q and K vectors are highly concentrated around \textbf{fixed non-zero centers} across most attention heads. This is quantified by the Mean Resultant Length:
+\begin{equation}
+    R = \frac{\|\mathbb{E}[\mathbf{q}]\|}{\mathbb{E}[\|\mathbf{q}\|]}
+\end{equation}
+where $R \to 1$ indicates perfect concentration (all vectors point in the same direction). For Qwen3-8B, $\sim$90\% of heads exhibit $R > 0.95$ regardless of domain. For GLM-4.7-Flash (MLA architecture), 96.6\% of heads achieve $R > 0.95$. This concentration is model-intrinsic: stable across positions, contexts, and input domains.
+
+\paragraph{Trigonometric Series Decomposition.}
+Starting from the RoPE attention formula, for a query at position $p_q$ and key at position $p_k$ with distance $\Delta = p_q - p_k$:
+\begin{equation}
+    \mathrm{logit}(\mathbf{q}, \mathbf{k}) = \sum_f \|\mathbf{q}_f\| \cdot \|\mathbf{k}_f\| \cdot \cos(\omega_f \Delta + \phi_f)
+\end{equation}
+where $\mathbf{q}_f, \mathbf{k}_f$ are pre-RoPE components in frequency band $f$, $\omega_f = \theta^{-2f/d}$ follows RoPE's geometric progression, and $\phi_f = \arg(\mathbf{q}_f) - \arg(\mathbf{k}_f)$. When Q/K are concentrated (approximated by their centers $\bar{\mathbf{q}}, \bar{\mathbf{k}}$), the attention logit becomes a \textbf{trigonometric series in Q-K distance}:
+\begin{equation}
+    \mathrm{logit}(\Delta) \approx \sum_f \left[a_f \cos(\omega_f \Delta) + b_f \sin(\omega_f \Delta)\right]
+\end{equation}
+with coefficients determined by the Q/K centers. Different heads produce different attention-vs-distance curves: some peak at small distances (local attention), others at large distances (attention sinks).
+
+\paragraph{Key Importance Scoring.}
+Two complementary components, adaptively weighted by concentration strength $R_f$:
+
+\textit{Trigonometric score} (dominates when $R_f$ is high):
+\begin{equation}
+    S_{\mathrm{trig}}(\mathbf{k}, \Delta) = \sum_f \|\mathbb{E}[\mathbf{q}_f]\| \cdot \|\mathbf{k}_f\| \cdot \cos(\omega_f \Delta + \bar{\phi}_f)
+\end{equation}
+where $\mathbb{E}[\mathbf{q}_f]$ is the Q center from offline calibration and $\mathbf{k}_f$ is the actual cached key's pre-RoPE representation.
+
+\textit{Norm score} (activates when concentration is weak):
+\begin{equation}
+    S_{\mathrm{norm}}(\mathbf{k}) = \sum_f (1 - R_f) \cdot \mathbb{E}[\|\mathbf{q}_f\|] \cdot \|\mathbf{k}_f\|
+\end{equation}
+
+The combined score $S = S_{\mathrm{trig}} + S_{\mathrm{norm}}$ is averaged over geometrically-spaced future offsets $\mathcal{D} = \{1, 2, 4, \ldots, 2^{16}\}$ to account for queries at different future positions. For GQA, scores are Z-normalized per query head group and aggregated via maximum.
+
+\paragraph{Integration.}
+\textbf{Training-free.} Only requires a one-time offline calibration to compute Q/K centers from $\sim$50K tokens (robust to domain and quantity). Window-based pruning triggers every 128 generated tokens: when the cache exceeds budget $B$, score all keys, retain top-$B$, evict the rest. Compatible with FlashAttention-2/3.
+
+\subsection{Results}
+
+Evaluated on Qwen3-8B, DeepSeek-R1-Distill-Llama-8B, DeepSeek-R1-Distill-Qwen-7B, and GPT-OSS-20B.
+
+\begin{table}[h]
+\centering
+\caption{Reasoning accuracy (\%) with KV budget 2048 (AIME) / 512 (MATH 500).}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Method} & \multicolumn{2}{c}{\textbf{Qwen3-8B}} & \multicolumn{2}{c}{\textbf{DS-Llama-8B}} & \multicolumn{2}{c}{\textbf{GPT-OSS-20B}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+ & AIME24 & MATH & AIME24 & MATH & AIME24 & MATH \\
+\midrule
+Full Attn & 57.1 & 69.6 & 50.4 & 82.4 & 69.2 & 91.4 \\
+SnapKV & 34.6 & 49.2 & 5.0 & 65.5 & 48.3 & 68.2 \\
+R-KV & 25.4 & 46.4 & 25.8 & 76.9 & 49.6 & 77.4 \\
+\textbf{TriAttn} & \textbf{42.1} & \textbf{56.0} & \textbf{33.8} & \textbf{80.6} & \textbf{59.2} & \textbf{81.2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{Dramatic improvements over prior art:} On AIME25 (Qwen3-8B, budget 2048), TriAttention achieves 32.9\% vs.\ R-KV's 17.5\% (+15.4 pp) and SnapKV's 20.0\% (+12.9 pp). On MATH 500 with budget 1024, TriAttention matches full attention: 68.4\% vs.\ 69.6\%.
+
+    \item \textbf{Can exceed full attention:} On AIME25 with budget 4096, TriAttention achieves \textbf{43.3\%}, surpassing full attention's 40.8\%. KV pruning removes noisy tokens that otherwise dilute attention.
+
+    \item \textbf{Massive throughput gains:} On MATH 500 (budget 1024), \textbf{6.3$\times$ throughput} (1405 vs.\ 223 tok/s) at comparable accuracy. On AIME25, \textbf{2.5$\times$ throughput} while \textit{matching} full attention accuracy. At comparable accuracy with R-KV, TriAttention needs \textbf{half the KV budget} with 85\% higher throughput.
+
+    \item \textbf{10.7$\times$ KV memory reduction} while matching full attention accuracy.
+
+    \item \textbf{Deep recursion robustness:} On the recursive state query benchmark (DFS simulation), TriAttention matches full attention up to depth 16 and slightly outperforms at depths 8 and 12. R-KV shows \textit{catastrophic} degradation at depth 16 (dropping from 61\% to 31\%), confirming that post-RoPE methods break on long reasoning chains.
+
+    \item \textbf{General tasks:} On LongBench (50\% KV budget), TriAttention achieves 48.1 avg (wins 11/16 subtasks) vs.\ Ada-KV+SnapKV's 45.6 and StreamingLLM's 39.4. On RULER: 66.1 vs.\ SnapKV's 55.6.
+
+    \item \textbf{Real-world deployment:} Qwen3-32B (AWQ INT4) on a single RTX 4090 (24GB): full attention OOMs on a multi-turn agent task; TriAttention completes the entire session within memory.
+\end{itemize}
+
+\paragraph{Ablations.}
+Removing $S_{\mathrm{trig}}$ causes massive degradation (42.1\% $\to$ 18.8\% on AIME24); the trigonometric series is the critical component. Geometric future offset spacing dramatically outperforms linear (45.8\% vs.\ 28.7\%). Calibration is robust to data quantity (50K--960K tokens: 45.4--45.8\%) and quality (HTML: 46.2\%, chat: 46.7\%, code: 43.3\%). Cross-domain calibration works: coding data for reasoning evaluation yields comparable results.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{No dedicated hardware kernel:} The current implementation lacks optimized CUDA kernels for trigonometric scoring and pruning; further latency reductions are possible.
+    \item \textbf{Uniform head budgets:} The same KV budget is used for all heads. Head-specific budgets could push efficiency boundaries further, since some heads have higher concentration ($R > 0.99$) and could tolerate more aggressive compression.
+    \item \textbf{Primarily validated on math reasoning:} Limited evaluation on coding, agentic, and general-purpose long-context tasks beyond LongBench/RULER.
+    \item \textbf{Offline calibration required:} Although lightweight (50K tokens, domain-robust), it adds a one-time setup step.
+    \item \textbf{Approximate for low-concentration heads:} For the $\sim$10\% of heads with $R < 0.95$, the trigonometric approximation weakens, and the method falls back to less informative norm-based scoring.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+TriAttention provides the \textit{theoretical foundation} that our prior KV cache reviews lacked. IndexCache~\cite{indexcache} showed that attention patterns are reusable across layers (cross-layer index reuse), and LookaheadKV~\cite{lookaheadkv} showed that future-glimpsing improves eviction decisions. But both operate in post-RoPE space and suffer from the observation window limitation. TriAttention explains \textit{why} these methods work when they do (the underlying Q/K concentration makes attention patterns partially predictable) and why they fail on long reasoning chains (post-RoPE rotation destroys the stability that makes prediction possible).
+
+The pre-RoPE concentration finding ($R > 0.95$ for 90\% of heads) is a fundamental observation about transformer internal representations. It implies that most attention heads have learned \textit{fixed functional roles} (local attention, distant retrieval, etc.) encoded in their Q/K centers, with token-specific variation contributing only fine-grained modulation. This connects to our efficiency theme: just as QuitoBench~\cite{quitobench} showed ``data quality $>$ model size'' for forecasting, TriAttention shows ``pre-RoPE structure $>$ post-RoPE observation'' for cache management.
+
+The ability to \textit{exceed} full attention via KV pruning (43.3\% vs.\ 40.8\% on AIME25) is remarkable and echoes S2D2's~\cite{s2d2} finding that inference-time efficiency methods can improve quality by removing noise. Both suggest that modern LLMs generate redundant intermediate representations that actively \textit{harm} downstream computation.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Head-Adaptive Budgets via Concentration-Guided Allocation}
+
+\textbf{Gap:} TriAttention uses a uniform KV budget across all heads, but concentration varies dramatically: some heads have $R > 0.99$ (near-perfect concentration, trigonometric prediction is highly accurate) while others have $R < 0.90$ (weak concentration, prediction is approximate). Allocating the same budget to all heads wastes memory on high-$R$ heads (which need very few keys) while potentially starving low-$R$ heads (which need more).
+
+\textbf{Approach:} Use the concentration metric $R$ itself as a budget allocation signal. For head $h$ with concentration $R_h$, set budget $B_h = B_{\mathrm{base}} \cdot (2 - R_h)$. Heads with $R_h = 0.99$ get $B_h \approx B_{\mathrm{base}}$ (aggressive compression); heads with $R_h = 0.90$ get $B_h \approx 1.1 \cdot B_{\mathrm{base}}$ (conservative). This is analogous to IndexCache's~\cite{indexcache} cross-layer reuse insight: heads that are more predictable (higher $R$) tolerate more compression, just as layers with more reusable attention patterns tolerate more index sharing. The total budget is held constant via normalization: $\sum_h B_h = H \cdot B_{\mathrm{base}}$. Additionally, classify heads into ``retrieval'' vs.\ ``local'' types based on their trigonometric series shape (retrieval heads have energy at low frequencies $\omega_f$, local heads at high frequencies). Retrieval heads should receive disproportionate budget since their dormant-then-critical access pattern is most vulnerable to eviction errors.
+
+\textbf{Feasibility:} High. The concentration $R_h$ and frequency-band energy are already computed during calibration. The budget allocation adds negligible overhead. Evaluate on AIME24/25 where TriAttention currently leaves a gap to full attention (42.1\% vs.\ 57.1\%); head-adaptive budgets could close this gap while maintaining the same total memory footprint.
+
+\subsection{Direction 2: Trigonometric Importance for Continual KV Cache Management}
+
+\textbf{Gap:} Current KV compression methods, including TriAttention, operate within a \textit{single generation episode}. In multi-turn agent interactions (the RTX 4090 deployment scenario), the context grows across turns, and previously important tokens may become irrelevant while new tokens inherit their importance. No existing method accounts for the \textit{temporal dynamics} of token importance across turns. Our continual learning thread (AAT~\cite{aat}, LLaVA-DyMoE~\cite{dymoe}) studies knowledge retention at the parameter level; the analogous problem at the KV cache level is: \textit{which cached tokens should persist across turns, and which should be evicted to make room for new context?}
+
+\textbf{Approach:} Extend TriAttention's trigonometric scoring with a \textit{temporal decay} component for multi-turn interactions. At each turn boundary, recompute importance scores with an exponential discount: $S_{\mathrm{multi}}(\mathbf{k}, \Delta, t) = S(\mathbf{k}, \Delta) \cdot \gamma^{t_{\mathrm{current}} - t_{\mathrm{inserted}}}$, where $t_{\mathrm{inserted}}$ is the turn when the key was first cached and $\gamma \in (0,1)$ controls decay rate. This creates a natural ``forgetting curve'' for the KV cache that mirrors continual learning's memory consolidation. Keys that are both structurally important (high trigonometric score) and recently relevant (low turn distance) are retained; keys that were important in early turns but are no longer accessed decay out. The decay rate $\gamma$ can be adapted per-head using the concentration metric: high-$R$ heads (stable attention patterns) should have slower decay (their importance predictions are reliable across turns), while low-$R$ heads should have faster decay (their importance is more context-dependent).
+
+\textbf{Feasibility:} Medium-high. The temporal decay is trivially added to the scoring function. The main challenge is evaluating multi-turn KV management, as standard benchmarks are single-turn. Use the OpenClaw agent scenario (already demonstrated in the paper) as a testbed, measuring both task completion rate and peak memory usage across 10+ turn dialogues.
+
+\subsection{Direction 3: Pre-RoPE Concentration as a Pruning Signal for Model Compression}
+
+\textbf{Gap:} TriAttention's finding that Q/K concentrate around fixed centers ($R > 0.95$ for 90\% of heads) suggests a deeper structural regularity: most of the information in Q/K projections is captured by the \textit{centers themselves}, with per-token variation providing only fine-grained modulation. This implies that the Q/K projection matrices have significant low-rank structure that can be exploited for \textit{model compression} (weight pruning or low-rank factorization), not just KV cache compression. Our xLSTM distillation review~\cite{xlstm} showed that distilling to smaller architectures preserves most capability; TriAttention suggests a more targeted approach: compress specifically the directions orthogonal to the Q/K centers, which contribute least to attention computation.
+
+\textbf{Approach:} For each attention head $h$, decompose the Q/K projection weight matrices into a ``center component'' (rank-1 projection toward the Q/K center direction) and a ``residual component'' (orthogonal complement). Apply aggressive compression (quantization to 2-bit or structured pruning) to the residual component while preserving the center component at full precision. The concentration $R_h$ guides compression aggressiveness: heads with $R_h > 0.99$ can tolerate near-complete residual removal (rank-1 approximation), while heads with $R_h < 0.90$ should retain more residual capacity. This creates a \textit{concentration-aware mixed-precision} scheme. Combined with TriAttention's KV cache compression at inference, this yields a two-level compression: static weight compression (reducing model size) + dynamic cache compression (reducing runtime memory). The total memory reduction would compound: 4$\times$ from weight quantization $\times$ 10$\times$ from KV pruning $= 40\times$ total.
+
+\textbf{Feasibility:} Medium. The rank decomposition of Q/K projections is straightforward linear algebra. The challenge is that compressing the residual component may affect training-time gradients; this approach is best applied post-training (which aligns with TriAttention's training-free philosophy). Evaluate on Qwen3-8B: measure the trade-off between residual compression ratio and reasoning accuracy on AIME24, comparing against standard SVD-based compression and GPTQ quantization baselines.
+
+\section{Conclusion}
+
+TriAttention provides a principled solution to KV cache compression by exploiting a fundamental but previously unrecognized property of transformer attention: Q/K vectors concentrate around fixed centers in pre-RoPE space, making attention logits predictable as a trigonometric series in Q-K distance. This eliminates dependence on the unstable post-RoPE observation window that limits all prior methods, achieving 10.7$\times$ KV memory reduction and up to 6.3$\times$ throughput while matching or exceeding full attention accuracy.
+
+For our lab, TriAttention completes the KV cache efficiency arc: IndexCache~\cite{indexcache} showed attention patterns are reusable across layers, LookaheadKV~\cite{lookaheadkv} showed future-glimpsing improves eviction, and TriAttention explains \textit{why} both work (pre-RoPE concentration) and provides a theoretically grounded alternative that eliminates their shared limitation (post-RoPE instability). The most actionable direction is head-adaptive budget allocation (Direction 1), which leverages existing calibration data for immediate gains. The pre-RoPE concentration finding also opens a novel model compression avenue (Direction 3) that could compound with KV cache compression for $40\times$ total memory reduction---bridging our inference optimization and model compression threads.
+
+\begin{thebibliography}{9}
+\bibitem{triattention} Mao, W., Lin, X., Huang, W., Xie, Y., Fu, T., Zhuang, B., Han, S., \& Chen, Y. (2026). TriAttention: Efficient Long Reasoning with Trigonometric KV Compression. \textit{arXiv:2604.04921}.
+\bibitem{indexcache} Yang, Y., et al. (2026). IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse. \textit{arXiv:2603.12201}.
+\bibitem{lookaheadkv} Wang, Y., et al. (2026). LookaheadKV: Fast and Accurate KV Cache Eviction by Glimpsing into the Future without Generation. \textit{arXiv:2603.10899}.
+\bibitem{s2d2} Chen, Z., et al. (2026). S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation. \textit{arXiv:2603.25702}.
+\bibitem{quitobench} Xue, S., et al. (2026). QuitoBench: A High-Quality Open Time Series Forecasting Benchmark. \textit{arXiv:2603.26017}.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{dymoe} Zhao, C., Li, M., Lu, H., \& Gong, D. (2026). On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning. \textit{CVPR 2026}. arXiv:2603.27481.
+\bibitem{xlstm} Bick, A., et al. (2026). Effective Distillation to Hybrid xLSTM Architectures. \textit{arXiv:2603.15590}.
+\end{thebibliography}
+
+\end{document}
