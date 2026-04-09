@@ -1,0 +1,185 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: DARE --- Diffusion Large Language Models\\Alignment and Reinforcement Executor}
+\author{Internbot --- Automated Research Review}
+\date{April 9, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} DARE: Diffusion Large Language Models Alignment and Reinforcement Executor \\
+\textbf{Authors:} Jingyi Yang, Yuxian Jiang, Xuhao Hu, Shuang Cheng, Biqing Qi, Jing Shao \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.04215}{2604.04215} \quad \textbf{Code:} \href{https://github.com/yjyddq/DARE}{GitHub} \\
+\textbf{Topics:} Diffusion LLM, Reinforcement Learning, Post-Training
+
+\subsection{Problem}
+
+Standard autoregressive RL post-training methods (RLHF, GRPO~\cite{grpo}, DPO, PPO) cannot be directly applied to diffusion large language models (dLLMs) due to three fundamental incompatibilities:
+
+\begin{enumerate}
+    \item \textbf{Generation process mismatch:} AR methods assume left-to-right next-token prediction. Masked diffusion models (MDLMs, e.g., LLaDA, Dream) perform iterative denoising over fully visible sequences with bidirectional attention. Block diffusion models (BDLMs, e.g., SDAR) combine intra-block diffusion with inter-block autoregression. Neither fits the AR paradigm.
+
+    \item \textbf{Log-probability intractability:} RL objectives require exact $\log \pi_\theta(y \mid x)$. For dLLMs, exact log-probabilities are intractable because the generative process involves multi-step diffusion trajectories. ELBO-based surrogates or denoising-state approximations must be used, each introducing variance.
+
+    \item \textbf{Fragmented infrastructure:} Each dLLM RL method is released as a paper-specific repository with its own model fork, rollout engine, reward interface, and evaluation protocol. Cross-paper comparisons are unreliable because implementation differences are entangled with algorithmic differences.
+\end{enumerate}
+
+\subsection{Method}
+
+DARE is a \textbf{unified post-training and evaluation framework}---not a new optimization algorithm---that integrates 8 existing dLLM RL algorithms across 6 model families under one reproducible infrastructure.
+
+\paragraph{Framework Architecture.}
+All post-training is abstracted through three concepts: \textit{Workers} (rollout, actor, reward/verifier, reference policy, optional critic), \textit{Dataflow} (movement of prompts, responses, rewards, trajectories between workers), and \textit{Workflow} (shared execution skeleton: rollout $\to$ reward $\to$ log-prob recomputation $\to$ advantage estimation $\to$ actor update). Algorithms differ only in four plug-in hooks: (1) the forward corruption process, (2) trajectory construction, (3) likelihood estimator, and (4) final policy loss.
+
+\paragraph{Eight Integrated Algorithms.}
+Three families based on likelihood estimation:
+
+\textit{ELBO-based} (directly optimize the evidence lower bound):
+\begin{itemize}
+    \item \textbf{VRPO:} Variance-reduced preference optimization (DPO-style for dLLMs)
+    \item \textbf{SPG:} Sandwiched policy gradient with upper-lower bounds
+    \item \textbf{BGPO:} Boundary-guided optimization for memory efficiency
+    \item \textbf{EBPO:} Block-level optimization specialized for BDLMs
+\end{itemize}
+
+\textit{ELBO-inspired} (simplified surrogates):
+\begin{itemize}
+    \item \textbf{D1:} One-step denoising optimization (single Monte Carlo sample)
+    \item \textbf{Coupled-GRPO:} GRPO adapted via two-sample Monte Carlo ELBO estimation
+\end{itemize}
+
+\textit{Trajectory-aware} (optimize the denoising trajectory):
+\begin{itemize}
+    \item \textbf{MDPO:} Optimizes the progressive refinement schedule
+    \item \textbf{CJ-GRPO:} Consistency-trajectory GRPO with trajectory matching constraints
+\end{itemize}
+
+\paragraph{Supported Models.}
+MDLMs: LLaDA-8B-Instruct, Dream-7B-Instruct, LLaDA-MoE. BDLMs: SDAR-8B-Chat, SDAR-30B-A3B, LLaDA2.0-mini, LLaDA2.1-mini. Evaluation via extended OpenCompass across 13 benchmarks (MMLU, GSM8K, MATH, AIME24/25, HumanEval, MBPP, Countdown, Sudoku).
+
+\paragraph{MDLM Training Objective.}
+The standard NELBO for masked diffusion:
+\begin{equation}
+    \mathcal{L}_\theta = \mathbb{E}_{x_0, x_t, t}\!\left[-\frac{1}{t} \sum_{l=1}^{L} \mathbb{I}[x_t^l = \langle\mathrm{MASK}\rangle] \cdot \log p_\theta(x_0^l \mid x_t)\right]
+\end{equation}
+summing log-recovery probabilities for each masked token, weighted inversely by timestep. RL algorithms replace or augment this with reward-weighted variants, using ELBO surrogates where exact log-probabilities are needed.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{RL post-training results on LLaDA-8B and Dream-7B (math and code).}
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{2}{c}{\textbf{LLaDA-8B Math}} & \multicolumn{2}{c}{\textbf{Dream-7B Math}} & \multicolumn{2}{c}{\textbf{LLaDA-8B Code}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+\textbf{Method} & GSM8K & MATH & GSM8K & MATH & HEval & MBPP \\
+\midrule
+Baseline & 76.5 & 34.6 & 77.2 & 39.6 & 46.9 & 37.9 \\
+D1 & 83.7 & 40.6 & 82.5 & 49.7 & 47.6 & 39.1 \\
+Coupled-GRPO & 85.3 & \textbf{41.0} & 80.3 & 40.4 & 45.1 & 38.1 \\
+CJ-GRPO & \textbf{85.6} & 39.2 & \textbf{85.7} & \textbf{50.7} & 45.1 & 40.9 \\
+VRPO & 81.9 & 35.8 & --- & --- & \textbf{52.4} & \textbf{42.8} \\
+SPG & 83.5 & 40.6 & 59.4 & 25.2 & 48.8 & 41.9 \\
+BGPO & 82.3 & 40.0 & 83.9 & 48.9 & 45.1 & 40.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{No algorithm dominates:} CJ-GRPO wins on math (85.7\% GSM8K on Dream), Coupled-GRPO wins on planning (77.9\% Countdown, +61.1 pp over baseline), VRPO wins on LLaDA code (52.4\% HumanEval). The best algorithm depends on \textit{both the task and the model family}.
+
+    \item \textbf{Stability $>$ peak performance:} ELBO-based methods (SPG, BGPO) can match or beat simplified methods on some tasks but frequently collapse. SPG catastrophically fails on Dream: 59.4\% GSM8K (baseline: 77.2\%), 25.2\% MATH (baseline: 39.6\%), 17.7\% HumanEval (baseline: 57.9\%). The Monte Carlo variance in ELBO gradient estimation causes training instability.
+
+    \item \textbf{One-step methods are most reliable:} D1, Coupled-GRPO, and CJ-GRPO exhibit smooth, monotonically improving reward curves across tasks and backbones. These ELBO-\textit{inspired} methods trade theoretical precision for practical stability.
+
+    \item \textbf{Block diffusion outperforms masked diffusion:} SDAR and LLaDA2.x substantially outperform LLaDA/Dream on baselines. SDAR-8B achieves 78.4\% MATH and 13.3\% AIME24 vs.\ LLaDA-8B's 41.1\% and 2.1\%. The semi-autoregressive structure provides better sequential reasoning capability.
+
+    \item \textbf{Significant system speedups:} $\sim$2.0$\times$ SFT training, $\sim$2.2$\times$ rollout acceleration, $\sim$4$\times$ end-to-end MDLM RL, and $>$14$\times$ BDLM RL via decoupled attention backends (FlashAttention for rollout, FlexAttention for training).
+
+    \item \textbf{Planning reveals the widest gap:} On Countdown, Coupled-GRPO achieves 77.9\% while D1, SPG, and BGPO all \textit{degrade below baseline} (10.7\%, 10.1\%, 10.0\% vs.\ 16.8\%). The task structure---constraint satisfaction requiring global consistency---particularly exposes the limitations of methods that optimize local denoising quality.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Fixed-length generation:} MDLMs generate sequences of pre-determined length, limiting exploration. Variable-length strategies are identified as future work but not integrated.
+    \item \textbf{ELBO instability unresolved:} The Monte Carlo variance causing SPG/BGPO collapse is documented but not solved. More stable ELBO estimators are identified as a key open problem.
+    \item \textbf{Text-only scope:} No support for vision-language or omni-modal diffusion models.
+    \item \textbf{Limited BDLM RL coverage:} Most detailed experiments are on MDLMs; the BDLM-specific algorithm (EBPO) has less empirical analysis despite BDLMs' stronger baselines.
+    \item \textbf{No reward function details:} The specific reward functions for math, code, and planning tasks are not explicitly specified.
+    \item \textbf{Algorithm incompleteness:} DiFFPO, TraceRL, DiRL, and other recent dLLM RL methods are mentioned but not integrated.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+DARE provides the first systematic comparison of RL methods for diffusion LLMs under controlled conditions, directly informing our diffusion LLM thread. Our prior reviews studied diffusion LLM \textit{foundations} (GDDS~\cite{gdds}: unified framework with semantic kernels; D-MMD~\cite{dmmd}: distillation via discrete MMD) and \textit{inference} (S2D2~\cite{s2d2}: self-speculative decoding). DARE adds the missing \textit{post-training} layer, revealing that the RL landscape for dLLMs is fundamentally different from autoregressive LLMs: log-probability intractability forces reliance on ELBO surrogates, and the resulting Monte Carlo variance creates a stability-precision trade-off absent in AR training.
+
+The ``no universal winner'' finding parallels QuitoBench's~\cite{quitobench} result for time series (model selection depends on context length and regime): for dLLMs, algorithm selection depends on task type and model family. This suggests that \textit{adaptive algorithm selection}---choosing between Coupled-GRPO, CJ-GRPO, and VRPO based on task characteristics---could yield better results than any fixed method.
+
+The block diffusion advantage (SDAR significantly outperforming LLaDA/Dream) connects to S2D2's~\cite{s2d2} finding that block diffusion enables self-speculative decoding: the semi-autoregressive structure not only provides faster inference but also stronger reasoning baselines, making it the more promising architecture for the diffusion LLM paradigm.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Evidence-Reweighted RL for Diffusion LLMs}
+
+\textbf{Gap:} All 8 algorithms in DARE use \textit{uniform} token-level advantages within each response---the same coarse credit assignment that limits GRPO for autoregressive LLMs. Our RLSD review~\cite{rlsd} showed that direction-aware evidence reweighting provides dense, token-level credit for AR models by comparing teacher (with privileged info) and student (without) log-probabilities. For dLLMs, an analogous dense signal exists but is unexploited: the \textit{denoising trajectory} itself encodes which tokens are resolved early (easy, low-information) vs.\ late (hard, high-information).
+
+\textbf{Approach:} Define a denoising-aware evidence weight for each token position $l$:
+\begin{equation}
+    w_l = \frac{p_\theta(x_0^l \mid x_{t_{\mathrm{early}}})}{p_\theta(x_0^l \mid x_{t_{\mathrm{late}}})}
+\end{equation}
+measuring how much the model's confidence in token $l$ increases from an early denoising step to a late one. Tokens with high $w_l$ are ``easy'' (quickly resolved); tokens with low $w_l$ are ``hard'' (require many denoising steps to resolve). For RL credit assignment, hard tokens should receive amplified advantage magnitude because they represent the bottleneck decisions. Integrate this as a drop-in replacement for the uniform advantage in Coupled-GRPO:
+$\hat{A}_l = A \cdot \mathrm{clip}(1/w_l, 1 - \epsilon, 1 + \epsilon)$,
+inverting so hard tokens get more credit. This is the diffusion analogue of RLSD's direction-aware reweighting, using the denoising trajectory as a natural ``privileged information'' source. The direction (sign of $A$) remains anchored to the verifier reward, preserving the leakage-free property.
+
+\textbf{Feasibility:} High. The denoising trajectory is already computed during rollout; extracting per-position confidence at two timesteps requires only caching intermediate predictions (no additional forward passes). Implement within DARE's Coupled-GRPO on LLaDA-8B and evaluate on MATH/GSM8K where Coupled-GRPO already shows strong baselines. The main risk is that the denoising-based signal may be noisy for MDLMs where all tokens are masked simultaneously; BDLMs (where denoising is block-local) may benefit more.
+
+\subsection{Direction 2: Stable ELBO Estimation via Semantic Kernel Guidance}
+
+\textbf{Gap:} The core open problem in DARE: ELBO-based methods (SPG, BGPO) offer theoretically tighter optimization but collapse due to Monte Carlo variance with limited sample budgets. GDDS~\cite{gdds} introduced \textit{semantic-informed transition kernels} that concentrate diffusion probability mass on structurally similar tokens (e.g., synonyms receive higher transition probability than unrelated tokens). This semantic structure is currently used only for the \textit{forward} corruption process; applying it to the \textit{ELBO estimation} could dramatically reduce variance by focusing Monte Carlo samples on the most informative denoising paths.
+
+\textbf{Approach:} Replace uniform Monte Carlo sampling over denoising trajectories with \textit{importance sampling guided by GDDS's semantic kernel}. For each ELBO estimate, instead of sampling random mask patterns, sample patterns biased toward masking semantically coherent token groups (e.g., masking an entire noun phrase rather than random scattered tokens). The semantic kernel provides a natural proposal distribution: tokens with high semantic similarity (per the kernel matrix $K$) should be masked/unmasked together, reducing the variance of the ELBO gradient because each sample captures a more coherent denoising decision. Define the importance weight to correct for the biased sampling:
+$w_{\mathrm{IS}} = q_{\mathrm{uniform}}(x_t \mid x_0) / q_{\mathrm{semantic}}(x_t \mid x_0)$.
+This combines GDDS's forward-process innovation with DARE's RL framework, potentially stabilizing SPG and BGPO without increasing the sample budget.
+
+\textbf{Feasibility:} Medium. The semantic kernel from GDDS requires a token embedding similarity matrix, which is readily available from the model's embedding layer. The implementation challenge is integrating importance-weighted ELBO estimation into DARE's existing SPG/BGPO implementations. Start with LLaDA-8B on MATH where SPG currently achieves 40.6\% (competitive but unstable) and measure whether semantic-guided sampling reduces reward curve variance while maintaining or improving peak performance.
+
+\subsection{Direction 3: Adaptive Algorithm Routing for Diffusion LLM Post-Training}
+
+\textbf{Gap:} DARE reveals that no algorithm dominates across tasks and models, but the framework currently requires manual algorithm selection. The selection depends on properties that are partially predictable from the task and model characteristics: planning tasks (requiring global consistency) favor Coupled-GRPO; math tasks favor CJ-GRPO; code tasks favor VRPO on LLaDA but Coupled-GRPO on Dream. A meta-learning approach could automate this selection, analogous to QuitoBench's~\cite{quitobench} regime-based model selection for time series.
+
+\textbf{Approach:} Train a lightweight \textit{algorithm router} that predicts the best RL algorithm for a given (task, model) pair. Features: (1) task-level features (average reward variance across rollout groups, which correlates with task difficulty); (2) model-level features (ELBO tightness gap---the difference between D1's one-sample estimate and Coupled-GRPO's two-sample estimate, indicating how much the model benefits from better likelihood estimation); (3) stability features (gradient norm variance over the first 10 training steps for each algorithm candidate). The router is trained on DARE's existing experimental results (6 models $\times$ 6+ tasks $\times$ 8 algorithms) and outputs a probability distribution over algorithms. During post-training, either commit to the top-ranked algorithm or use a mixture: run the top-2 algorithms in parallel for the first 10\% of training, measure reward trajectory slopes, and continue with the winner. This parallels our recurring ``selective allocation'' theme: QuitoBench showed regime-conditioned evaluation, TriAttention~\cite{triattention} showed head-adaptive budgets, and now algorithm routing applies selective allocation to the RL method itself.
+
+\textbf{Feasibility:} Medium-high. The meta-features are cheap to compute (rollout variance, ELBO gap, gradient norms from a few warm-up steps). The training signal is DARE's existing benchmark results. The main limitation is the small meta-training set (DARE covers $\sim$48 algorithm-task-model triples); expanding DARE's benchmark coverage to more tasks would strengthen the router. Start with a simple heuristic: if ELBO gap $>$ threshold, use VRPO/SPG; otherwise use CJ-GRPO/Coupled-GRPO.
+
+\section{Conclusion}
+
+DARE establishes the first unified infrastructure for post-training diffusion LLMs, revealing that the RL landscape for dLLMs is fundamentally different from autoregressive models. The log-probability intractability forces reliance on ELBO surrogates, creating a stability-precision trade-off: simplified one-step methods (D1, Coupled-GRPO, CJ-GRPO) are reliable but suboptimal, while theoretically tighter ELBO methods (SPG, BGPO) achieve competitive peaks but frequently collapse. No algorithm dominates across tasks and model families.
+
+For our lab, DARE completes the diffusion LLM stack: GDDS~\cite{gdds} provides the theoretical framework (unified discrete diffusion with semantic kernels), D-MMD~\cite{dmmd} enables knowledge transfer (distillation via discrete MMD), S2D2~\cite{s2d2} accelerates inference (self-speculative decoding), and now DARE enables post-training (RL alignment). The most actionable direction is evidence-reweighted RL (Direction 1), which transfers RLSD's~\cite{rlsd} dense credit assignment to the diffusion setting using the denoising trajectory as a natural importance signal. The ELBO stabilization direction (Direction 2) addresses DARE's central open problem by leveraging GDDS's semantic kernels---a direct bridge between two of our diffusion LLM reviews. The block diffusion advantage documented in DARE further validates S2D2's architectural bet: the semi-autoregressive structure provides both faster inference and stronger reasoning, making it the preferred foundation for future diffusion LLM development.
+
+\begin{thebibliography}{9}
+\bibitem{dare} Yang, J., Jiang, Y., Hu, X., Cheng, S., Qi, B., \& Shao, J. (2026). DARE: Diffusion Large Language Models Alignment and Reinforcement Executor. \textit{arXiv:2604.04215}.
+\bibitem{grpo} Shao, Z., et al. (2024). DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. \textit{arXiv:2402.03300}.
+\bibitem{gdds} Zhao, Z., et al. (2026). Generalized Discrete Diffusion from Snapshots. \textit{arXiv:2603.21342}.
+\bibitem{dmmd} Schiff, Y., et al. (2026). Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD. \textit{arXiv:2603.20155}.
+\bibitem{s2d2} Chen, Z., et al. (2026). S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation. \textit{arXiv:2603.25702}.
+\bibitem{rlsd} Yang, C., et al. (2026). Self-Distilled RLVR. \textit{arXiv:2604.03128}.
+\bibitem{quitobench} Xue, S., et al. (2026). QuitoBench: A High-Quality Open Time Series Forecasting Benchmark. \textit{arXiv:2603.26017}.
+\bibitem{triattention} Mao, W., et al. (2026). TriAttention: Efficient Long Reasoning with Trigonometric KV Compression. \textit{arXiv:2604.04921}.
+\end{thebibliography}
+
+\end{document}
