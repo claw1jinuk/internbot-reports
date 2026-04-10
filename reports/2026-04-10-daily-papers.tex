@@ -1,0 +1,156 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: RAGEN-2 --- Reasoning Collapse\\in Agentic Reinforcement Learning}
+\author{Internbot --- Automated Research Review}
+\date{April 10, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} RAGEN-2: Reasoning Collapse in Agentic RL \\
+\textbf{Authors:} Zihan Wang, Chi Gui, Xing Jin, Qineng Wang, Licheng Liu, Kangrui Wang, Shiqi Chen, Linjie Li, Zhengyuan Yang, Pingyue Zhang, Yiping Lu, Jiajun Wu, Li Fei-Fei, Lijuan Wang, Yejin Choi, Manling Li \\
+\textbf{Affiliation:} Stanford, Microsoft, Northwestern \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.06268}{2604.06268} \\
+\textbf{Topics:} Reinforcement Learning, Agent Reasoning, Training Stability
+
+\subsection{Problem}
+
+Multi-turn LLM agents trained with RL exhibit a hidden failure mode called \textbf{template collapse}: the agent produces stereotyped responses that maintain high token-level entropy but lose sensitivity to the input. This is invisible to standard monitoring because entropy---the go-to diagnostic for RL training health---\textit{does not detect it}.
+
+The key insight comes from decomposing Shannon entropy via the chain rule:
+\begin{equation}
+    H(Z) = I(X; Z) + H(Z \mid X)
+\end{equation}
+where $Z$ is the agent's response, $X$ is the input, $I(X;Z)$ is mutual information (how much the response depends on the input), and $H(Z \mid X)$ is conditional entropy (residual randomness given the input). This yields four regimes:
+
+\begin{itemize}
+    \item \textbf{Diverse Reasoning:} High $I(X;Z)$, high $H(Z \mid X)$ --- responses are both input-dependent and varied. \textit{Healthy.}
+    \item \textbf{Template Collapse:} Low $I(X;Z)$, high $H(Z \mid X)$ --- responses are random but \textit{not} input-dependent. The agent applies the same template regardless of input. \textit{Hidden failure: entropy stays high.}
+    \item \textbf{Compressed Reasoning:} High $I(X;Z)$, low $H(Z \mid X)$ --- responses are input-dependent but deterministic. \textit{Often healthy.}
+    \item \textbf{Low-Entropy Collapse:} Low both --- trivial, repetitive output. \textit{Detectable by entropy.}
+\end{itemize}
+
+Empirically, entropy has Spearman correlations of $-0.11$ to $-0.14$ with task performance (wrong direction), while the proposed MI-based metric achieves $+0.39$. Template collapse is the dominant failure mode in multi-turn agent RL, yet existing methods (entropy bonuses, KL constraints) cannot detect or prevent it---and can actively \textit{worsen} it.
+
+\subsection{Method}
+
+\paragraph{Mutual Information Proxy via Cross-Scoring.}
+Since $I(X;Z)$ is intractable for LLM outputs, RAGEN-2 uses an in-batch cross-scoring procedure. For each prompt-trajectory pair $(x_i, z_{i,j})$ in a batch, compute the reward under \textit{every} prompt's scoring function:
+\begin{equation}
+    L_{i,k,j} = \mathrm{Score}_k(z_{i,j})
+\end{equation}
+creating a scoring matrix. The \textit{matched} score $L_{i,i,j}$ measures how well trajectory $z_{i,j}$ performs on its own prompt; the \textit{marginal} score $\bar{L}_{i,\cdot,j} = \frac{1}{P}\sum_k L_{i,k,j}$ measures how well it performs on random prompts. Templates score similarly on both (low MI); input-dependent reasoning scores high on matched but low on marginal (high MI).
+
+Six proxy variants are defined; the best is \textbf{MI-ZScore-EMA}, which z-normalizes the matched-minus-marginal gap using an exponential moving average of batch statistics ($\alpha = 0.9$, $\epsilon = 10^{-3}$).
+
+\paragraph{SNR-Aware Filtering.}
+The RL gradient is decomposed into three components:
+\begin{equation}
+    g = g_{\mathrm{signal}} + g_{\mathrm{task\text{-}noise}} + g_{\mathrm{reg}}
+\end{equation}
+where $g_{\mathrm{signal}}$ drives learning, $g_{\mathrm{task\text{-}noise}}$ comes from prompts with near-zero reward variance (all trajectories succeed or all fail), and $g_{\mathrm{reg}}$ is from format/KL penalties. GRPO is particularly vulnerable because its normalization amplifies noise as $1/\mathrm{RV}(x)$ (Proposition N.1): as reward variance approaches zero for a prompt, the gradient estimator variance \textit{diverges}.
+
+\textbf{Top-$p$ filtering} removes prompts whose reward variance falls below the $p$-th percentile of the batch distribution (default $\rho = 0.9$, keeping 90\% of prompts). This is adaptive: as training progresses and more prompts converge to zero variance, the threshold tightens automatically. The filtering is applied at the \textit{prompt} level (not trajectory level), preserving within-prompt diversity.
+
+\paragraph{Theoretical Guarantees.}
+Three key results: (1) \textbf{Lemma I.1:} If the policy is contaminated by a prompt-independent component $q(z)$ with mixing weight $\alpha$, then $I_\alpha(X;Z) \leq (1-\alpha) \cdot I(X;Z)$---even partial drift toward shared templates erodes input dependence linearly. (2) \textbf{Theorem M.2:} Entropy bonuses can worsen collapse because they increase within-prompt variability more than marginal diversity, \textit{decreasing} MI. (3) \textbf{Proposition N.1:} GRPO's normalization creates an $\mathrm{RV}^{-1}$ noise amplification floor, formally explaining why GRPO is susceptible to template collapse.
+
+\subsection{Results}
+
+Evaluated across 7 models (Qwen2.5-0.5B/1.5B/3B/7B, Qwen2.5-3B-Instruct, Llama3.2-3B, Qwen2.5-VL-3B) and 7 environments (Sokoban, FrozenLake, MetaMathQA, Countdown, SearchQA, WebShop, DeepCoder). Training uses PPO with GRPO-style advantages, $K=128$ trajectories, LR $= 10^{-6}$, PPO clip $[0.2, 0.28]$.
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{Template collapse is pervasive:} Across scales and environments, agents frequently enter the template collapse regime where entropy remains healthy but MI drops and task performance degrades.
+
+    \item \textbf{Largest gains from SNR filtering:} Qwen2.5-VL-3B on FrozenLake improves by \textbf{+53.5\%} (text) and \textbf{+59.5\%} (image) with Top-$p$ filtering. These are environments with stochastic transitions where template strategies fail most visibly.
+
+    \item \textbf{MI-ZScore predicts performance:} Spearman $\rho = +0.39$ between MI-ZScore and task reward, vs.\ $-0.14$ for entropy. The MI proxy correctly identifies when training is productive vs.\ when the agent is collapse-learning.
+
+    \item \textbf{Quartile analysis:} Prompts in the highest MI quartile (Q1) achieve 21.1\% success with MI score 0.95; prompts in the lowest quartile (Q4) achieve only 11.0\% with MI score 0.73. MI directly stratifies learning quality.
+
+    \item \textbf{Prompt-level filtering outperforms trajectory-level:} Filtering by prompt (23.6\% avg) vs.\ trajectory (16.8\%) confirms that the signal-to-noise issue operates at the prompt level, not the trajectory level.
+
+    \item \textbf{Entropy bonus is harmful:} Theorem M.2 is validated empirically: increasing entropy regularization does not resolve template collapse and can accelerate it.
+
+    \item \textbf{Efficient:} 26--41\% wall-clock time reduction (filtering removes uninformative gradient computation), $<$0.1\% overhead for reward variance computation, $\sim$201 GB VRAM.
+
+    \item \textbf{DAPO as special case:} DAPO's built-in filtering is equivalent to Top-$p$ with $p \to 1.0$. SNR-aware filtering generalizes this with tunable $\rho$ and still yields +2.9\% improvement on top of DAPO.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{SNR decomposition coupling:} The signal/noise/regularization decomposition assumes these components are separable; in practice, format penalties can carry task-relevant information.
+    \item \textbf{Single-agent only:} No evaluation on multi-agent or collaborative settings.
+    \item \textbf{Filter gaming:} Agents could potentially learn to produce artificial reward variance to avoid filtering, though this is not observed empirically.
+    \item \textbf{Sparse reward degradation:} Top-$p$ filtering is less effective when rewards are inherently binary and most prompts have zero variance.
+    \item \textbf{Exploration narrowing:} Filtering removes prompts, reducing the effective training distribution, which could limit exploration in the long term.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+RAGEN-2 identifies the failure mode that our RL reviews have been working around without naming. RLSD~\cite{rlsd} provides token-level credit assignment to prevent coarse gradient signals, but does not diagnose \textit{when} the signal becomes uninformative at the prompt level. FIPO~\cite{fipo} uses Future-KL for dense credit, but Future-KL cannot distinguish input-dependent reasoning from input-independent templates if both produce similar KL patterns. SKILL0~\cite{skill0} uses helpfulness-driven curriculum to remove skills that are no longer informative---this is conceptually similar to RAGEN-2's filtering of zero-variance prompts, but operates at the \textit{skill} level rather than the \textit{prompt} level.
+
+The $\mathrm{RV}^{-1}$ noise amplification result (Proposition N.1) is particularly important for our RL thread: it formally explains why GRPO---the base algorithm used by FIPO, RLSD, SKILL0, and DARE~\cite{dare}'s Coupled-GRPO---is vulnerable to training instability. Every method in our RL pipeline inherits this vulnerability. RAGEN-2's Top-$p$ filtering is a direct, lightweight fix.
+
+The entropy-MI dissociation connects to our self-distillation review~\cite{selfdistill}: self-distillation can suppress epistemic verbalization (reducing entropy) without affecting reasoning quality, while template collapse can preserve entropy without maintaining reasoning quality. Both demonstrate that entropy is an unreliable proxy for model capability---the relevant quantity is \textit{mutual information between input and output}.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: MI-Aware Credit Assignment for Agent RL}
+
+\textbf{Gap:} RAGEN-2 operates at the prompt level (filtering entire prompts based on reward variance), while RLSD~\cite{rlsd} operates at the token level (reweighting individual tokens based on evidence ratios). Neither connects the prompt-level MI signal to token-level credit. The missing link: which specific \textit{tokens} in a trajectory cause template collapse? If we could identify template-inducing tokens (those that are input-independent) and selectively suppress their gradient contributions, we could prevent collapse without discarding entire prompts.
+
+\textbf{Approach:} Combine RAGEN-2's cross-scoring with RLSD's evidence reweighting. For each token $z_t$ in trajectory $z_{i,j}$, compute a \textit{token-level MI proxy}: score the partial trajectory $z_{i,1:t}$ under both matched ($\mathrm{Score}_i$) and marginal ($\bar{\mathrm{Score}}$) evaluators. Tokens where the matched and marginal scores diverge are input-dependent (high token-MI); tokens where they converge are template tokens (low token-MI). Weight the RLSD evidence ratio by this token-MI signal:
+$\hat{A}_t = A \cdot \mathrm{clip}(w_t^{\mathrm{RLSD}}) \cdot (1 + \beta \cdot \mathrm{MI}_t)$,
+where $\mathrm{MI}_t$ is the token-level MI proxy. This amplifies credit for input-dependent reasoning steps and dampens credit for template tokens, providing a finer-grained collapse prevention mechanism than prompt-level filtering. The direction remains environment-anchored (from $A$), maintaining the leakage-free property.
+
+\textbf{Feasibility:} Medium-high. Token-level cross-scoring requires evaluating partial trajectories under multiple scorers, which increases compute proportional to the number of scoring steps. For short multi-turn tasks (Sokoban, FrozenLake with $\sim$10 turns), this is manageable. Start with SKILL0's ALFWorld setup where trajectories are short and cross-scoring is computationally tractable.
+
+\subsection{Direction 2: Reward Variance as a Curriculum Signal for Continual Agent Training}
+
+\textbf{Gap:} RAGEN-2 filters out zero-variance prompts as uninformative noise. But from a continual learning perspective, these prompts represent \textit{mastered skills}---the agent consistently succeeds (or fails) on them. Rather than discarding them, they should be \textit{consolidated} and protected from forgetting. Our continual learning thread (AAT~\cite{aat}, LLaVA-DyMoE~\cite{dymoe}) addresses forgetting at the parameter level; RAGEN-2's reward variance provides a \textit{task-level} signal for what has been learned and what is still being learned.
+
+\textbf{Approach:} Partition prompts into three categories based on reward variance: (1) \textbf{Mastered} ($\mathrm{RV} < \tau_{\mathrm{low}}$, consistently correct): protect via replay with reduced learning rate. (2) \textbf{Active learning} ($\tau_{\mathrm{low}} \leq \mathrm{RV} \leq \tau_{\mathrm{high}}$): full gradient updates. (3) \textbf{Template-collapsed} ($\mathrm{RV} < \tau_{\mathrm{low}}$, consistently incorrect): these require \textit{intervention} rather than filtering---generate diverse exploratory trajectories (higher temperature, skill injection from SKILL0~\cite{skill0}) to break the template. The RV trajectory over training provides a per-prompt ``learning stage'' indicator, enabling a natural curriculum: early training focuses on active-learning prompts, mid-training consolidates mastered prompts, late training intervenes on collapsed prompts. This creates a prompt-level continual learning loop within a single training run, complementing parameter-level approaches like AAT's structural abstraction.
+
+\textbf{Feasibility:} High. RV computation is already $<$0.1\% overhead (RAGEN-2 result). The three-way partitioning and differentiated treatment add minimal complexity. The main design choice is setting $\tau_{\mathrm{low}}$ and $\tau_{\mathrm{high}}$; RAGEN-2's quartile analysis provides natural starting points. Evaluate on Sokoban/FrozenLake where template collapse is most pronounced.
+
+\subsection{Direction 3: Mutual Information Monitoring for Diffusion LLM RL}
+
+\textbf{Gap:} DARE~\cite{dare} revealed that ELBO-based RL methods (SPG, BGPO) frequently collapse during diffusion LLM training, with SPG dropping to 17.7\% HumanEval on Dream (baseline: 57.9\%). DARE attributes this to Monte Carlo variance, but RAGEN-2's framework suggests a complementary explanation: template collapse in the \textit{denoising trajectory}. Diffusion LLMs can produce denoising paths that are independent of the input (template denoising), which would be invisible to ELBO-based loss metrics but detectable via MI proxies.
+
+\textbf{Approach:} Extend RAGEN-2's cross-scoring framework to diffusion LLM RL. The key adaptation: instead of scoring complete trajectories across prompts, score \textit{denoising states} at intermediate timesteps. For each prompt $x_i$ and denoised state $x_t^{(i)}$ at timestep $t$, compute $L_{i,k,t} = \mathrm{Score}_k(x_t^{(i)})$---how well the intermediate state at timestep $t$ satisfies prompt $k$'s requirements. The MI proxy then measures whether the denoising process is input-dependent at each timestep. This provides a diagnostic that can detect template denoising before it manifests as final-output collapse, enabling early intervention (e.g., increasing diffusion steps for low-MI timesteps, or applying SNR filtering to specific denoising stages). Integrate into DARE's Coupled-GRPO, which is the most stable dLLM RL algorithm, to create a collapse-resistant variant.
+
+\textbf{Feasibility:} Medium. Cross-scoring at intermediate denoising states requires evaluating partial denoising outputs, which may not be meaningful for very early timesteps (highly noisy states). Focus on the final 3--5 denoising steps where the output is nearly clean. The scoring infrastructure from DARE can be reused. Evaluate on LLaDA-8B math tasks where both DARE and RAGEN-2 have baselines, measuring whether MI monitoring predicts the training collapse observed with SPG/BGPO.
+
+\section{Conclusion}
+
+RAGEN-2 identifies template collapse as the dominant hidden failure mode in multi-turn agent RL, formally proving that entropy---the standard training diagnostic---is unreliable and can be actively misleading. The Shannon decomposition $H(Z) = I(X;Z) + H(Z \mid X)$ cleanly separates two dimensions of response diversity: input-dependence (MI) and residual randomness (conditional entropy). Template collapse occupies the blind spot where entropy stays high but MI collapses.
+
+For our lab, RAGEN-2 provides the missing diagnostic layer for our entire RL pipeline. The $\mathrm{RV}^{-1}$ noise amplification result explains why GRPO---the foundation of FIPO~\cite{fipo}, RLSD~\cite{rlsd}, SKILL0~\cite{skill0}, and DARE~\cite{dare}'s Coupled-GRPO---is inherently vulnerable to template collapse. The Top-$p$ filtering fix is lightweight (26--41\% time \textit{reduction}, $<$0.1\% overhead) and can be applied retroactively to all GRPO-based methods. More fundamentally, the MI framework reframes what ``good RL training'' means: not high entropy, but high \textit{mutual information} between inputs and outputs. This principle---that the relevant quantity is input-output coupling, not output diversity alone---unifies insights from across our reviews: self-distillation~\cite{selfdistill} showed entropy is unreliable for reasoning quality; QuitoBench~\cite{quitobench} showed aggregate metrics hide regime-specific failure; and now RAGEN-2 shows entropy hides template collapse.
+
+\begin{thebibliography}{9}
+\bibitem{ragen2} Wang, Z., Gui, C., Jin, X., et al. (2026). RAGEN-2: Reasoning Collapse in Agentic RL. \textit{arXiv:2604.06268}.
+\bibitem{rlsd} Yang, C., et al. (2026). Self-Distilled RLVR. \textit{arXiv:2604.03128}.
+\bibitem{fipo} Ma, C., et al. (2026). FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization. \textit{arXiv:2603.19835}.
+\bibitem{skill0} Lu, Z., et al. (2026). SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization. \textit{arXiv:2604.02268}.
+\bibitem{dare} Yang, J., et al. (2026). DARE: Diffusion Large Language Models Alignment and Reinforcement Executor. \textit{arXiv:2604.04215}.
+\bibitem{selfdistill} Kim, J., et al. (2026). Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs? \textit{arXiv:2603.24472}.
+\bibitem{quitobench} Xue, S., et al. (2026). QuitoBench: A High-Quality Open Time Series Forecasting Benchmark. \textit{arXiv:2603.26017}.
+\bibitem{aat} Rahmati, E., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{dymoe} Zhao, C., et al. (2026). On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning. \textit{CVPR 2026}. arXiv:2603.27481.
+\end{thebibliography}
+
+\end{document}
