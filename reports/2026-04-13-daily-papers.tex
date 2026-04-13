@@ -1,0 +1,196 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: DMax --- Aggressive Parallel Decoding\\for Diffusion Language Models}
+\author{Internbot --- Automated Research Review}
+\date{April 13, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} DMax: Aggressive Parallel Decoding for dLLMs \\
+\textbf{Authors:} Zigeng Chen, Gongfan Fang, Xinyin Ma, Ruonan Yu, Xinchao Wang \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.08302}{2604.08302} \\
+\textbf{Topics:} Diffusion LLM, Inference Efficiency, Parallel Decoding
+
+\subsection{Problem}
+
+Masked diffusion language models (MDLMs) like LLaDA decode via a binary, one-way mask-to-token process: once a masked position is decoded into a token, that token is fixed and propagated as immutable context to all subsequent steps. Under aggressive parallelism---where many tokens are decoded simultaneously---erroneous predictions are inevitable and trigger \textbf{cascading error accumulation} that degrades generation quality to the point of semantic collapse.
+
+Concretely, on GSM8K with LLaDA-2.0-mini, setting the confidence threshold to $\tau = 0$ (maximum parallelism) collapses accuracy from 92.6\% to 0.9\%. Existing mitigation strategies provide only marginal gains:
+
+\begin{itemize}
+    \item \textbf{Hierarchical Decoding:} Improves tokens-per-forward (TPF) from 2.04 to 2.44 on GSM8K---a modest 20\% gain.
+    \item \textbf{dParallel-SFT} (certainty forcing distillation): Achieves 2.79 TPF while preserving 92.3\% accuracy, but does not address the fundamental error propagation issue.
+    \item \textbf{Uniform Diffusion Training (UDLM):} Na\"ively training the model to denoise from arbitrary tokens (not just masks) introduces a severe \textit{train-inference mismatch}: the corruption distribution at training time (uniform random vocabulary tokens) differs from inference time (the model's own predictions). This causes catastrophic failure---68.7\% on GSM8K with only 2.26 TPF.
+\end{itemize}
+
+The core insight is that UDLMs possess an inherent self-correction capability (all positions can be re-evaluated at every step), but the train-inference mismatch prevents this from working. DMax proposes to unify MDLMs' stable masked initialization with UDLMs' self-revision capability.
+
+\subsection{Method}
+
+DMax consists of two tightly coupled components: \textbf{On-Policy Uniform Training (OPUT)} and \textbf{Soft Parallel Decoding (SPD)}.
+
+\paragraph{On-Policy Uniform Training (OPUT).}
+Given a pretrained MDLM $M_\theta$ and clean sequences $x_0 = (x_{0}^{1}, \ldots, x_{0}^{L})$:
+
+\begin{enumerate}
+    \item Sample corruption level $t \sim \mathrm{Uniform}(t_l, t_h)$ and construct masked sequence $x_{t}^{(m)}$ by replacing each token with $\langle\mathrm{MASK}\rangle$ with probability $t$.
+
+    \item Generate an \textit{on-policy} predicted sequence $x_{t}^{(p)}$: feed $x_{t}^{(m)}$ into $M_\theta$ and sample from the model's predictive distribution at masked positions:
+    \begin{equation}
+        x_{t}^{(p),i} = \begin{cases} x_{t}^{(m),i} & \mathrm{if}\ x_{t}^{(m),i} \neq \langle\mathrm{MASK}\rangle \\ \hat{x}^{i} \sim p_\theta(\cdot \mid x_{t}^{(m)}) & \mathrm{if}\ x_{t}^{(m),i} = \langle\mathrm{MASK}\rangle \end{cases}
+    \end{equation}
+    Crucially, $x_{t}^{(p)}$ is sampled using the \textit{current} model parameters, making this a strictly on-policy rollout.
+
+    \item Perform two forward passes and compute losses against the clean sequence:
+    \begin{align}
+        \mathcal{L}_{\mathrm{mask}} &= -\sum_{i=1}^{L} \log p_\theta^{(m)}(x_{0}^{i} \mid x_{t}^{(m)}) \\
+        \mathcal{L}_{\mathrm{pred}} &= -\sum_{i=1}^{L} \log p_\theta^{(p)}(x_{0}^{i} \mid x_{t}^{(p)}) \\
+        \mathcal{L}_{\mathrm{on\text{-}policy}} &= \mathcal{L}_{\mathrm{mask}} + \mathcal{L}_{\mathrm{pred}}
+    \end{align}
+\end{enumerate}
+
+$\mathcal{L}_{\mathrm{mask}}$ preserves standard MDLM capability; $\mathcal{L}_{\mathrm{pred}}$ teaches the model to recover correct tokens from its own (potentially erroneous) predictions, directly bridging the train-inference gap. The mask ratio is fixed at 0.75 during training, and the two losses are optimized in separate iterations within the same epoch to avoid extra memory overhead.
+
+\paragraph{Soft Parallel Decoding (SPD).}
+Even with OPUT, aggressive parallelism ($\tau_{\mathrm{dec}} = 0$) yields only 68\% accuracy on GSM8K. SPD addresses this by preserving predictive uncertainty as an explicit signal across refinement iterations.
+
+Instead of treating intermediate states as discrete tokens (hard commitment), SPD represents each decoded position as a \textit{hybrid soft embedding} interpolated between the predicted token embedding and the mask embedding, weighted by prediction confidence $\pi_j$:
+\begin{align}
+    \tilde{h}_{j}^{(t)} &= \pi_{j}^{(t-1)} \cdot e(\hat{y}_{j}^{(t-1)}) + (1 - \pi_{j}^{(t-1)}) \cdot e_{\mathrm{mask}}
+\end{align}
+with norm-preserving renormalization to prevent magnitude distortion:
+\begin{equation}
+    h_{j}^{(t)} = \frac{\tilde{h}_{j}^{(t)}}{\|\tilde{h}_{j}^{(t)}\|_2} \cdot \bigl(\pi_{j}^{(t-1)} \|e(\hat{y}_{j}^{(t-1)})\|_2 + (1 - \pi_{j}^{(t-1)}) \|e_{\mathrm{mask}}\|_2\bigr)
+\end{equation}
+
+Decoding is block-wise (block size 32) with a \textit{contiguous prefix promotion} strategy: scan masked positions left-to-right and promote only the longest contiguous prefix whose confidence exceeds $\tau_{\mathrm{dec}}$. Blocks converge when either (1) top-1 predictions are consistent for two consecutive steps, or (2) all confidences exceed $\tau_{\mathrm{acc}} = 0.9$.
+
+\paragraph{Why OPUT is prerequisite for SPD.}
+OPUT trains the model to map \textit{both} mask tokens and self-predicted tokens toward the correct output, making interpolation between $e_{\mathrm{mask}}$ and $e(\hat{y})$ a semantically meaningful input. Without OPUT, applying SPD to a standard MDLM causes complete generation collapse (0\% accuracy).
+
+\subsection{Results}
+
+Experiments use LLaDA-2.0-mini as the base model, with 2-epoch full-parameter OPUT on self-distilled data (0.7M math, 1.0M code) using 8 H200 GPUs.
+
+\begin{table}[h]
+\centering
+\caption{DMax vs.\ baselines on math/reasoning and code benchmarks.}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{Benchmark} & \textbf{TPF} & \textbf{TPS} & \textbf{Acc.} & \textbf{AUP} \\
+\midrule
+LLaDA-2.0-mini & GSM8K & 2.04 & 512 & 92.6\% & 340 \\
+Hierarchical Dec. & GSM8K & 2.44 & 577 & 91.6\% & 357 \\
+dParallel-SFT & GSM8K & 2.79 & 721 & 92.3\% & 395 \\
+\textbf{DMax-Math} & GSM8K & \textbf{5.48} & \textbf{1258} & 92.1\% & \textbf{557} \\
+\midrule
+LLaDA-2.0-mini & MATH500 & 2.58 & 626 & 75.8\% & 257 \\
+\textbf{DMax-Math} & MATH500 & \textbf{5.94} & \textbf{1286} & 75.4\% & \textbf{507} \\
+\midrule
+LLaDA-2.0-mini & HumanEval & 4.38 & 1044 & 84.2\% & 369 \\
+\textbf{DMax-Coder} & HumanEval & \textbf{7.36} & \textbf{1557} & 83.5\% & \textbf{637} \\
+\midrule
+LLaDA-2.0-mini & MBPP & 2.71 & 662 & 80.6\% & 276 \\
+\textbf{DMax-Coder} & MBPP & \textbf{5.86} & \textbf{1264} & 79.2\% & \textbf{482} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{2.2$\times$ average TPF improvement} (2.8 $\to$ 6.2 across benchmarks) with $<$1\% accuracy loss. Best single-benchmark TPF: 7.36 on HumanEval.
+
+    \item \textbf{Practical throughput:} Average 1,338 tokens per second on 2 H200 GPUs at batch size 1.
+
+    \item \textbf{SPD is the critical component:} At $\tau_{\mathrm{dec}} = 0$, adding hybrid embeddings to OPUT-only jumps GSM8K accuracy from 68.2\% to 90.4\% (+22.2 pp), confirming that soft uncertainty propagation is essential for aggressive parallelism.
+
+    \item \textbf{Low-parallelism gains:} Even at conservative $\tau_{\mathrm{dec}} = 0.95$, DMax \textit{improves} accuracy by +0.7\% to +3.0\% across benchmarks (e.g., HumanEval: 84.2\% $\to$ 87.2\%) while still increasing TPF. Self-revision benefits even standard decoding by recovering from reasoning errors.
+
+    \item \textbf{Consistency is the primary convergence signal:} Ablation shows consistency-based termination achieves 5.13 TPF/92.1\% on GSM8K, while confidence-only termination is overly conservative (2.28 TPF/92.2\%).
+
+    \item \textbf{OPUT is mandatory:} Without on-policy training, SPD causes complete collapse (0\% accuracy). Uniform diffusion training without on-policy rollouts also fails catastrophically (68.7\% GSM8K with lower TPF).
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Requires post-training:} Unlike S2D2~\cite{s2d2} (training-free), DMax requires OPUT fine-tuning (2 epochs on 8 H200 GPUs). The tight coupling between OPUT and SPD means SPD is not a plug-and-play inference technique.
+    \item \textbf{Single base model:} All results are on LLaDA-2.0-mini only; generalization to other dLLM families (Dream, SDAR) is not demonstrated.
+    \item \textbf{Self-distilled training data:} Training uses only the model's own generations, which may limit the improvement ceiling.
+    \item \textbf{Fixed block size:} Block size is fixed at 32; interaction between block size and DMax effectiveness is not explored.
+    \item \textbf{Math/code focus:} Performance on open-ended generation, instruction following, or planning tasks is not reported.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+DMax addresses a critical gap in our diffusion LLM stack. Our prior reviews covered foundations (GDDS~\cite{gdds}: semantic kernels for discrete diffusion), distillation (D-MMD~\cite{dmmd}: discrete MMD), post-training (DARE~\cite{dare}: unified RL framework), and inference (S2D2~\cite{s2d2}: training-free self-speculation). DMax adds a complementary \textit{training-based} inference acceleration approach that achieves substantially higher throughput than S2D2 by fundamentally changing the decoding paradigm from binary mask-to-token to progressive mask-to-soft-embedding-to-token.
+
+The OPUT training procedure---teaching a model to correct its own errors via on-policy rollouts---directly parallels the self-distillation principle in RLSD~\cite{rlsd}, but applied to the diffusion forward process rather than RL value estimation. The soft hybrid embeddings in SPD echo GDDS's semantic kernels: both use continuous interpolation in embedding space to capture uncertainty that discrete tokens cannot represent.
+
+S2D2 and DMax represent two complementary strategies for dLLM efficiency: S2D2 is training-free and portable across model families, while DMax requires post-training but achieves 2.2$\times$ TPF improvement with accuracy preservation. A natural question is whether they can be composed---using S2D2's speculative verification on top of DMax's soft decoding.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Composing DMax with Speculative Verification}
+
+\textbf{Gap:} DMax and S2D2~\cite{s2d2} attack dLLM decoding inefficiency from opposite ends. DMax uses training-based self-refinement with soft embeddings to decode more tokens per forward pass; S2D2 uses training-free speculative verification to eliminate unnecessary denoising steps. Currently neither leverages the other's strengths: DMax has no external verification mechanism (relying solely on self-consistency for convergence), while S2D2 operates on standard discrete token representations without uncertainty-aware embeddings.
+
+\textbf{Approach:} Use DMax's OPUT-trained model as S2D2's base model and integrate speculative verification into SPD's convergence check. Specifically, after each SPD refinement iteration within a block, instead of checking only self-consistency, apply S2D2's block-size-1 AR verification: compute the acceptance probability $\min(1, q_i / p_i)$ where $q_i$ comes from the AR-mode forward pass and $p_i$ from the soft-decoding pass. Tokens accepted by both criteria (high confidence \textit{and} AR-verified) can be committed immediately, while rejected tokens retain their soft embeddings for further refinement. This creates a two-level error correction: SPD's soft embeddings handle gradual uncertainty resolution, while speculative verification provides a hard correctness check.
+
+\textbf{Feasibility:} High. Both components are already implemented for LLaDA-2.0-mini. The main engineering challenge is interleaving S2D2's AR-mode verification within SPD's block-wise loop. The expected benefit is faster convergence (fewer refinement iterations per block) without accuracy loss, since speculative verification provides an orthogonal error signal. Evaluate on GSM8K and HumanEval where both methods have established baselines.
+
+\subsection{Direction 2: On-Policy Training for Agentic Diffusion LLMs}
+
+\textbf{Gap:} DMax's OPUT teaches a model to correct single-turn prediction errors, but agentic settings require multi-turn self-correction across environment interactions. RAGEN-2~\cite{ragen2} showed that template collapse in agentic RL arises partly because the policy converges to rigid action patterns---a problem analogous to DMax's error accumulation, but at the trajectory level rather than the token level. Meanwhile, DARE~\cite{dare} provides RL post-training for dLLMs but does not address multi-turn agent settings.
+
+\textbf{Approach:} Extend OPUT to multi-turn agentic diffusion: instead of corrupting and recovering within a single sequence, corrupt the model's \textit{action predictions} at each turn of a multi-step agent trajectory and train the model to recover correct actions given its own (potentially erroneous) previous actions plus environment feedback. Define the multi-turn on-policy loss:
+\begin{equation}
+    \mathcal{L}_{\mathrm{agent}} = \sum_{k=1}^{K} \mathcal{L}_{\mathrm{pred}}^{(k)}(a_{k}^{*} \mid s_k, \hat{a}_{1:k-1})
+\end{equation}
+where $\hat{a}_{1:k-1}$ are the model's on-policy predicted actions for turns $1$ through $k-1$, $s_k$ is the resulting environment state, and $a_{k}^{*}$ is the ground-truth action. This forces the model to learn recovery strategies when earlier actions are suboptimal, directly addressing RAGEN-2's template collapse by training \textit{against} rigid patterns. Combine with RAGEN-2's MI-based diagnostics to monitor diversity during training and trigger curriculum adjustments (from SKILL0~\cite{skill0}) when MI drops.
+
+\textbf{Feasibility:} Medium. Requires a multi-turn environment with verifiable actions (e.g., WebShop, ALFWorld). The main challenge is that multi-turn on-policy rollouts for dLLMs are expensive (each action requires a full diffusion decoding pass). Mitigate by using DMax's aggressive parallelism to speed up per-turn generation and limiting trajectories to 3--5 turns. Start with LLaDA-2.0-mini + DMax on a simple planning task to validate the multi-turn OPUT concept before scaling to complex agent benchmarks.
+
+\subsection{Direction 3: Adaptive Soft Embedding Schedules via Denoising-Aware Confidence Calibration}
+
+\textbf{Gap:} DMax's SPD uses a fixed linear interpolation between token and mask embeddings, weighted by raw model confidence $\pi_j$. However, dLLM confidence is known to be poorly calibrated---models can be overconfident on incorrect predictions or underconfident on correct ones, especially early in the denoising process. This miscalibration directly affects SPD quality: overconfident errors receive embeddings too close to the (wrong) token embedding, reducing the mask component that enables correction, while underconfident correct predictions retain too much mask signal, slowing convergence.
+
+\textbf{Approach:} Learn a \textit{denoising-step-aware confidence calibrator} $\phi(c, t)$ that maps the raw confidence $c$ and denoising step $t$ to a calibrated weight for the hybrid embedding. Train $\phi$ on OPUT's training data: at each step, record whether the model's top-1 prediction was correct and fit a small network (2-layer MLP) that predicts correctness probability from $(c, t)$. Replace $\pi_j$ in SPD's interpolation formula with $\phi(c_j, t)$. This is analogous to TriAttention's~\cite{triattention} approach of learning importance scores for KV cache entries rather than using raw attention values: both replace a na\"ive proxy (raw confidence or raw attention) with a learned calibrated score.
+
+Additionally, connect to RLSD's~\cite{rlsd} evidence reweighting: tokens where $\phi(c_j, t) \gg c_j$ (model is underconfident, calibrator says it is likely correct) can be promoted faster, while tokens where $\phi(c_j, t) \ll c_j$ (model is overconfident, calibrator says it is likely wrong) should retain more mask signal. This creates an adaptive soft embedding schedule that varies per-token and per-step.
+
+\textbf{Feasibility:} High. The calibrator is a tiny MLP ($<$1M parameters) trained on data already generated during OPUT. The calibration labels (correct/incorrect at each step) require comparing intermediate predictions to ground truth, which is available in the training set. Evaluate by measuring (1) expected calibration error (ECE) before and after calibration, (2) TPF-accuracy Pareto curves compared to fixed-interpolation SPD. The main risk is that the calibrator may not generalize across domains (math vs.\ code), requiring domain-specific calibrators.
+
+\section{Conclusion}
+
+DMax introduces a principled two-component solution to the error accumulation problem in parallel decoding of diffusion LLMs. On-Policy Uniform Training (OPUT) bridges the train-inference gap by teaching the model to correct its own realistic errors, while Soft Parallel Decoding (SPD) preserves uncertainty through hybrid embeddings rather than hard token commitments. Together, they achieve a 2.2$\times$ average TPF improvement on LLaDA-2.0-mini with less than 1\% accuracy loss, reaching over 1,300 tokens per second on 2 H200 GPUs.
+
+For our lab, DMax completes a second inference-efficiency axis for diffusion LLMs alongside S2D2~\cite{s2d2}: where S2D2 provides training-free speculative acceleration, DMax provides training-based self-refinement with stronger throughput gains. The most actionable direction is composing the two approaches (Direction 1), which requires only engineering integration on a shared base model. The agentic extension (Direction 2) bridges DMax's token-level error correction with RAGEN-2's~\cite{ragen2} trajectory-level collapse diagnosis, opening a path toward efficient multi-turn diffusion LLM agents. The confidence calibration direction (Direction 3) addresses a known weakness of dLLM decoding by transferring the ``learned importance scoring'' principle from TriAttention~\cite{triattention} and the evidence reweighting principle from RLSD~\cite{rlsd} to the soft embedding interpolation, potentially pushing the accuracy-speed Pareto frontier further.
+
+The emerging picture across our reviews: diffusion LLMs now have a relatively complete toolchain---generation (GDDS~\cite{gdds}), distillation (D-MMD~\cite{dmmd}), post-training (DARE~\cite{dare}), and efficient inference (S2D2, DMax)---but the frontier is moving toward \textit{composed} systems that integrate these components and extend to agentic, multi-turn settings.
+
+\begin{thebibliography}{9}
+\bibitem{dmax} Chen, Z., Fang, G., Ma, X., Yu, R., \& Wang, X. (2026). DMax: Aggressive Parallel Decoding for dLLMs. \textit{arXiv:2604.08302}.
+\bibitem{s2d2} Chen, Z., et al. (2026). S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation. \textit{arXiv:2603.25702}.
+\bibitem{dare} Yang, J., et al. (2026). DARE: Diffusion Large Language Models Alignment and Reinforcement Executor. \textit{arXiv:2604.04215}.
+\bibitem{gdds} Zhao, Z., et al. (2026). Generalized Discrete Diffusion from Snapshots. \textit{arXiv:2603.21342}.
+\bibitem{dmmd} Schiff, Y., et al. (2026). Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD. \textit{arXiv:2603.20155}.
+\bibitem{rlsd} Yang, C., et al. (2026). Self-Distilled RLVR. \textit{arXiv:2604.03128}.
+\bibitem{ragen2} Wang, H., et al. (2026). RAGEN-2: Reasoning Collapse in Agentic RL. \textit{arXiv:2604.06268}.
+\bibitem{skill0} Ding, Z., et al. (2026). SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization. \textit{arXiv:2604.02268}.
+\bibitem{triattention} Mao, W., et al. (2026). TriAttention: Efficient Long Reasoning with Trigonometric KV Compression. \textit{arXiv:2604.04921}.
+\end{thebibliography}
+
+\end{document}
