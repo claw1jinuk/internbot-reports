@@ -1,0 +1,191 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Initialisation Determines the Basin ---\\Efficient Codebook Optimisation for Extreme LLM Quantization}
+\author{Internbot --- Automated Research Review}
+\date{April 14, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Initialisation Determines the Basin: Efficient Codebook Optimisation for Extreme LLM Quantization \\
+\textbf{Authors:} Ian W. Kennedy, Nafise Sadat Moosavi \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.08118}{2604.08118} \quad \textbf{Code:} \href{https://github.com/kenno94-IK/aqlm-oaem}{GitHub} \\
+\textbf{Topics:} LLM Efficiency, Quantization, Additive Quantization
+
+\subsection{Problem}
+
+At 2-bit precision (2 bits per parameter), additive quantization (AQ) methods for LLM compression fail catastrophically---even with extensive beam search and fine-tuning. The paper demonstrates that the dominant bottleneck is \textbf{codebook initialisation}, not insufficient search. Greedy sequential initialisation places the model into a poor optimisation basin from which subsequent beam search and PV-tuning cannot escape.
+
+The paper introduces the \textbf{representational ratio} $\rho = N / K^{M}$, where $N$ is the number of weight groups per layer, $M$ is the number of additive codebooks, and $K$ is the codebook size. This ratio characterises a phase transition:
+
+\begin{itemize}
+    \item \textbf{Overcomplete} ($\rho < 1$): more representable points than weight groups; initialisation errors are absorbed. At 3~bpp with $M=3$: $K^{M} = 16.8$M, $\rho \approx 0.07$.
+    \item \textbf{Undercomplete} ($\rho > 1$): weight groups compete for limited codebook capacity; initial placement is critical. At 2~bpp with $M=2$: $K^{M} = 65$K, $\rho \approx 18$---a \textbf{256$\times$ capacity reduction} from 3~bpp.
+\end{itemize}
+
+Concretely, on WikiText-2 with Llama~3.2~3B at 2~bpp, greedy initialisation yields perplexity 352.39 (beam~4) or 60.61 (beam~8), versus 7.28 for FP16. Existing mitigation:
+
+\begin{itemize}
+    \item \textbf{AQLM}~\cite{aqlm}: residual k-means initialisation---fits $C_1$ to weights, then $C_2$ to residuals $w - c_{1, b_1}$. This greedy procedure ignores joint codebook structure: optimal $C_1$ depends on what $C_2$ can represent.
+    \item \textbf{QuIP\#}~\cite{quipsharp}: fixed E8 lattice codebooks with randomised Hadamard transforms. Avoids initialisation but requires $O(d)$ floating-point MACs per weight group at inference, versus $O(1)$ for LUT-based AQ---critical for edge deployment.
+\end{itemize}
+
+\subsection{Method}
+
+\paragraph{Additive Quantization Background.}
+Each weight group $w \in \mathbb{R}^{g}$ (group size $g=8$) is represented as a sum of $M$ codewords: $\hat{w} = \sum_{m=1}^{M} c_{m, b_{m}}$, where $c_{m, b_{m}}$ is the $b_m$-th entry of codebook $C_m \in \mathbb{R}^{K \times g}$ with $K = 256$. The layer-wise objective minimises output reconstruction error on calibration data:
+\begin{equation}
+    \mathcal{L} = \|XW - X\hat{W}\|_{F}^{2}
+\end{equation}
+
+\paragraph{Greedy Suboptimality Bound.}
+Let $(i^{*}, j^{*})$ denote the optimal joint assignment and $(i^{g}, j^{g})$ the greedy sequential assignment, with displacement $\delta = c_{1, i^{g}} - c_{1, i^{*}}$. The suboptimality gap decomposes as:
+\begin{equation}
+    \epsilon^{g} - \epsilon^{*} = \underbrace{\|\delta\|^{2}}_{\mathrm{direct}} + \underbrace{2\langle \delta,\, c_{2, j^{g}} - r^{*} \rangle}_{\mathrm{coupling}} + \underbrace{\|r^{*} - c_{2, j^{g}}\|^{2} - \epsilon^{*}}_{\mathrm{residual\ mismatch} \geq 0}
+\end{equation}
+where $r^{*} = w - c_{1, i^{*}}$ is the joint-optimal residual. At 2~bpp, only $K = 256$ second-codebook entries are available for error correction (vs.\ $K^{2} = 65{,}536$ at 3~bpp).
+
+\paragraph{OA-EM: Output-Aware EM Initialisation.}
+OA-EM replaces Euclidean distance with \textbf{Hessian-weighted Mahalanobis distance} in both centroid optimisation and code assignment. Starting from k-means-initialised centroids $\{c_k\}_{k=1}^{K}$, it alternates for $R = 3$ rounds:
+
+\textit{M-step} (centroid optimisation): fix assignments, minimise the output-aware loss
+\begin{equation}
+    \mathcal{L}_{\mathrm{EM}} = \frac{1}{N} \sum_{i=1}^{N} e_{i}^{\top} H_{i}\, e_{i}, \qquad e_{i} = w_{i} - c_{b_{i}}
+\end{equation}
+where $H_{i} = X_{i}^{\top} X_{i} + \lambda I$ is the damped block-diagonal Hessian for weight group $i$ ($\lambda = 0.01 \cdot \mathrm{mean}(\mathrm{diag}(H))$). Centroids are updated via $S = 100$ Adam steps with cosine annealing from $\eta = 10^{-4}$ to $0.1\eta$.
+
+\textit{E-step} (hard reassignment): fix centroids, reassign each weight group under Mahalanobis distance:
+\begin{equation}
+    b_{i} \leftarrow \arg\min_{k \in [K]} (w_{i} - c_k)^{\top} H_{i}\, (w_{i} - c_k)
+\end{equation}
+
+\paragraph{Why OA-EM Works.}
+Euclidean k-means allocates centroids by weight magnitude, regardless of output sensitivity. When $\rho \gg 1$, this wastes centroids on insensitive groups. OA-EM's Hessian weighting concentrates centroids on groups with large $H_{i}$, ensuring small displacement $\delta$ precisely where it matters most---directly reducing the $\|\delta\|^{2}$ direct cost for high-sensitivity groups. Improved first-codebook placement also reduces the residual mismatch term.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{WikiText-2 perplexity at 2~bpp, before and after PV-tuning ($\downarrow$ is better).}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Model} & \textbf{Init} & \textbf{Beam} & \textbf{Pre-PV} & \textbf{Post-PV} & \textbf{Avg Acc} \\
+\midrule
+\multirow{6}{*}{Llama 3.2 3B} & Greedy & 4 & 352.39 & 12.66 & .573 \\
+ & OA-EM & 4 & 16.82 & \textbf{11.53} & \textbf{.589} \\
+\cmidrule{2-6}
+ & Greedy & 8 & 60.61 & 11.76 & .585 \\
+ & OA-EM & 8 & 17.39 & \textbf{11.53} & \textbf{.591} \\
+\cmidrule{2-6}
+ & Greedy & 16 & 46.01 & 12.01 & .585 \\
+ & OA-EM & 16 & 16.53 & \textbf{11.49} & \textbf{.591} \\
+\midrule
+Llama 3.1 8B & Greedy & 8 & 18.86 & 9.39 & .649 \\
+ & OA-EM & 8 & 16.38 & \textbf{9.25} & \textbf{.656} \\
+\midrule
+Qwen 2.5 3B & Greedy & 8 & 12.50 & 10.93 & \textbf{.606} \\
+ & OA-EM & 8 & 12.30 & \textbf{10.73} & .603 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{Basin persistence:} PV-tuning compresses the pre-PV gap from 43~perplexity points to 0.23, yet OA-EM remains better in \textit{every} configuration. Initialisation determines which basin fine-tuning converges to.
+
+    \item \textbf{Greedy is non-monotonic in beam width:} Post-PV perplexity goes 12.66 (b=4) $\to$ 11.76 (b=8) $\to$ 12.01 (b=16)---wider search in a bad basin can \textit{hurt}. OA-EM is stable: 11.53 $\to$ 11.53 $\to$ 11.49.
+
+    \item \textbf{2.8$\times$ speedup:} OA-EM at beam~4 (6.1h) produces a better model than greedy at beam~16 (16.9h) on both perplexity and downstream accuracy.
+
+    \item \textbf{Domain robustness:} Greedy degrades 3.49$\times$ from in-domain (C4) to far-OOD (WikiText-2); OA-EM degrades only 1.04$\times$. Hessian weighting distributes codebook capacity by output sensitivity rather than calibration frequency.
+
+    \item \textbf{Low-parallelism still matters:} At 3~bpp (overcomplete regime, $\rho \approx 0.07$), OA-EM still improves: 8.54 vs.\ 8.66 post-PV WikiText-2 perplexity. The gap narrows but persists.
+
+    \item \textbf{Downstream accuracy:} +1.7~pp on Llama~3.2~3B (beam~4), +0.7~pp on Llama~3.1~8B. Per-task, OA-EM wins 4/6 tasks on Llama~3.1~8B (HellaSwag +0.7, PIQA +1.0, WinoGrande +1.8, ARC-Easy +2.1).
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Limited model scale:} Evaluated on 3B and 8B models only. Whether the phenomenon holds at 70B+ scale is untested.
+    \item \textbf{$\rho$ is necessary but not sufficient:} Llama~3.1~8B has higher $\rho$ than Llama~3.2~3B yet better greedy baselines (18.86 vs.\ 60.61), because its weight distribution has fewer high-magnitude outliers after training on more data (15T vs.\ 3T tokens).
+    \item \textbf{Downstream signal is weak on Qwen:} OA-EM wins on perplexity (10.73 vs.\ 10.93) but slightly loses on average downstream accuracy (.603 vs.\ .606).
+    \item \textbf{Single-seed evaluation:} All results use seed 42; variance across seeds is not reported.
+    \item \textbf{No edge deployment benchmarks:} While the paper argues for $O(1)$ LUT-based dequantization, actual latency/throughput on ARM or mobile SoCs is not measured.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+OA-EM fills a critical gap in our LLM efficiency coverage. Our prior Topic~1 reviews addressed inference-time efficiency: TriAttention~\cite{triattention} compresses KV caches via trigonometric importance scoring, IndexCache~\cite{indexcache} reuses sparse attention indices across layers, LookaheadKV~\cite{lookaheadkv} evicts KV entries via future-glimpse scoring, and DMax~\cite{dmax} accelerates diffusion LLM decoding via soft parallel decoding. OA-EM adds the \textit{weight compression} dimension---reducing the model's memory footprint itself, which is orthogonal to and composable with all of the above.
+
+The representational ratio $\rho$ provides a principled predictor of when a compression technique will be sensitive to initialisation, analogous to TriAttention's pre-RoPE concentration metric for predicting which attention heads are compressible. Both reveal that the key to efficient compression is \textit{understanding which components are sensitive before compressing}, rather than applying uniform compression and hoping fine-tuning will recover quality.
+
+The Hessian-weighted Mahalanobis distance in OA-EM mirrors the ``output-aware'' principle seen across our reviews: TriAttention scores KV importance by output contribution, RLSD~\cite{rlsd} reweights evidence by output direction, and now OA-EM places codebook centroids by output sensitivity. The recurring theme: na\"ive uniform treatment wastes capacity; output-aware allocation consistently yields better efficiency-quality trade-offs.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Output-Aware Codebook Initialisation for Diffusion LLM Quantization}
+
+\textbf{Gap:} All quantization work (OA-EM, AQLM, QuIP\#) targets autoregressive LLMs. Diffusion LLMs (LLaDA, Dream, SDAR) have fundamentally different weight sensitivity profiles: the same weights are used across multiple denoising steps, and the Hessian varies with the corruption level $t$. DMax~\cite{dmax} showed that dLLM decoding quality depends critically on model precision at intermediate denoising states---early steps set the global structure while late steps refine details. A uniform quantization that optimises for the average Hessian may sacrifice quality at the critical early steps.
+
+\textbf{Approach:} Extend OA-EM's Hessian-weighted initialisation to a \textit{timestep-aware} variant. Compute per-layer Hessians $H_{i}^{(t)}$ at multiple denoising timesteps $t \in \{0.25, 0.5, 0.75\}$ and define a weighted aggregate:
+\begin{equation}
+    \bar{H}_{i} = \sum_{t} \alpha_t \cdot H_{i}^{(t)}, \qquad \alpha_t \propto \mathrm{sensitivity}(t)
+\end{equation}
+where $\mathrm{sensitivity}(t)$ measures how much output quality degrades when weights are perturbed at step $t$ (estimated via a small calibration sweep). Use $\bar{H}_{i}$ in OA-EM's M-step and E-step. This prioritises codebook centroids for timesteps where the model is most fragile, analogous to how DMax's soft embeddings preserve uncertainty at high-corruption steps. Start with LLaDA-2.0-mini at 2~bpp and compare against na\"ive AQLM quantization, measuring both perplexity and tokens-per-forward (TPF) under DMax decoding.
+
+\textbf{Feasibility:} High. The Hessians at different timesteps can be computed from standard calibration data by running the diffusion forward process and collecting activations at each $t$. The OA-EM algorithm itself is unchanged---only the Hessian input differs. The main risk is that timestep-specific Hessians may be noisy with limited calibration data; averaging across timesteps with learned weights mitigates this.
+
+\subsection{Direction 2: Joint Quantization and KV Cache Compression via Shared Sensitivity Maps}
+
+\textbf{Gap:} Weight quantization (OA-EM) and KV cache compression (TriAttention~\cite{triattention}, LookaheadKV~\cite{lookaheadkv}, IndexCache~\cite{indexcache}) are currently applied independently, but they share a common bottleneck: both must identify which model components are most sensitive to compression. OA-EM uses the Hessian $H_{i}$ to score weight group sensitivity; TriAttention uses trigonometric concentration scores to identify important KV entries. Applying both independently may create \textit{compounding errors}: if a weight group is aggressively quantized \textit{and} its associated KV entries are evicted, the combined quality loss exceeds the sum of individual losses.
+
+\textbf{Approach:} Build a unified sensitivity map that jointly guides both weight quantization and KV cache budgets. For each layer $l$ and head $h$, compute: (1) the weight sensitivity $s_{\mathrm{weight}}^{(l,h)} = \mathrm{tr}(H_{i}^{(l,h)})$ from OA-EM's Hessian, and (2) the KV importance $s_{\mathrm{KV}}^{(l,h)} = \mathrm{TrigScore}(l, h)$ from TriAttention's pre-RoPE concentration metric. Define a joint budget allocation: layers/heads with high $s_{\mathrm{weight}}$ get more codebook capacity (higher effective bit-rate via mixed-precision AQ), while layers/heads with high $s_{\mathrm{KV}}$ get larger KV cache budgets. The constraint is total memory: $B_{\mathrm{total}} = B_{\mathrm{weight}} + B_{\mathrm{KV}}$, and the allocation is:
+\begin{equation}
+    B_{\mathrm{weight}}^{(l,h)} \propto s_{\mathrm{weight}}^{(l,h)}, \qquad B_{\mathrm{KV}}^{(l,h)} \propto s_{\mathrm{KV}}^{(l,h)}
+\end{equation}
+subject to the total memory budget. This creates a Pareto-optimal allocation that no independent method can achieve.
+
+\textbf{Feasibility:} Medium. Both sensitivity signals are already computable from existing tools. The challenge is implementing mixed-precision AQ within AQLM's framework (currently all layers use the same bit-rate) and integrating TriAttention's per-head KV budgets into a unified memory manager. Start with Llama~3.1~8B, fix total memory at the 2~bpp + 50\%-KV-compression budget, and compare joint allocation against independent OA-EM + TriAttention.
+
+\subsection{Direction 3: Representational Ratio as a Compression Readiness Diagnostic}
+
+\textbf{Gap:} The representational ratio $\rho$ predicts when codebook initialisation becomes critical for AQ, but the principle generalises beyond quantization: any compression technique that maps $N$ model components to $K$ compressed representations will be sensitive to initialisation when $\rho = N/K > 1$. This applies to pruning (mapping $N$ neurons to $K$ surviving neurons), knowledge distillation (mapping $N$ teacher features to $K$ student features), and even RL reward modeling (mapping $N$ trajectory states to $K$ reward tokens, as in RLSD's~\cite{rlsd} evidence reweighting). Yet no unified diagnostic exists to predict when a given compression rate will cross the critical $\rho$ threshold for a given model.
+
+\textbf{Approach:} Develop a \textit{compression readiness score} (CRS) that predicts, for a given (model, compression method, target rate) triple, whether the result will be in the overcomplete or undercomplete regime. The CRS combines: (1) the representational ratio $\rho$ (method-specific capacity analysis), (2) the \textit{effective rank} of the weight matrix (how many independent degrees of freedom the weights actually use---models trained on more data have lower effective rank and are more compressible), and (3) the Hessian spectral gap ($\lambda_1 / \lambda_2$ ratio---a large gap indicates a few dominant sensitivity directions, making the model more robust to compression along minor directions).
+
+Define: $\mathrm{CRS}(l) = \rho(l) \cdot \mathrm{eff\_rank}(W_l) / \mathrm{spectral\_gap}(H_l)$. High CRS indicates a layer where initialisation-sensitive compression will fail; low CRS indicates a safe compression target. Validate on the OA-EM experimental data (predict which layers contribute most to quantization error from CRS, compare against actual per-layer error) and extend to TriAttention (predict which heads are safe to compress from CRS, compare against TriAttention's trigonometric scores). If CRS generalises, it provides a model-and-method-agnostic tool for planning compression strategies.
+
+\textbf{Feasibility:} Medium-high. All components (representational ratio, effective rank via SVD, Hessian spectral gap) are cheap to compute per-layer. The main challenge is validating that CRS generalises across compression methods (AQ, KV cache eviction, pruning). Start with the three models in OA-EM's experiments and check whether CRS correlates with per-layer quantization error. If the correlation holds, extend to TriAttention's per-head KV compression and check whether CRS predicts which heads are safely compressible.
+
+\section{Conclusion}
+
+OA-EM demonstrates that the dominant bottleneck in extreme LLM quantization (2~bpp) is codebook initialisation, not search or fine-tuning. By replacing Euclidean distance with Hessian-weighted Mahalanobis distance in EM-based codebook learning, OA-EM reaches a better optimisation basin that persists through subsequent beam search and PV-tuning. The result: OA-EM at beam~4 (6.1h) outperforms greedy at beam~16 (16.9h), a 2.8$\times$ speedup with better quality.
+
+For our lab, OA-EM adds the \textbf{weight compression} axis to our efficiency toolchain, complementing inference-time techniques: TriAttention~\cite{triattention} (KV cache), IndexCache~\cite{indexcache} (sparse attention reuse), LookaheadKV~\cite{lookaheadkv} (KV eviction), and DMax~\cite{dmax} (parallel dLLM decoding). The most actionable direction is extending OA-EM to diffusion LLMs (Direction~1), where timestep-dependent weight sensitivity creates a natural application for the Hessian-weighted approach. The joint quantization-KV compression direction (Direction~2) bridges OA-EM and TriAttention under a unified memory budget, addressing the compounding error problem of independent compression. The representational ratio diagnostic (Direction~3) generalises OA-EM's key insight into a method-agnostic tool for predicting compression readiness.
+
+The recurring theme across our efficiency reviews is now clear: \textit{output-aware sensitivity scoring}---whether via Hessians (OA-EM), trigonometric concentrations (TriAttention), future-glimpse predictions (LookaheadKV), or on-policy rollouts (DMax)---consistently outperforms uniform treatment. The frontier is composing these sensitivity-aware techniques into a unified compression stack that jointly optimises weights, activations, and KV caches under a single memory budget.
+
+\begin{thebibliography}{9}
+\bibitem{oaem} Kennedy, I. W. \& Moosavi, N. S. (2026). Initialisation Determines the Basin: Efficient Codebook Optimisation for Extreme LLM Quantization. \textit{arXiv:2604.08118}.
+\bibitem{aqlm} Egiazarian, V., et al. (2024). Extreme Compression of Large Language Models via Additive Quantization. \textit{arXiv:2401.06118}.
+\bibitem{quipsharp} Tseng, A., et al. (2024). QuIP\#: Even Better LLM Quantization with Hadamard Incoherence and Lattice Codebooks. \textit{arXiv:2402.04396}.
+\bibitem{triattention} Mao, W., et al. (2026). TriAttention: Efficient Long Reasoning with Trigonometric KV Compression. \textit{arXiv:2604.04921}.
+\bibitem{indexcache} Chen, J., et al. (2026). IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse. \textit{arXiv:2603.12201}.
+\bibitem{lookaheadkv} Li, Z., et al. (2026). LookaheadKV: Fast and Accurate KV Cache Eviction by Glimpsing into the Future. \textit{arXiv:2603.10899}.
+\bibitem{dmax} Chen, Z., et al. (2026). DMax: Aggressive Parallel Decoding for dLLMs. \textit{arXiv:2604.08302}.
+\bibitem{rlsd} Yang, C., et al. (2026). Self-Distilled RLVR. \textit{arXiv:2604.03128}.
+\end{thebibliography}
+
+\end{document}
