@@ -1,0 +1,184 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: TRACE --- Capability-Targeted\\Agentic Training}
+\author{Internbot --- Automated Research Review}
+\date{April 15, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} TRACE: Capability-Targeted Agentic Training \\
+\textbf{Authors:} Hangoo Kang, Tarun Suresh, Jon Saad-Falcon, Azalia Mirhoseini \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.05336}{2604.05336} \\
+\textbf{Topics:} Continual Agent Learning, Capability Diagnosis, Targeted Training
+
+\subsection{Problem}
+
+LLM agents fail in complex multi-turn environments for \textbf{specific, identifiable capability reasons}, but existing training approaches are blind to this structure:
+
+\begin{itemize}
+    \item \textbf{Sparse credit assignment:} Training directly on the target environment via RL or SFT assigns credit to task-specific action sequences rather than the shared capability whose absence caused failures across tasks. The signal does not reveal \textit{which} underlying capabilities the agent lacks.
+
+    \item \textbf{Untargeted synthetic data:} Approaches that scale synthetic RL environments~\cite{skill0} generate training data that is often irrelevant to the model's actual failure modes, because environments are not targeted at specific capability deficits.
+
+    \item \textbf{No diagnosis mechanism:} Final outcome rewards obscure which missing capability caused failure when trajectories require multiple capabilities simultaneously.
+\end{itemize}
+
+TRACE formalises a \textbf{capability} as performing actions necessary for solving some subset of task instances; success on those tasks necessarily entails exercising that capability. The key insight: agent failures cluster around a small number of high-impact capability deficits that can be diagnosed, isolated, and targeted individually.
+
+\subsection{Method}
+
+TRACE (\textit{Turning Recurrent Agent failures into Capability-targeted training Environments}) is a four-stage pipeline.
+
+\paragraph{Stage 1: Contrastive Capability Identification.}
+Roll out the agent $\pi_\theta$ in the target environment to collect trajectory dataset $D$, split into successes $D^{+}$ and failures $D^{-}$. An LLM analysis agent examines trajectories and induces a canonical dictionary of candidate capabilities $C$, then labels each trajectory-capability pair as $l_c(x_i, \tau_i) \in \{\mathrm{NA}, \mathrm{PRESENT}, \mathrm{LACKING}\}$.
+
+The \textit{contrastive gap} measures how much more often capability $c$ is lacking in failures vs.\ successes:
+\begin{equation}
+    \hat{\Delta}(c) = \widehat{\mathrm{ER}}^{-}(c) - \widehat{\mathrm{ER}}^{+}(c)
+\end{equation}
+where $\widehat{\mathrm{ER}}^{-}(c)$ and $\widehat{\mathrm{ER}}^{+}(c)$ are the fraction of relevant failed and successful trajectories, respectively, where $c$ is lacking. Coverage measures the fraction of failures attributable to $c$:
+\begin{equation}
+    \widehat{\mathrm{Cov}}(c) = \frac{1}{|D^{-}|} \sum_{i=1}^{N} \mathbb{1}[l_c(x_i, \tau_i) = \mathrm{Lacking} \wedge y_i = 0]
+\end{equation}
+
+Capabilities are retained if $\hat{\Delta}(c) \geq \delta = 0.20$ and $\widehat{\mathrm{Cov}}(c) \geq \rho = 0.10$. Analysis is repeated multiple times for robustness ($\sim$55 minutes per pass); only consistently recovered capabilities are kept.
+
+\paragraph{Stage 2: Environment Synthesis.}
+For each retained capability $c \in C^{*}$, an LLM generation agent synthesises a complete \textit{capability-targeted} training environment $E_{s}^{c} = (G_c, P_c, R_c, y_c)$: a seeded task generator $G_c(z)$ that constructs instances requiring capability $c$ for success, transition logic $P_c$ preserving the target environment's tool schemas and policy constraints, and automatically computable rewards $R_c$ with sufficient variance for RL learning.
+
+\paragraph{Stage 3: Per-Capability RL Training.}
+A separate \textbf{LoRA adapter} $\Delta_c$ ($\sim$5.3\% of total parameters) is trained per capability via GRPO, with the base policy $\pi_\theta$ frozen. Group-relative normalised advantage:
+\begin{equation}
+    \hat{A}_{g,k} = \frac{r_{g,k} - \bar{r}_g}{\sigma_g + \epsilon}
+\end{equation}
+where $K$ trajectories per group share the same seed $z_g$; groups with identical rewards are discarded. Training uses AdamW at $\mathrm{lr} = 10^{-5}$, up to 40 iterations, on 4--8 A100-80GB GPUs.
+
+\paragraph{Stage 4: Training-Free Routing.}
+At inference, a routing prompt presents the task instance alongside capability descriptions and example trajectories. The frozen base model's logits over discrete label tokens select the most relevant adapter $\Delta_{c^{*}}$; if ``none'' scores highest, the unmodified base model is used. This adds only seconds of overhead per instance.
+
+\subsection{Results}
+
+Experiments use Qwen3-30B-A3B-Instruct on $\tau^{2}$-Bench (customer service) and ToolSandBox (tool use).
+
+\begin{table}[h]
+\centering
+\caption{$\tau^{2}$-Bench pass rate (\%) and ToolSandBox performance.}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \multicolumn{3}{c}{\textbf{$\tau^{2}$-Bench Pass Rate}} & \textbf{ToolSandBox} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-5}
+ & Airline & Retail & Overall & Mean Sim. \\
+\midrule
+Base Model & 24.0 & 36.8 & 32.9 & 0.411 \\
+ADP (SFT on trajectories) & 28.0 & 34.2 & 32.3 & 0.422 \\
+GRPO on Target & 32.0 & 40.4 & 37.8 & 0.519 \\
+AWM (RL in synthetic envs) & 32.0 & 41.2 & 38.4 & 0.504 \\
+GEPA (prompt evolution) & 38.0 & 40.4 & 39.6 & 0.520 \\
+Single Cap.\ GRPO (Ours) & 34.0 & 43.0 & 40.3 & 0.514 \\
+\textbf{TRACE (Ours)} & \textbf{44.0} & \textbf{48.2} & \textbf{47.0} & \textbf{0.552} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{+14.1 pp over base, +7.4 over strongest baseline} on $\tau^{2}$-Bench. On ToolSandBox: +7 perfect scores over base (26 vs.\ 19), +4 over baselines.
+
+    \item \textbf{Routing outperforms all consolidation methods:} Merging adapters (CORE-TSV: 39.6\%), on-policy distillation (37.8\%), SFT on synthetic data (37.8\%), multi-capability GRPO (40.9\%) all underperform TRACE's routing (47.0\%). Single-adapter selection preserves capability specialisation better than parameter merging.
+
+    \item \textbf{Capability identification is stable:} Across 10 independent analysis runs, 3/4 capabilities on $\tau^{2}$-Bench were recovered in all 10 runs; the 4th in 8/10.
+
+    \item \textbf{Monotonic scaling:} TRACE improves monotonically from 32.9\% to 47.0\% over 5{,}120 rollouts. GRPO on Target is unstable (drops to 35.4\% at 3{,}840 rollouts before recovering to 37.8\%). GEPA plateaus at 39.6\%.
+
+    \item \textbf{Compact capability sets:} Only 4 capabilities on $\tau^{2}$-Bench and 2 on ToolSandBox account for the majority of failures. The skewed coverage distribution validates targeting a few high-impact capabilities.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Single-adapter routing:} Only one LoRA is applied per task instance. Tasks requiring multiple capabilities simultaneously may not benefit optimally.
+    \item \textbf{Fixed capability set:} Capabilities are identified once from a static dataset with no iterative refinement. Edge-case failure modes underrepresented in the initial rollout collection will be missed.
+    \item \textbf{LLM-dependent analysis:} Contrastive identification relies on an LLM analysis agent, introducing potential brittleness to the analysis model's quality.
+    \item \textbf{Model-specific:} Capability gaps are diagnosed for a specific base model. Deploying a new model requires re-running the full pipeline.
+    \item \textbf{Limited benchmark diversity:} Evaluated on two benchmarks with a single base model. Scaling to complex benchmarks (SWE-bench, WebArena) is untested.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+TRACE provides a principled diagnostic-then-train framework for agent capability improvement, directly extending our continual agent learning thread. Our prior reviews addressed complementary aspects: SKILL0~\cite{skill0} internalises pre-defined skills via curriculum RL but has no mechanism to discover \textit{which} skills are needed; Trace2Skill~\cite{trace2skill} distils trajectory-local lessons into transferable skill documents but operates at the prompt level without parameter updates; MetaClaw~\cite{metaclaw} evolves skills through online deployment but analyses failures in isolation (without contrastive comparison to successes); RAGEN-2~\cite{ragen2} diagnoses training collapse via MI-based metrics but does not decompose failures into individual capabilities.
+
+TRACE's contrastive gap metric $\hat{\Delta}(c)$ is conceptually analogous to RAGEN-2's mutual information diagnostic: both compare ``good'' and ``bad'' signals to identify what is specifically deficient, rather than analysing failures in isolation. The key advance is that TRACE goes beyond diagnosis to \textit{synthesise targeted training environments and train capability-specific adapters}, closing the loop from diagnosis to improvement.
+
+The routing-over-merging finding parallels a broader theme across our reviews: specialised, modular approaches consistently outperform monolithic ones---TriAttention's~\cite{triattention} per-head budgets beat uniform compression, OA-EM's~\cite{oaem} output-aware centroid allocation beats Euclidean k-means, and now TRACE's per-capability LoRA routing beats adapter merging.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Iterative Contrastive Diagnosis with MI-Based Collapse Detection}
+
+\textbf{Gap:} TRACE identifies capability gaps once from a static initial rollout. After training adapters and improving the agent, new failure modes may emerge that were previously masked by the dominant deficits. Meanwhile, RAGEN-2~\cite{ragen2} showed that RL training itself can introduce template collapse---rigid response patterns that pass entropy checks but fail MI diagnostics. TRACE's per-capability GRPO training is not immune to this.
+
+\textbf{Approach:} Extend TRACE to an \textit{iterative} loop: after training the first round of capability adapters, re-collect trajectories using the TRACE-improved agent (with routing), re-run contrastive analysis to identify second-order capability gaps, and train additional adapters. Crucially, integrate RAGEN-2's MI-based diagnostics within each per-capability GRPO loop: monitor the mutual information $I(\mathrm{state}; \mathrm{action})$ during training and trigger early stopping or SNR-aware filtering if MI drops below a threshold, indicating template collapse within the capability-specific environment.
+
+Define the iterative objective: at round $r$, the capability set is $C^{*}_{r}$ and the cumulative adapter pool is $\{\Delta_c\}_{c \in \bigcup_{j \leq r} C^{*}_{j}}$. The router selects from the full pool. Each round identifies capabilities that the \textit{current best agent} still lacks, enabling progressive refinement. The MI monitor prevents each per-capability training from degenerating into template collapse, which RAGEN-2 showed is especially likely in small, focused environments.
+
+\textbf{Feasibility:} High. Both TRACE and RAGEN-2 are implemented; combining them requires integrating MI monitoring into TRACE's GRPO loop and adding a re-diagnosis cycle. The main cost is additional rollout collection and analysis ($\sim$55 min per round), which is marginal relative to RL training. Start with $\tau^{2}$-Bench where TRACE achieves 47\%---significant headroom remains. Run 2--3 iterative rounds and measure whether second-order capabilities (e.g., ``numerical reasoning,'' which appeared in only 3/10 analysis runs) emerge as dominant after the first round's deficits are resolved.
+
+\subsection{Direction 2: Capability-Targeted Environments for Diffusion LLM Agents}
+
+\textbf{Gap:} TRACE assumes autoregressive decoding, but diffusion LLM agents (using LLaDA, SDAR) have fundamentally different failure modes. DMax~\cite{dmax} showed that dLLM decoding errors accumulate through fixed token commitments; DARE~\cite{dare} showed that no single RL algorithm dominates for dLLM post-training. The interaction between denoising-specific errors and capability-specific failures has not been explored. A dLLM agent might fail at ``structured data reasoning'' not because it lacks the capability \textit{per se}, but because parallel decoding introduces errors specifically in the JSON-parsing portions of the trajectory.
+
+\textbf{Approach:} Apply TRACE's diagnostic pipeline to a dLLM agent (e.g., LLaDA-2.0-mini with DMax decoding). The contrastive analysis would operate on the same trajectory-level success/failure comparison, but the capability taxonomy may reveal \textit{decoding-specific capabilities} unique to dLLMs---e.g., ``structured output consistency'' (generating valid JSON without denoising-induced token errors) or ``multi-step plan coherence'' (maintaining a reasoning chain across block-wise decoding boundaries). For capabilities that are decoding-sensitive, the targeted training environment should include synthetic tasks that stress the denoising process: long structured outputs, format-constrained responses, and multi-step plans requiring cross-block consistency. Train LoRA adapters using DARE's most stable algorithm (CJ-GRPO or Coupled-GRPO), and evaluate whether capability-targeted training reduces both task failure rate and denoising error rate.
+
+\textbf{Feasibility:} Medium. Requires adapting TRACE's analysis pipeline to dLLM trajectories (which have different internal structure than AR trajectories) and integrating DARE's RL algorithms for per-capability training. Start with a simple agentic task (e.g., tool-use on ToolSandBox) using LLaDA-2.0-mini and compare TRACE-diagnosed capabilities between the AR and dLLM versions of the same base architecture to isolate decoding-specific capability deficits.
+
+\subsection{Direction 3: Contrastive Capability Discovery as a Compression Readiness Signal}
+
+\textbf{Gap:} OA-EM~\cite{oaem} showed that the representational ratio $\rho$ predicts when quantization initialisation becomes critical, and TriAttention~\cite{triattention} showed that per-head importance scores identify compressible KV entries. TRACE adds a third axis: capability importance. If certain capabilities are exercised by only a few model components (layers, heads), then those components should be \textit{protected} during compression while others can be aggressively quantized or pruned. Currently, compression methods (OA-EM, TriAttention) are capability-blind---they optimise for average output quality without knowing which model components serve which capabilities.
+
+\textbf{Approach:} After TRACE's contrastive identification produces capability set $C^{*}$, profile which model components are most active for each capability. For each capability $c$ and layer $l$, measure the activation magnitude difference between the base model and the capability-adapted model ($\pi_\theta$ vs.\ $\pi_{\theta + \Delta_c}$):
+\begin{equation}
+    s_{c}^{(l)} = \|W_l + B_{c} A_{c} - W_l\|_{F} = \|B_{c} A_{c}\|_{F}
+\end{equation}
+which is simply the LoRA adapter magnitude per layer. Layers with large $s_{c}^{(l)}$ for any retained capability $c$ are ``capability-critical'' and should receive higher bit-rates in mixed-precision quantization (more OA-EM codebook capacity) and larger KV cache budgets (more TriAttention entries). This creates a three-way joint optimisation:
+\begin{equation}
+    \min_{B_{\mathrm{weight}}, B_{\mathrm{KV}}} \sum_{c \in C^{*}} \mathrm{TaskLoss}(c) \quad \mathrm{s.t.} \quad B_{\mathrm{weight}} + B_{\mathrm{KV}} \leq B_{\mathrm{total}}
+\end{equation}
+where task loss per capability is measured on TRACE's synthesised environments. This is the capability-aware version of OA-EM's Hessian-weighted allocation and TriAttention's trigonometric budgets: instead of scoring sensitivity by generic output reconstruction, we score by \textit{capability-specific} output impact.
+
+\textbf{Feasibility:} Medium-high. The LoRA adapter magnitudes $\|B_c A_c\|_{F}$ per layer are trivially computed from TRACE's trained adapters. The main challenge is implementing the joint allocation optimiser across OA-EM and TriAttention, which currently operate independently. Start with Qwen3-30B-A3B + TRACE's 4 $\tau^{2}$-Bench adapters: profile $s_{c}^{(l)}$ across layers, apply OA-EM at 2~bpp with layer-wise bit-rate allocation proportional to max capability criticality, and measure whether capability-aware quantization preserves more task performance per memory budget than capability-blind quantization.
+
+\section{Conclusion}
+
+TRACE establishes a principled diagnostic-then-train framework for agent capability improvement. By contrastively comparing successes and failures to identify high-impact capability deficits, synthesising targeted training environments for each, training isolated LoRA adapters via GRPO, and routing to the appropriate adapter at inference, TRACE achieves +14.1~pp over the base model and +7.4~pp over the strongest baseline on $\tau^{2}$-Bench.
+
+For our lab, TRACE completes a key arc in our continual agent learning thread. Where SKILL0~\cite{skill0} asked ``how to internalise skills,'' Trace2Skill~\cite{trace2skill} asked ``how to extract skills from trajectories,'' MetaClaw~\cite{metaclaw} asked ``how to evolve skills online,'' and RAGEN-2~\cite{ragen2} asked ``why does agentic RL collapse,'' TRACE answers the upstream question: \textit{which capabilities should we train?} The contrastive gap metric provides a principled selection criterion analogous to RAGEN-2's MI-based diagnostics, but at the capability rather than the training-signal level.
+
+The most actionable direction is iterative diagnosis with MI-based collapse detection (Direction~1), which directly composes TRACE and RAGEN-2. The dLLM extension (Direction~2) opens a novel research axis by asking whether diffusion LLM agents exhibit decoding-specific capability deficits absent in AR agents. The compression-readiness direction (Direction~3) bridges TRACE's capability profiling with OA-EM~\cite{oaem} and TriAttention~\cite{triattention}, creating capability-aware compression that protects the model components most critical for high-impact capabilities.
+
+The emerging principle across our 31 reviews: the most effective interventions---whether for compression, training, or inference---are those that first \textit{diagnose what matters} (output sensitivity, capability deficits, denoising importance) and then \textit{allocate resources accordingly}. Uniform treatment consistently underperforms targeted allocation.
+
+\begin{thebibliography}{9}
+\bibitem{trace} Kang, H., Suresh, T., Saad-Falcon, J., \& Mirhoseini, A. (2026). TRACE: Capability-Targeted Agentic Training. \textit{arXiv:2604.05336}.
+\bibitem{skill0} Ding, Z., et al. (2026). SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization. \textit{arXiv:2604.02268}.
+\bibitem{trace2skill} Li, Z., et al. (2026). Trace2Skill: Distill Trajectory-Local Lessons into Transferable Agent Skills. \textit{arXiv:2603.25158}.
+\bibitem{metaclaw} Chen, X., et al. (2026). MetaClaw: Just Talk --- An Agent That Meta-Learns and Evolves in the Wild. \textit{arXiv:2603.17187}.
+\bibitem{ragen2} Wang, H., et al. (2026). RAGEN-2: Reasoning Collapse in Agentic RL. \textit{arXiv:2604.06268}.
+\bibitem{dmax} Chen, Z., et al. (2026). DMax: Aggressive Parallel Decoding for dLLMs. \textit{arXiv:2604.08302}.
+\bibitem{dare} Yang, J., et al. (2026). DARE: Diffusion Large Language Models Alignment and Reinforcement Executor. \textit{arXiv:2604.04215}.
+\bibitem{triattention} Mao, W., et al. (2026). TriAttention: Efficient Long Reasoning with Trigonometric KV Compression. \textit{arXiv:2604.04921}.
+\bibitem{oaem} Kennedy, I. W. \& Moosavi, N. S. (2026). Initialisation Determines the Basin: Efficient Codebook Optimisation for Extreme LLM Quantization. \textit{arXiv:2604.08118}.
+\end{thebibliography}
+
+\end{document}
