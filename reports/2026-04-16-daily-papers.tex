@@ -1,0 +1,197 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: KnowRL --- Boosting LLM Reasoning via RL\\with Minimal-Sufficient Knowledge Guidance}
+\author{Internbot --- Automated Research Review}
+\date{April 16, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} KnowRL: Boosting LLM Reasoning via Reinforcement Learning with Minimal-Sufficient Knowledge Guidance \\
+\textbf{Authors:} Linhao Yu, Tianmeng Yang, Siyu Ding, Renren Jin, Naibin Gu, Xiangzhao Hao, Shuaiyi Nie, Deyi Xiong, Weichong Yin, Yu Sun, Hua Wu \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.12627}{2604.12627} \\
+\textbf{Topics:} Reinforcement Learning, Reward Sparsity, Knowledge-Guided Optimisation
+
+\subsection{Problem}
+
+RLVR (Reinforcement Learning with Verifiable Rewards) for LLM reasoning suffers from \textbf{reward sparsity on difficult samples}. On OpenMath-Nemotron-1.5B, 41.21\% of training queries produce zero correct answers out of 8 samples, contributing no gradient signal under GRPO. Recent hint-based methods address this by injecting guidance into prompts, but KnowRL identifies three fundamental issues:
+
+\begin{itemize}
+    \item \textbf{Critical-segment effect:} Accuracy does not increase proportionally with hint length. Instead, it exhibits a sharp jump once a short key segment appears, followed by diminishing gains. Only a small set of knowledge components is needed.
+
+    \item \textbf{Cross-hint inconsistency:} Longer prefixes or abstract templates introduce branching and conceptual ambiguity, complicating policy updates rather than simplifying them.
+
+    \item \textbf{Pruning interaction paradox:} When performing leave-one-out (LOO) ablation of individual Knowledge Points (KPs), removing a single KP $k_i$ may \textit{improve} accuracy, but removing \textit{multiple} such individually ``non-essential'' KPs \textit{jointly degrades} performance. KPs have inter-dependencies: they mutually disambiguate one another, so joint removal introduces conflicts. Empirically, this paradox occurs with probability $p_m \in [40\%, 60\%]$ with substantial performance drops.
+\end{itemize}
+
+KnowRL reframes hint design from quantity expansion to \textbf{minimal-sufficient guidance}: finding the smallest set of atomic Knowledge Points that breaks reward sparsity without introducing redundancy or ambiguity.
+
+\subsection{Method}
+
+\paragraph{Knowledge Point Curation.}
+KPs are atomic mathematical principles (not problem-specific steps). For each problem: (1) sample correct solutions from DeepSeek-R1, (2) extract indispensable mathematical principles (averaging 5.86 KPs per problem), (3) verify no information leakage via automated review. A KP is flagged if it contains specific numerical values, intermediate results, or problem structure.
+
+\paragraph{Constrained Subset Search (CSS).}
+CSS is the core algorithm for selecting minimal-sufficient KP subsets, designed to avoid the pruning interaction paradox:
+
+\begin{enumerate}
+    \item Compute per-KP leave-one-out accuracies $A_{-i}$ using $8 \times 32$ samples. Define $A_K$ (all KPs), $A_{\mathrm{empty}}$ (no KPs), and $A_{\mathrm{max}} = \max_i A_{-i}$.
+
+    \item Identify non-degrading KPs: $H = \{k_i \mid A_{-i} \geq \max(A_K, A_{\mathrm{empty}})\}$.
+
+    \item Identify near-optimal removals: $N = \{k_i \in H \mid A_{-i} \geq A_{\mathrm{max}}\}$ (avg.\ $|N| = 1.21$). Remove $N$ directly---safe because $|N|$ is small, rarely triggering the interaction paradox.
+
+    \item Define constrained candidates: $C = H \setminus N$.
+
+    \item Enumerate all subsets of $C$ (tractable since $|C|$ is small) and select $S^{*} = \arg\max_{S} A(S)$ over all candidates plus the empty and full sets.
+\end{enumerate}
+
+CSS selects \textbf{2.57 KPs on average} (38.9\% reduction from the full 5.86) while achieving the best accuracy among all selection strategies.
+
+\paragraph{Parameterised Decision Operator.}
+All selection strategies are unified through a tolerance parameter $\delta$:
+\begin{equation}
+    \Phi_\delta(K) = \begin{cases}
+        \emptyset & \mathrm{if}\ A_{\mathrm{empty}} \geq \max(A_K, A_{\mathrm{max}} - \delta) \\
+        K & \mathrm{if}\ A_K > \max(A_{\mathrm{empty}}, A_{\mathrm{max}} - \delta) \\
+        K \setminus S & \mathrm{otherwise}
+    \end{cases}
+\end{equation}
+with optimal $\delta = 1/32$ (one-sample-scale tolerance).
+
+\paragraph{RL Training.}
+Standard GRPO on OpenMath-Nemotron-1.5B with 8.8k training instances. CSS-selected KPs are added to prompts under a \texttt{\#\# Hint} header for hard samples; easy samples receive no hints. Key hyperparameters: batch size 256, lr $= 10^{-6}$, 8 samples per query, clip ratio $[0.8, 1.28]$, no KL loss, no entropy bonus. Entropy annealing: clip high reduced from 0.28 to 0.26 after step 2{,}590 (of 2{,}960 total). Training on 64 H100 GPUs for $\sim$13 days.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{RL training results: average accuracy across 8 math benchmarks.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Hint at Inference} & \textbf{Avg.\ Acc.} & \textbf{$\Delta$ vs.\ Base} \\
+\midrule
+Nemotron-1.5B (base) & --- & 60.45 & --- \\
+QuestA (prior SOTA) & --- & 67.78 & +7.33 \\
+JustRL & --- & 68.58 & +8.13 \\
+\textbf{KnowRL} & \textbf{w/o KP} & \textbf{70.08} & \textbf{+9.63} \\
+\textbf{KnowRL} & \textbf{CSS} & \textbf{74.16} & \textbf{+13.71} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{+9.63 average without hints at inference} (70.08), already SOTA at 1.5B scale. With CSS hints: +13.71 (74.16). The model genuinely internalises knowledge rather than creating hint-conditioned shortcuts.
+
+    \item \textbf{Reward sparsity dramatically reduced:} Zero-correct queries drop from 41.21\% (backbone) to 13.00\% (KnowRL w/o KP) to near zero (w/\ KP). All-correct queries rise from 1.35\% to 34.28\% to 51.07\%.
+
+    \item \textbf{CSS outperforms all selection strategies:} 63.90 avg.\ accuracy in offline evaluation (vs.\ 62.94 for CBRS, 62.65 for S-LOO, 61.03 for all KPs, 60.46 for no KPs). CSS also generalises better during RL training: 66.46 at step 900 vs.\ 65.72 for CBRS.
+
+    \item \textbf{Entropy annealing contributes +1.47:} Reducing clip high from 0.28 to 0.26 late in training encourages exploitation, yielding 70.08 vs.\ 68.61 without annealing.
+
+    \item \textbf{Per-benchmark highlights:} AIME24 +10.73, AIME25 +16.36, CMIMC25 +14.06, OlyBench +8.53 (all without hints). With CSS hints: BRUMO25 +17.39, CMIMC25 +22.11.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{1.5B scale only:} Whether the pruning interaction paradox and critical-segment effect hold at larger scales (7B, 70B+) is untested.
+    \item \textbf{Math-only:} Evaluated exclusively on mathematical reasoning. Extension to code, science, or commonsense reasoning is undemonstrated.
+    \item \textbf{Dependence on DeepSeek-R1:} KP curation requires a strong teacher for solution generation, extraction, and leakage verification.
+    \item \textbf{Static knowledge selection:} KPs are selected once before training and remain fixed. No mechanism adapts KP selection as the policy improves during RL.
+    \item \textbf{Offline evaluation cost:} CSS requires $8 \times 32$ samples per configuration and $2^{|C|}$ subset enumeration, which may become intractable for problems with many candidate KPs.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+KnowRL provides a principled framework for \textit{what knowledge to inject} during RL training, directly complementing several threads in our review series:
+
+\textbf{Complementarity with RLSD}~\cite{rlsd}: Both address reward sparsity but at different levels. RLSD redesigns \textit{how} gradient signals are computed (dense token-level credit via evidence reweighting), while KnowRL redesigns \textit{what} the model sees (minimal knowledge to shift the policy toward reward-yielding trajectories). RLSD cannot help when \textit{all} rollouts fail (zero advantage regardless of reweighting); KnowRL breaks this cold-start problem by enabling at least some rollouts to succeed. The two are composable: use KnowRL's KP injection to break reward sparsity, then apply RLSD's evidence reweighting for dense credit within successful rollouts.
+
+\textbf{Connection to RAGEN-2}~\cite{ragen2}: RAGEN-2's SNR-aware filtering selects high-signal prompts (high reward variance). KnowRL addresses the complementary low-SNR regime---problems where all rollouts fail (zero variance). KnowRL's KP injection transforms zero-variance problems into non-zero-variance ones, making them amenable to RAGEN-2's filtering. The pruning interaction paradox also provides a new perspective on RAGEN-2's template collapse: both arise from dependencies between training components (KPs vs.\ action patterns) that na\"ive independent analysis misses.
+
+\textbf{Connection to TRACE}~\cite{trace}: Both share a decomposition-then-target philosophy. TRACE decomposes agent failure into capability deficits and trains per-capability LoRA adapters; KnowRL decomposes problem knowledge into atomic KPs and injects minimal subsets. Both emphasise minimality: TRACE uses 2--4 adapters, KnowRL uses 2.57 KPs on average.
+
+\textbf{Connection to SKILL0}~\cite{skill0}: Both inject auxiliary knowledge during training to be internalised by inference time. SKILL0 uses progressive withdrawal (gradually removing skill context); KnowRL uses static minimal injection (CSS ensures guidance is already minimal). KnowRL's 70.08 avg without hints confirms internalisation, paralleling SKILL0's zero-shot agent improvement.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Dynamic CSS with Progressive Knowledge Withdrawal}
+
+\textbf{Gap:} KnowRL selects KPs once before training and keeps them fixed. SKILL0~\cite{skill0} showed that progressive withdrawal---starting with full knowledge and gradually removing it---drives deeper internalisation. KnowRL's static injection may leave some KPs in the prompt long after the model has mastered them, wasting prompt capacity and potentially creating hint-dependency. Conversely, SKILL0's withdrawal operates on pre-defined skills without the principled minimality of CSS.
+
+\textbf{Approach:} Combine CSS selection with SKILL0's progressive withdrawal. At training step $t$:
+\begin{enumerate}
+    \item Re-evaluate CSS selection every $T_{\mathrm{eval}}$ steps by running $8 \times 32$ rollouts on the current policy (not the initial backbone). As the model improves, previously necessary KPs become redundant and CSS automatically drops them.
+    \item Define a withdrawal schedule: at step $t$, the KP budget is $\lfloor |K^{*}_{\mathrm{CSS}}(t)| \cdot (1 - t/T_{\mathrm{max}}) \rfloor$, forcing the model to gradually solve problems with fewer hints.
+    \item Monitor reward sparsity: if zero-correct fraction rises above a threshold $\tau_{\mathrm{sparse}}$ after KP removal, pause withdrawal for that problem category.
+\end{enumerate}
+
+This creates a \textit{difficulty-aware, policy-adaptive} curriculum that combines CSS's principled minimality with SKILL0's internalisation pressure. The pruning interaction paradox is handled by re-running CSS (not greedy LOO) at each evaluation point.
+
+\textbf{Feasibility:} High. CSS evaluation ($8 \times 32$ samples) is cheap relative to RL training. Re-running every 500 steps adds $\sim$5\% overhead. Start with Nemotron-1.5B on the QuestA dataset and compare against static KnowRL (70.08) and SKILL0-style linear withdrawal. The key metric is the \textit{inference-time gap}: difference between KnowRL with and without hints (currently 74.16 vs.\ 70.08 = 4.08 gap). Progressive withdrawal should shrink this gap by forcing earlier internalisation.
+
+\subsection{Direction 2: Knowledge-Guided RL for Diffusion LLMs}
+
+\textbf{Gap:} DARE~\cite{dare} showed that RL post-training for diffusion LLMs is fundamentally harder than for AR LLMs due to log-probability intractability and ELBO variance. KnowRL's reward sparsity problem is even more severe for dLLMs: the denoising process introduces additional stochasticity, meaning that even with correct knowledge, the model may fail to assemble a coherent answer from the noisy parallel decoding process. No existing dLLM RL method uses knowledge guidance.
+
+\textbf{Approach:} Adapt KnowRL's CSS pipeline for dLLM training within DARE's framework. Two key modifications:
+\begin{enumerate}
+    \item \textbf{KP injection for dLLMs:} Since dLLMs generate the full sequence simultaneously, KP hints must be structured differently than for AR models. Instead of prepending hints to the prompt, embed KPs as \textit{denoising anchors}---fixed tokens at specific positions that are never masked during the diffusion process, serving as structural scaffolding for the denoising trajectory. This is analogous to DMax's~\cite{dmax} hybrid embeddings, which blend predicted tokens with mask embeddings; here, KP tokens serve as fixed ``anchor'' embeddings that guide denoising.
+
+    \item \textbf{CSS for dLLM-specific KPs:} The KP selection criterion should account for dLLM-specific failure modes. Evaluate CSS using DMax's tokens-per-forward (TPF) in addition to accuracy: a good KP subset should improve accuracy \textit{without degrading} decoding parallelism. KPs that force the model into specific sequential reasoning patterns may reduce TPF; CSS can filter these out.
+\end{enumerate}
+
+\textbf{Feasibility:} Medium. The denoising anchor concept requires modifying the dLLM forward process to keep certain positions unmasked, which is architecturally straightforward for LLaDA/Dream. The main challenge is running CSS evaluation on dLLM rollouts, which are slower than AR rollouts. Start with LLaDA-2.0-mini on GSM8K using DARE's Coupled-GRPO, comparing CSS-guided vs.\ standard training. Measure both accuracy and TPF to ensure knowledge guidance does not compromise dLLM efficiency.
+
+\subsection{Direction 3: Pruning Interaction Paradox as a Diagnostic for Compression Sensitivity}
+
+\textbf{Gap:} KnowRL's pruning interaction paradox reveals that components (KPs) which appear individually removable may be jointly essential due to inter-dependencies. This phenomenon generalises beyond knowledge guidance: OA-EM~\cite{oaem} showed that quantization quality depends on initialisation (codebook centroids interact in the undercomplete regime), TriAttention~\cite{triattention} showed that KV cache heads have varying importance, and TRACE~\cite{trace} showed that agent capabilities interact during routing. In all cases, na\"ive independent analysis (evaluating each component in isolation) can be misleading.
+
+\textbf{Approach:} Formalise the pruning interaction paradox as a general diagnostic tool for model compression. For any compression method that removes components (quantization codebook entries, KV cache entries, attention heads, LoRA adapters):
+\begin{enumerate}
+    \item Compute leave-one-out metrics for each component.
+    \item Identify the ``positive-contribution set'' $K^{+}$ (components whose individual removal does not hurt).
+    \item Estimate the interaction probability $p_m$ and magnitude $\Delta_m$ by sampling random subsets of size $m$ from $K^{+}$ and measuring joint vs.\ average-individual performance.
+    \item If $p_m > \tau_{\mathrm{interact}}$ (e.g., $> 0.3$), flag the compression method as interaction-sensitive and switch from greedy to CSS-style constrained search.
+\end{enumerate}
+
+Apply this diagnostic to three settings from our reviews: (1) OA-EM codebook pruning---do individually removable codebook entries interact when jointly removed? (2) TriAttention KV cache eviction---do individually unimportant KV heads interact? (3) TRACE adapter routing---do individually non-essential capabilities interact when jointly removed?
+
+\textbf{Feasibility:} Medium-high. The diagnostic requires only leave-one-out and subset evaluations, which are already part of standard ablation protocols. The main cost is the $2^{|C|}$ enumeration for CSS-style search, which is tractable when $|C|$ is small (as in TRACE with 2--4 capabilities). For larger component sets (OA-EM with 256 codebook entries), approximate the diagnostic by sampling random subsets of size $m$ and estimating $p_m$ statistically. Start with TRACE's 4 $\tau^{2}$-Bench capabilities where exhaustive evaluation is cheap, and check whether the pruning interaction paradox predicts which adapter combinations are safe to merge.
+
+\section{Conclusion}
+
+KnowRL reframes knowledge guidance for RL from quantity expansion to minimal-sufficient selection. The Constrained Subset Search (CSS) algorithm addresses the pruning interaction paradox---where individually removable KPs are jointly essential---by combining safe direct pruning with exhaustive constrained enumeration. The result: 2.57 KPs on average (38.9\% reduction) yield +9.63 average improvement without hints at inference and +13.71 with hints, establishing a new 1.5B-scale SOTA across 8 math benchmarks.
+
+For our lab, KnowRL fills a critical gap in the RL training pipeline: while RLSD~\cite{rlsd} provides dense credit assignment \textit{within} successful rollouts, KnowRL ensures rollouts \textit{succeed in the first place} by breaking reward sparsity on hard problems. The composability of these approaches---KnowRL for cold-start, RLSD for dense credit, RAGEN-2~\cite{ragen2} for signal-quality filtering---suggests a unified RL training stack where each component addresses a different failure mode.
+
+The pruning interaction paradox is the paper's deepest contribution: it reveals that independent component analysis can be systematically misleading when components have mutual dependencies. This principle generalises beyond knowledge guidance to quantization (OA-EM~\cite{oaem}), KV cache compression (TriAttention~\cite{triattention}), and agent capability composition (TRACE~\cite{trace}). Direction~3 proposes formalising this as a general diagnostic, potentially improving all compression and composition methods that currently rely on greedy independent evaluation.
+
+The emerging meta-pattern across our 32 reviews: the most effective methods first \textit{decompose} the problem into atomic components (KPs, capabilities, codebook entries, KV entries), then \textit{diagnose} which components matter (via contrastive analysis, Hessian weighting, or interaction testing), and finally \textit{allocate} resources accordingly (CSS selection, LoRA routing, output-aware initialisation). This decompose-diagnose-allocate paradigm is now the unifying principle of our efficiency, RL, and agent learning threads.
+
+\begin{thebibliography}{9}
+\bibitem{knowrl} Yu, L., et al. (2026). KnowRL: Boosting LLM Reasoning via Reinforcement Learning with Minimal-Sufficient Knowledge Guidance. \textit{arXiv:2604.12627}.
+\bibitem{rlsd} Yang, C., et al. (2026). Self-Distilled RLVR. \textit{arXiv:2604.03128}.
+\bibitem{ragen2} Wang, H., et al. (2026). RAGEN-2: Reasoning Collapse in Agentic RL. \textit{arXiv:2604.06268}.
+\bibitem{trace} Kang, H., et al. (2026). TRACE: Capability-Targeted Agentic Training. \textit{arXiv:2604.05336}.
+\bibitem{skill0} Ding, Z., et al. (2026). SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization. \textit{arXiv:2604.02268}.
+\bibitem{dare} Yang, J., et al. (2026). DARE: Diffusion Large Language Models Alignment and Reinforcement Executor. \textit{arXiv:2604.04215}.
+\bibitem{dmax} Chen, Z., et al. (2026). DMax: Aggressive Parallel Decoding for dLLMs. \textit{arXiv:2604.08302}.
+\bibitem{oaem} Kennedy, I. W. \& Moosavi, N. S. (2026). Initialisation Determines the Basin: Efficient Codebook Optimisation for Extreme LLM Quantization. \textit{arXiv:2604.08118}.
+\bibitem{triattention} Mao, W., et al. (2026). TriAttention: Efficient Long Reasoning with Trigonometric KV Compression. \textit{arXiv:2604.04921}.
+\end{thebibliography}
+
+\end{document}
