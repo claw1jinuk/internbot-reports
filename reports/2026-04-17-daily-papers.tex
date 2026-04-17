@@ -1,0 +1,208 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: LangFlow --- Continuous Diffusion\\Rivals Discrete in Language Modeling}
+\author{Internbot --- Automated Research Review}
+\date{April 17, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling \\
+\textbf{Authors:} Yuxin Chen, Chumeng Liang, Hangke Sui, Ruihan Guo, Chaoran Cheng, Jiaxuan You, Ge Liu (UIUC) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.11748}{2604.11748} \\
+\textbf{Topics:} Diffusion LLM, Continuous Diffusion, Flow Matching, Language Modeling
+
+\subsection{Problem}
+
+Continuous diffusion has dominated image and video generation, yet in language modeling, \textbf{discrete} diffusion methods (MDLM~\cite{mdlm}, SEDD~\cite{sedd}) have consistently outperformed continuous counterparts. Our previous seven reviews (Omni-Diffusion, CubiD, D-MMD, GDDS, S2D2, DARE, DMax) all examined discrete diffusion approaches. LangFlow identifies four compounding design errors that have held continuous diffusion back:
+
+\begin{itemize}
+    \item \textbf{Embedding collapse under MSE:} Prior continuous approaches like Plaid~\cite{plaid} trained in embedding space using mean squared error. The MSE gradient pushes different token embeddings closer together, causing \textit{embedding collapse}---Plaid's average nearest-neighbour distance drops to 0.058, far below healthy models ($> 0.2$). This severely degrades representational expressiveness.
+
+    \item \textbf{Wasted training budget under uniform scheduling:} When parameterised by linear time $t$, the cross-entropy loss is near zero for $t > 0.2$, meaning 80\% of training and sampling compute is spent on noise levels that carry essentially zero information. Image-based noise schedules transferred blindly to language waste the network's capacity.
+
+    \item \textbf{Missing ODE-based evaluation:} Prior continuous DLMs relied on SDE-based NELBO bounds for perplexity estimation. No reliable ODE-based NLL bound existed, making fair comparison with discrete methods impossible and obscuring the true potential of flow-based approaches.
+
+    \item \textbf{Self-conditioning asymmetry:} In discrete diffusion, self-conditioning improves generation quality but \textit{degrades} perplexity, so prior work correctly omitted it during PPL evaluation. This convention was inherited by continuous DLM evaluation---but for continuous models, self-conditioning is \textit{essential}, improving both metrics dramatically. Blindly following the discrete convention masked continuous diffusion's true capability.
+\end{itemize}
+
+\subsection{Method}
+
+LangFlow addresses all four problems through a unified flow matching framework in embedding space.
+
+\paragraph{Cross-Entropy via Bregman Divergence Flow Matching.}
+The model predicts token probabilities $\hat{x}_\theta^{(i)}(z_\gamma, \gamma)$ at each position given noisy embeddings $z_\gamma$. Training uses cross-entropy (CE) loss rather than MSE:
+\begin{equation}
+    \mathcal{L}_{\mathrm{CE}}(\theta) = \mathbb{E}_{\gamma \sim \pi}\left[-\frac{1}{L}\sum_{i=1}^{L} \log \hat{x}_\theta^{(i, x^{(i)})}(z_\gamma, \gamma)\right]
+\end{equation}
+The paper proves this is a principled special case of Bregman divergence flow matching for categorical data. The continuous denoiser is recovered deterministically: $\hat{z} = E^\top \hat{x}_\theta$ (embedding the predicted probabilities). This eliminates MSE-induced embedding collapse while reusing the same DiT architecture as discrete DLMs.
+
+\paragraph{The $\gamma$-Path and Gumbel Noise Schedule.}
+LangFlow reparameterises the flow path using the log noise-to-signal ratio $\gamma = \log(\sigma^2 / \alpha^2)$, with $\sigma_\gamma^2 = \mathrm{sigmoid}(\gamma)$ and $\alpha_\gamma^2 = \mathrm{sigmoid}(-\gamma)$ under the variance-preserving path. The key observation is that the CE loss $\ell_{\mathrm{CE}}(\gamma)$ converges to the posterior entropy $H_\gamma$, whose derivative $H'_\gamma$ follows a \textbf{Gumbel distribution}:
+\begin{equation}
+    H_\gamma = H_{+\infty} \cdot \exp\!\Big({-\exp\!\big({-(\gamma - P_\mu) / P_\beta}\big)}\Big)
+\end{equation}
+where $H_{+\infty}$, $P_\mu$, $P_\beta$ are learnable parameters trained by a scheduler loss $\mathcal{L}_{\mathrm{Sched}} = \mathbb{E}[(\ell_{\mathrm{CE}}(\gamma) - H_\gamma)^2]$. The \textbf{Information-Uniform Principle} allocates training and sampling effort proportionally to information gain at each noise level, using quantiles of the learned Gumbel as the step schedule. This eliminates the 80\% compute waste of uniform scheduling.
+
+\paragraph{ODE-Based NLL Bound.}
+The paper derives a novel evidence lower bound (Theorem 3.1):
+\begin{equation}
+    \log p(x) \geq \mathbb{E}_z\!\left[\frac{LD}{2} - \frac{\|z_b\|^2}{2\sigma_b^2} + \sum_i \log \hat{x}_\theta^{(i, x^{(i)})}(z_a, a) - \int_a^b \frac{\alpha_\gamma}{2}\,\mathrm{div}\!\big(\hat{z}_\theta(z_\gamma, \gamma)\big)\,\mathrm{d}\gamma\right]
+\end{equation}
+where $z_a$ is the minimally noised state, $z_b$ is the maximally noised state, and the divergence term is estimated via Hutchinson's trace estimator with a 128-step Heun-2 solver. This supersedes SDE-based NELBO and aligns evaluation with the deterministic ODE sampling that LangFlow actually uses.
+
+\paragraph{Self-Conditioning.}
+With probability $p_{\mathrm{SC}} = 0.25$, training performs a two-pass forward: first with zero self-conditioning to obtain $\hat{x}$, then re-embedding $\hat{z} = E^\top \hat{x}$ (with stop-gradient) as the self-conditioning signal for a second pass. During sampling, self-conditioning is always active---the previous step's prediction serves as the conditioning signal, with zero cost since it is already computed.
+
+\paragraph{Architecture.}
+DiT-style Transformer (12 layers, 768-dim, 12 heads, $\sim$130M parameters) with three modifications: (1) additive self-conditioning input via zero-initialised weights, (2) embedding normalisation to the unit sphere scaled by $\sqrt{D}$, and (3) a preconditioning skip connection $r \cdot \log p(z_\gamma^{(i)} | x^{(i)})$ added to logits (ramped from 0 to 1 over 5000 iterations).
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Language modeling perplexity. Gen.PPL = generative perplexity, PPL = ODE/ELBO perplexity.}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{LM1B Gen.PPL} & \textbf{LM1B PPL} & \textbf{OWT Gen.PPL} & \textbf{OWT PPL} \\
+\midrule
+AR Transformer & 66.7 & 22.8 & 35.9 & 17.5 \\
+\midrule
+MDLM (discrete) & 103.9 & 31.0 & 104.9 & \textbf{23.2} \\
+SEDD Absorb (discrete) & 115.9 & 32.0 & --- & 24.1 \\
+Plaid (continuous) & 77.3 & 32.4 & --- & --- \\
+Duo (continuous) & 97.6 & 33.6 & 77.6 & 25.2 \\
+\textbf{LangFlow} (continuous) & \textbf{92.2} & \textbf{30.0} & \textbf{36.5} & 24.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{Best PPL on LM1B (30.0)} among all diffusion LMs, surpassing MDLM (31.0) and SEDD (32.0). First continuous method to beat discrete on this core metric.
+
+    \item \textbf{OWT Gen.PPL of 36.5}---remarkably close to the AR baseline (35.9) and far ahead of all other DLMs (next best: Duo at 77.6, MDLM at 104.9). This is the most striking result: continuous diffusion nearly matches autoregressive generation quality.
+
+    \item \textbf{Zero-shot transfer:} On 7 downstream corpora, LangFlow outperforms the AR Transformer on 4/7 benchmarks and MDLM on 3/7. Best DLM on PTB (81.20), Wikitext (32.28), and Lambada (46.93).
+
+    \item \textbf{NFE efficiency:} At 64 sampling steps, LangFlow achieves Gen.PPL 80.3 vs.\ Duo 85.6 and MDLM 143.9. The Gumbel schedule concentrates compute on informative noise levels, yielding better quality at every step budget.
+
+    \item \textbf{Self-conditioning asymmetry confirmed:} For MDLM, self-conditioning degrades PPL (31.0 $\to$ 32.7). For LangFlow, it improves PPL by \textbf{19 points} (49.0 $\to$ 30.0) and Gen.PPL by \textbf{72.7 points} (154.2 $\to$ 81.5). This single finding explains most of the historical gap.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Lower sample entropy:} LangFlow's sample entropy (5.25 on OWT) is below the data entropy (5.44) and Duo (5.55). High-frequency content words appear up to 11 times per sample, spread across sentences. The authors note this may have ``subtle effects that could emerge at larger scales.''
+
+    \item \textbf{130M scale only:} All experiments use $\sim$130M parameter models. Whether the identified design principles (CE loss, Gumbel schedule, self-conditioning) transfer to billion-scale models is untested.
+
+    \item \textbf{No distillation:} The ODE formulation preserves the bijective mapping needed for Consistency Model distillation, but no distillation experiments are reported.
+
+    \item \textbf{No downstream task evaluation:} Only unconditional language modeling is evaluated. Conditional generation, instruction following, and reasoning benchmarks are absent.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+LangFlow is the first continuous diffusion paper in our review series, providing a critical counterpoint to seven discrete diffusion reviews.
+
+\textbf{Reframing the discrete vs.\ continuous debate:} Our discrete diffusion papers (MDLM-family methods, GDDS~\cite{gdds}, CubiD~\cite{cubid}) implicitly assumed that the discrete-to-discrete pipeline avoids the ``impedance mismatch'' of mapping categorical tokens through continuous space. LangFlow shows this mismatch is not fundamental but rather an artifact of bad design choices (MSE loss, uniform scheduling, missing self-conditioning). With these fixed, continuous diffusion \textit{matches or exceeds} discrete, suggesting the field's focus on discrete-only methods may have been premature.
+
+\textbf{Complementarity with DMax}~\cite{dmax}: DMax accelerates discrete dLLMs via aggressive parallel decoding (OPUT + SPD), achieving 2.2$\times$ speedup. LangFlow's ODE-based sampling is inherently sequential across denoising steps but parallelises across token positions. A hybrid approach---applying DMax's parallel speculation philosophy within LangFlow's continuous framework---could combine the best of both: LangFlow's superior generation quality with DMax's throughput. The Gumbel schedule naturally identifies which steps carry information (high $H'_\gamma$) vs.\ which can be skipped or parallelised.
+
+\textbf{Connection to D-MMD}~\cite{dmmd}: D-MMD distills discrete DLMs via discrete MMD matching. LangFlow's ODE formulation enables an alternative distillation pathway: Consistency Models can distil the continuous flow into a single-step generator, potentially achieving better quality than discrete distillation since the continuous trajectory is smoother. Comparing D-MMD-style discrete distillation against Consistency-Model-style continuous distillation on the same architecture would directly test whether LangFlow's continuous advantage persists after distillation.
+
+\textbf{Connection to S2D2}~\cite{s2d2}: S2D2 achieves training-free self-speculation for discrete DLMs by reusing early-exit predictions. LangFlow's self-conditioning mechanism is conceptually related: each step reuses the previous step's prediction as a conditioning signal, amortising computation. The key difference is that LangFlow's self-conditioning operates in continuous embedding space, enabling smoother interpolation between predictions---which may explain why self-conditioning helps continuous models far more than discrete ones (where predictions are hard categorical distributions).
+
+\textbf{Connection to DARE}~\cite{dare}: DARE addressed RL post-training for discrete dLLMs, struggling with log-probability intractability and ELBO variance. LangFlow's ODE-based NLL bound provides an \textit{exact} likelihood computation pathway that could simplify RL for continuous dLLMs. If DARE's Coupled-GRPO were adapted for LangFlow, the ODE NLL could replace the ELBO-based reward signal, potentially reducing the variance that limits DARE's training stability.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Consistency Distillation for Few-Step Continuous Language Generation}
+
+\textbf{Gap:} LangFlow achieves near-AR quality but requires 128--1024 ODE steps. DMax~\cite{dmax} and S2D2~\cite{s2d2} showed that step reduction is critical for practical deployment. LangFlow's ODE formulation preserves the bijective mapping required by Consistency Models (CM)---a distillation pathway unavailable to discrete methods. D-MMD~\cite{dmmd} distils discrete DLMs but cannot exploit trajectory smoothness. No work has applied CM distillation to continuous language diffusion.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item Train a LangFlow teacher at 130M parameters on OWT with 1024 steps (Gen.PPL $\approx$ 36.5).
+
+    \item Apply Consistency Training (CT) or Consistency Distillation (CD) to map the teacher's ODE trajectory into a single-step or few-step generator. The Gumbel noise schedule provides a natural curriculum: begin distillation on high-information segments (near $P_\mu$) where the trajectory is most curved, then extend to low-information segments.
+
+    \item Compare against D-MMD discrete distillation at matched step budgets (1, 2, 4, 8 steps). The key hypothesis: continuous trajectory smoothness gives CM distillation an advantage over discrete MMD matching at very low step counts ($\leq 4$), while discrete methods may retain an edge at moderate step counts ($\geq 16$) where their categorical structure provides a natural inductive bias.
+
+    \item Evaluate whether the self-conditioning signal transfers through distillation: the student should inherit the teacher's self-conditioning benefit without requiring two forward passes.
+\end{enumerate}
+
+\textbf{Feasibility:} High. CM distillation is well-established for images and requires no architectural changes---only a modified training objective on the existing LangFlow teacher. The Gumbel schedule directly provides the noise-level curriculum. Start at 130M scale on OWT, targeting 4-step Gen.PPL $< 60$ (vs.\ LangFlow's 64-step Gen.PPL of 80.3 and D-MMD's discrete distillation baseline).
+
+\subsection{Direction 2: Continuous-Discrete Hybrid Diffusion for Structured Reasoning}
+
+\textbf{Gap:} LangFlow excels at unconditional language modeling but has lower sample entropy than the data distribution (5.25 vs.\ 5.44), suggesting a bias toward high-frequency patterns. Discrete methods like GDDS~\cite{gdds} and CubiD~\cite{cubid} preserve categorical structure that may be important for maintaining diversity in structured outputs (code, proofs, mathematical reasoning). Neither paradigm alone is optimal: continuous diffusion provides smoother trajectories and better generation quality, while discrete diffusion provides sharper categorical decisions and higher entropy.
+
+\textbf{Approach:} Design a hybrid architecture that operates in continuous space for ``content'' tokens (natural language, descriptions) and discrete space for ``structure'' tokens (operators, delimiters, variable names):
+\begin{enumerate}
+    \item Use a token classifier (trained on a small labelled set or heuristic rules) to partition the vocabulary into content ($V_c$) and structure ($V_s$) subsets.
+
+    \item During training, apply LangFlow's continuous CE loss on content positions and MDLM's masked discrete loss on structure positions. The model shares the same DiT backbone but uses different noise processes per position type.
+
+    \item During sampling, content positions follow LangFlow's ODE with Gumbel scheduling, while structure positions follow MDLM's discrete denoising. The two processes are coupled through the shared attention mechanism: structure tokens condition content generation and vice versa.
+
+    \item The Gumbel schedule parameters $(P_\mu, P_\beta)$ are learned separately for content and structure positions, since their information profiles likely differ (structure tokens carry more bits per token due to lower frequency).
+\end{enumerate}
+
+\textbf{Feasibility:} Medium. The main challenge is coupling continuous and discrete noise processes within a shared transformer. CubiD's~\cite{cubid} high-dimensional token approach and GDDS's~\cite{gdds} generalised framework both handle non-standard noise processes, providing architectural templates. Start with code generation (Python) where the content/structure distinction is natural (keywords and operators vs.\ variable names and comments), using a 130M DiT on The Stack. Measure both Gen.PPL and pass@$k$ to test whether the hybrid preserves LangFlow's quality while recovering discrete diffusion's structural diversity.
+
+\subsection{Direction 3: Information-Uniform Scheduling as a General Principle for Efficient dLLM Training}
+
+\textbf{Gap:} LangFlow's Gumbel noise schedule is derived from the Information-Uniform Principle: allocate compute proportionally to information gain $H'_\gamma$ at each noise level. This principle is currently formulated only for continuous diffusion, but the underlying insight---most noise levels carry negligible information---applies equally to discrete diffusion. MDLM and SEDD use uniform masking schedules ($t \sim \mathrm{Uniform}(0,1)$), which may waste training compute on uninformative masking rates just as uniform $t$ wastes compute for continuous models. DMax~\cite{dmax} observed that early denoising steps produce most new tokens while later steps mostly confirm existing predictions---an empirical manifestation of the same non-uniform information profile.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item For discrete DLMs (MDLM, SEDD), measure the per-masking-rate training loss $\ell(t)$ and compute its derivative $\ell'(t)$. Fit a parametric distribution (Gumbel or other) to $\ell'(t)$ and use its quantiles as the masking schedule during training.
+
+    \item Apply the same principle to DMax's sampling schedule: instead of uniform denoising steps, allocate more steps to masking rates where $\ell'(t)$ is high (early denoising, where most new tokens are generated) and fewer steps to rates where $\ell'(t)$ is low (late denoising, where tokens are mostly confirmed).
+
+    \item Compare against LangFlow's continuous Gumbel schedule at matched total NFE. If the information profiles differ between continuous and discrete (plausible since discrete noise is categorical masking vs.\ Gaussian), the optimal schedules will differ, revealing fundamental differences in how information flows through the two paradigms.
+
+    \item Extend to DARE's~\cite{dare} RL setting: use the information-uniform schedule for RL rollout generation, concentrating denoising compute on steps that most affect the reward signal. This could reduce DARE's ELBO variance by focusing sampling precision on high-information steps.
+\end{enumerate}
+
+\textbf{Feasibility:} High. Measuring $\ell'(t)$ requires only logging per-masking-rate losses during standard training---no architectural changes. Fitting a parametric schedule adds negligible overhead. Start with MDLM on LM1B, comparing uniform vs.\ Gumbel-fitted masking schedules at 130M scale. The target is matching LangFlow's Gumbel-schedule efficiency gains ($\sim$2--4$\times$ better Gen.PPL at low NFE) within the discrete framework, without requiring the switch to continuous diffusion.
+
+\section{Conclusion}
+
+LangFlow overturns the assumption that continuous diffusion is inherently inferior to discrete diffusion for language modeling. By identifying and fixing four compounding design errors---MSE-induced embedding collapse, uniform noise scheduling, missing ODE evaluation, and misapplied self-conditioning conventions---LangFlow achieves the best perplexity among all diffusion LMs on LM1B (30.0) and generation quality nearly matching autoregressive models on OWT (36.5 vs.\ 35.9).
+
+For our lab, LangFlow fundamentally reshapes our diffusion LLM research agenda. Our seven previous reviews (Omni-Diffusion through DMax) operated within the discrete diffusion paradigm; LangFlow demonstrates that continuous diffusion is not merely viable but competitive. The most impactful insight is the \textbf{self-conditioning asymmetry}: the same technique that slightly hurts discrete DLMs provides a 19-point PPL improvement for continuous DLMs. This asymmetry suggests that continuous and discrete diffusion have fundamentally different inductive biases, and hybrid approaches (Direction~2) may capture the best of both.
+
+The \textbf{Information-Uniform Principle} is the paper's most transferable contribution. The observation that most noise levels carry negligible information---and that the informative region follows a Gumbel distribution---applies beyond continuous diffusion. Direction~3 proposes extending this principle to discrete DLMs like MDLM and DMax, potentially yielding the same efficiency gains without switching paradigms. Combined with DMax's parallel decoding and S2D2's self-speculation, Gumbel-optimised scheduling could make diffusion LLMs practically competitive with autoregressive models in throughput as well as quality.
+
+Across 33 reviews, our diffusion LLM thread now spans both sides of the continuous--discrete divide. The emerging pattern: neither paradigm dominates; instead, each excels at different aspects (continuous for trajectory smoothness and generation quality, discrete for categorical sharpness and structural diversity). The most promising direction is not choosing sides but synthesising both---a theme that echoes our broader decompose-diagnose-allocate paradigm, now applied to the choice of noise process itself.
+
+\begin{thebibliography}{12}
+\bibitem{langflow} Chen, Y., et al. (2026). LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling. \textit{arXiv:2604.11748}.
+\bibitem{mdlm} Sahoo, S., et al. (2024). Simple and Effective Masked Diffusion Language Models. \textit{arXiv:2406.07524}.
+\bibitem{sedd} Lou, A., et al. (2024). Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution. \textit{arXiv:2310.16834}.
+\bibitem{plaid} Gulrajani, I. \& Hashimoto, T. (2023). Likelihood-Based Diffusion Language Models. \textit{arXiv:2305.18619}.
+\bibitem{dmax} Chen, Z., et al. (2026). DMax: Aggressive Parallel Decoding for dLLMs. \textit{arXiv:2604.08302}.
+\bibitem{s2d2} Jang, D., et al. (2026). S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation. \textit{arXiv:2603.25702}.
+\bibitem{dmmd} Schiff, Y., et al. (2026). Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD. \textit{arXiv:2603.20155}.
+\bibitem{gdds} Campbell, A., et al. (2026). Generalized Discrete Diffusion from Snapshots. \textit{arXiv:2603.21342}.
+\bibitem{cubid} Park, J., et al. (2026). Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens. \textit{arXiv:2603.19232}.
+\bibitem{dare} Yang, J., et al. (2026). DARE: Diffusion Large Language Models Alignment and Reinforcement Executor. \textit{arXiv:2604.04215}.
+\bibitem{knowrl} Yu, L., et al. (2026). KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance. \textit{arXiv:2604.12627}.
+\bibitem{oaem} Kennedy, I. W. \& Moosavi, N. S. (2026). Initialisation Determines the Basin: Efficient Codebook Optimisation for Extreme LLM Quantization. \textit{arXiv:2604.08118}.
+\end{thebibliography}
+
+\end{document}
