@@ -1,0 +1,234 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: PersonaVLM --- Long-Term Personalized\\Multimodal LLMs via Structured Memory and Personality Evolution}
+\author{Internbot --- Automated Research Review}
+\date{April 21, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} PersonaVLM: Long-Term Personalized Multimodal LLMs \\
+\textbf{Authors:} Chang Nie, Chaoyou Fu, Yifan Zhang, Haihua Yang, Caifeng Shan (Nanjing University \& ByteDance) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.13074}{2604.13074} \\
+\textbf{Topics:} Continual Learning, Agent Memory, Long-Term Personalization
+
+\subsection{Problem}
+
+Multimodal LLMs operate in a ``one-size-fits-all'' paradigm: every user receives the same response regardless of history. Long-term personalization---accurately inferring intent, remembering preferences, and adapting behaviour across hundreds of interactions over weeks or months---remains unsolved. PersonaVLM identifies three failure modes in existing approaches:
+
+\begin{itemize}
+    \item \textbf{Adaptation-based methods} (MyVLM, Yo'LLaVA) encode user knowledge into trainable parameters via per-user fine-tuning. This does not scale and cannot track preference evolution.
+
+    \item \textbf{Augmentation-based methods} (RAP, MemGPT) use external databases for RAG but rely on manually predefined schemas and lack mechanisms to proactively manage and update knowledge from dynamic interactions.
+
+    \item \textbf{Alignment-based methods} (ALIGNXPERT, PAS) presuppose static user traits. Per-user probes become outdated as personality evolves, and per-user training creates scalability issues.
+\end{itemize}
+
+All existing approaches treat personalization as static and single-turn. None jointly addresses \textbf{dynamic memory management}, \textbf{multi-step reasoning over memories}, and \textbf{evolving personality alignment} in a unified framework.
+
+\subsection{Method}
+
+PersonaVLM is an agent framework (not a new architecture) that transforms a general-purpose MLLM (Qwen2.5-VL-7B) into a personalized assistant through three capabilities: remembering, reasoning, and response alignment.
+
+\paragraph{Multi-Type Memory Database.}
+PersonaVLM maintains four memory types per user:
+
+\begin{table}[h]
+\centering
+\caption{Memory architecture. Sessions delineated by 60-minute inactivity threshold.}
+\begin{tabular}{llll}
+\toprule
+\textbf{Type} & \textbf{Contents} & \textbf{Persistence} & \textbf{Update} \\
+\midrule
+Core & Age, gender, preferences, identity & Mutable (CRUD) & Session end \\
+Semantic & Timeless facts, habits, visual concepts & Append-only & Each turn \\
+Episodic & Time-stamped dialogue events + summaries & Append-only & Session end \\
+Procedural & Long-term goals, recurring routines & Mutable ($\leq 5$) & Session end \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Episodic and semantic memories are \textbf{immutable once written}---new entries are appended, existing ones are never modified. This preserves the complete historical record, preventing catastrophic loss of past information. Core and procedural memories undergo CRUD operations at session boundaries to reflect current user state.
+
+\paragraph{Agentic Reasoning with Memory Retrieval.}
+Given a user query $Q_m = (T_m, I_m, t_m)$ (text, optional image, timestamp) and dialogue context $C_m$, the model outputs reasoning in \texttt{<think>} tags and decides on an action:
+\begin{equation}
+    R_m = R(Q_m, C_m, \mathcal{M}_{m-1})
+\end{equation}
+Actions include \texttt{<answer>} (respond directly) or \texttt{<retrieve>} (specify keywords and time period for memory search). Retrieval uses timeline filtering followed by parallel search across semantic, episodic, and procedural memories via FAISS + all-MiniLM-L6-v2 embeddings. Visual concept retrieval is triggered when the input contains an image, using Grounding DINO for object extraction and CLIP for cosine similarity matching against stored visual concepts. The process iterates up to 3 rounds.
+
+\paragraph{Personality Evolving Mechanism (PEM).}
+PersonaVLM tracks user personality as a 5-dimensional Big Five vector $\mathbf{p} \in \mathbb{R}^5$ (Openness, Conscientiousness, Extraversion, Agreeableness, Neuroticism, each scored 1--5). After each turn, the model infers a turn-specific personality vector $\mathbf{p}'_m$ and updates via exponential moving average:
+\begin{equation}
+    \mathbf{p}_m \leftarrow \lambda_m \cdot \mathbf{p}_{m-1} + (1 - \lambda_m) \cdot \mathbf{p}'_m
+\end{equation}
+with a cosine decay schedule:
+\begin{equation}
+    \lambda_m = 0.7 - 0.2 \cdot \cos\!\left(\frac{\min(m, 50)}{50} \cdot \pi\right)
+\end{equation}
+This yields $\lambda \approx 0.5$ early (high adaptability) increasing to $\lambda \approx 0.9$ at $m = 50$ (high stability). Updates are skipped when all traits are neutral (score 3), preventing dilution from uninformative turns.
+
+\paragraph{Two-Stage Training.}
+\textbf{Stage 1 (SFT):} 78k samples---56.4\% memory-related (personality inference 10.3\%, four memory types 46.1\%) + 43.6\% reasoning QA pairs + 6k visual concept samples. 1,200 steps on 8$\times$H800.
+
+\textbf{Stage 2 (RL via GRPO):} 5.6k samples with composite reward:
+\begin{equation}
+    r_i = f_{\mathrm{acc}}(\hat{R}, R_{\tau_i}) \cdot f_{\mathrm{cons}}(Q, R_{\tau_i}) + 0.5 \cdot f_{\mathrm{format}}(R_{\tau_i})
+\end{equation}
+where $f_{\mathrm{acc}}$ and $f_{\mathrm{cons}}$ are accuracy and logical consistency (multiplicative---both must be high), judged by Qwen3-30B-A3B. GRPO with $G = 6$ trajectories, max 3 retrieval attempts per trajectory, 400 steps on 8$\times$H800.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Persona-MME benchmark (128k context). PersonaVLM uses Qwen2.5-VL-7B backbone.}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Model} & \textbf{Overall (\%)} & \textbf{Parameters} \\
+\midrule
+GPT-5 & 82.95 & --- \\
+\textbf{PersonaVLM (RL)} & \textbf{77.08} & \textbf{7B} \\
+Gemini-2.5-Flash & 74.90 & --- \\
+GPT-4o & 71.90 & --- \\
+Claude-3.7-Sonnet & 70.40 & --- \\
+InternVL3-38B & 67.18 & 38B \\
+Qwen2.5-VL-7B (baseline) & 54.48 & 7B \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{+22.6\% over baseline:} PersonaVLM (77.08\%) vs.\ Qwen2.5-VL-7B baseline (54.48\%) on Persona-MME 128k. Surpasses GPT-4o (71.90\%) by +5.18\% despite being orders of magnitude smaller.
+
+    \item \textbf{93.7\% token reduction:} Average 2,170 tokens vs.\ 43,530 for full-context baseline, with comparable response time (10.18s vs.\ 8.4s).
+
+    \item \textbf{Episodic memory is critical:} Removing episodic memory causes the largest drop ($-12.41\%$ at 32k, $-5.19\%$ at 128k). Memory sub-score collapses from 69.89\% to 33.77\%.
+
+    \item \textbf{PEM contributes +4.0\%} overall on P-SOUPS alignment, with the largest impact on Style ($-9.2\%$ without PEM).
+
+    \item \textbf{RL stage adds +5.35\%} on Persona-MME over SFT-only, confirming GRPO's value for teaching multi-step reasoning.
+
+    \item \textbf{Naive RAG can hurt:} Top-5 RAG degrades preference understanding by up to $-9.33\%$ in short-context scenarios, motivating PersonaVLM's agentic retrieval.
+
+    \item \textbf{79\% win rate vs.\ GPT-4o} in head-to-head open-ended generation (judged by Gemini-2.5-Pro).
+
+    \item \textbf{Highest on personality alignment (92.22\%)} and generalising to new scenarios (92.00\%) among all models tested, including GPT-5.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{No video/audio:} Only text and static images are supported; person recognition from video/audio is absent.
+
+    \item \textbf{No cross-temporal memory linking:} Related episodic memories from different time periods are stored separately without explicit connections. Two conversations about the same topic weeks apart remain unlinked.
+
+    \item \textbf{Bounded by backbone:} Performance is constrained by Qwen2.5-VL-7B capabilities. Visual detail recall (50.70\%) lags behind GPT-4o with full context (73.68\%).
+
+    \item \textbf{Training--test distribution gap:} Training uses 20--100 turn dialogues; testing uses up to 500 turns over 3 simulated months. Generalisation is demonstrated but not guaranteed at longer horizons.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+PersonaVLM is the first paper in our review series to address \textbf{per-user long-term memory with personality evolution}, directly extending our continual learning thread.
+
+\textbf{Complementarity with OAKS}~\cite{oaks}: OAKS benchmarks online adaptation to continual knowledge streams---factual knowledge that changes over time. PersonaVLM addresses a complementary dimension: \textit{user-specific} knowledge (preferences, personality, habits) that evolves with interaction. OAKS tests whether a model can update world knowledge; PersonaVLM tests whether a model can update its model of the \textit{user}. Together, they define two axes of continual adaptation: world-knowledge and user-knowledge.
+
+\textbf{Connection to OEL}~\cite{oel}: Online Experiential Learning stores interaction experiences for future retrieval, similar to PersonaVLM's episodic memory. The key difference: OEL's experiences are task-oriented (what worked and what didn't), while PersonaVLM's episodic memories are user-oriented (what the user said, did, and felt). Combining both---task-oriented experiences plus user-oriented memories---could create an agent that both improves at tasks and adapts to individual users simultaneously.
+
+\textbf{Connection to LLaVA-DyMoE}~\cite{dyMoE}: LLaVA-DyMoE uses drift-aware MoE routing to handle distribution shifts in continual VLM learning. PersonaVLM's PEM tracks personality drift via EMA. A deeper connection: PEM's cosine decay schedule (high adaptability early, high stability late) mirrors the tension DyMoE resolves between plasticity and stability. If PersonaVLM's backbone were a DyMoE model, the MoE routing could adapt to the user's domain (visual vs.\ textual preference) while PEM adapts to personality---orthogonal adaptation axes.
+
+\textbf{Connection to Trace2Skill}~\cite{trace2skill}: Trace2Skill distils trajectory-local lessons into transferable skills. PersonaVLM's procedural memory (long-term goals, recurring routines) is conceptually similar---both capture \textit{how} to act, distilled from interaction histories. The difference: Trace2Skill's skills transfer across users, while PersonaVLM's procedures are user-specific. A synthesis could maintain both: shared transferable skills plus user-specific procedural overrides.
+
+\textbf{Connection to TRACE}~\cite{trace}: Both use GRPO for RL training and multi-step agentic reasoning. TRACE routes to per-capability LoRA adapters; PersonaVLM routes to per-memory-type retrieval stores. Both follow the decompose-diagnose-allocate paradigm: TRACE decomposes agent failure into capability deficits, PersonaVLM decomposes user context into memory types.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Cross-Temporal Memory Linking via Episodic Consolidation}
+
+\textbf{Gap:} PersonaVLM's episodic memories are stored independently without cross-temporal links. Two conversations about the same topic (e.g., the user's anxiety management) weeks apart remain isolated episodes. In human memory, \textit{consolidation} links related episodic memories into semantic knowledge---``I've been anxious about deadlines for months'' emerges from multiple discrete episodes. PersonaVLM lacks this consolidation, leaving the burden of synthesis entirely on the reasoning stage's limited retrieval budget (2 episodic entries per query).
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item At session boundaries (when episodic memories are already updated), run a \textbf{consolidation pass}: compute pairwise keyword overlap between the new episodic entry and all existing entries. Entries exceeding a similarity threshold $\tau_{\mathrm{link}}$ are linked bidirectionally.
+
+    \item When linked episodes accumulate beyond a threshold $N_{\mathrm{consolidate}} = 3$, trigger \textbf{semantic promotion}: the model generates a summary spanning all linked episodes, which is added to semantic memory as a cross-temporal fact. The original episodes remain intact (immutable), but the new semantic entry provides a consolidated view.
+
+    \item During retrieval, linked episodes are retrieved as a \textit{chain}: if episode $e_i$ is retrieved and has links to $e_j$ and $e_k$, the consolidated semantic summary is included automatically. This effectively increases the information density per retrieval slot.
+
+    \item Evaluate on Persona-MME's ``Growth Modelling'' sub-task (where PersonaVLM already scores 87.97\%), which specifically tests understanding of preference evolution over time. The hypothesis: consolidation should close the gap on ``Visual Detail Recall'' (50.70\% vs.\ GPT-4o's 73.68\%) by synthesising visual observations from multiple episodes.
+\end{enumerate}
+
+\textbf{Feasibility:} High. Keyword overlap is already computed for episodic entries (each has stored keywords). Semantic promotion reuses the existing SFT-trained summarisation capability. The main cost is the consolidation pass at session boundaries, which scales linearly with the number of stored episodes. Start with PersonaVLM's existing Persona-MME setup and compare linked vs.\ unlinked episodic retrieval on the Growth Modelling and Memory sub-tasks.
+
+\subsection{Direction 2: Personality-Conditioned RL for Agent Training}
+
+\textbf{Gap:} PersonaVLM's PEM tracks personality but only uses it for response \textit{style} alignment---tone, verbosity, formality. TRACE~\cite{trace} and SKILL0~\cite{skill0} train agents to act in environments, but their behaviour is user-agnostic. An extroverted user may prefer agents that explore broadly and explain reasoning verbosely; an introverted user may prefer concise, focused agents. No existing agent RL framework conditions behaviour on inferred user personality.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item Extend PersonaVLM's Big Five vector $\mathbf{p} \in \mathbb{R}^5$ from a style-only signal to a \textbf{reward-shaping signal} in agent RL. Define a personality-conditioned reward:
+    \begin{equation}
+        r_{\mathrm{persona}}(\tau, \mathbf{p}) = r_{\mathrm{task}}(\tau) + \alpha \cdot f_{\mathrm{align}}(\tau, \mathbf{p})
+    \end{equation}
+    where $r_{\mathrm{task}}$ is the standard task reward (e.g., TRACE's capability reward) and $f_{\mathrm{align}}$ measures how well the trajectory $\tau$ matches the personality profile (e.g., exploration breadth for high-Openness users, action consistency for high-Conscientiousness users).
+
+    \item Train a single agent policy conditioned on $\mathbf{p}$ as an input embedding, rather than training per-user policies. The Big Five vector is concatenated to the prompt as a continuous conditioning signal, analogous to classifier-free guidance in diffusion models.
+
+    \item Evaluate on TRACE's $\tau^2$-Bench with synthetic user profiles. For each task, generate responses conditioned on extreme personality vectors (e.g., high-Openness vs.\ low-Openness) and measure both task accuracy and user-rated alignment. The hypothesis: personality conditioning should not degrade task performance (Big Five is orthogonal to capability) while dramatically improving user satisfaction.
+
+    \item Combine with PEM's EMA mechanism: the personality vector evolves during the interaction, so the agent's behaviour adapts in real-time as it learns more about the user.
+\end{enumerate}
+
+\textbf{Feasibility:} Medium. The main challenge is defining $f_{\mathrm{align}}$---what ``personality-aligned behaviour'' means for each Big Five dimension in an agent context. Start with a simplified version: condition only on Openness (exploration breadth) and Conscientiousness (action consistency), which have the clearest behavioural correlates. Use TRACE's existing GRPO setup with the personality vector as an additional prompt token.
+
+\subsection{Direction 3: Unifying External Memory with Weight-Based Continual Learning}
+
+\textbf{Gap:} PersonaVLM sidesteps catastrophic forgetting by storing all personalized knowledge in external memory, keeping model weights frozen after training. This is effective but creates a \textbf{reasoning bottleneck}: the model must retrieve and process memories within its context window, and retrieval can miss relevant information (visual detail recall drops 23\% vs.\ full-context GPT-4o). Our AAT review~\cite{aat} showed that weight-based continual learning via abstraction hierarchies can efficiently store general patterns without catastrophic forgetting. LLaVA-DyMoE~\cite{dyMoE} showed that MoE routing can adapt weights to distribution shifts.
+
+\textbf{Approach:} Combine external memory with lightweight weight adaptation to get the best of both:
+\begin{enumerate}
+    \item Maintain PersonaVLM's full external memory system for factual, episodic, and procedural information (high precision, no forgetting).
+
+    \item Add a \textbf{user-specific LoRA adapter} (rank 2--4, $< 1\%$ parameters) that is continuously updated via a slow EMA of gradient signals from the RL reward during interactions. This adapter encodes general \textit{stylistic and preference patterns} that are too diffuse for explicit memory entries but accumulate over hundreds of interactions.
+
+    \item Use AAT's abstraction hierarchy principle: the LoRA adapter captures \textit{abstract} patterns (``this user prefers concise explanations with visual examples'') while external memory captures \textit{specific} facts (``the user's cat is named Luna''). The hierarchy prevents redundancy: specific facts are retrieved, abstract patterns are embedded in weights.
+
+    \item Address the forgetting risk: the LoRA adapter uses elastic weight consolidation (EWC) with importance weights computed from the PEM stability signal $\lambda_m$. When PEM indicates the personality is stable ($\lambda_m > 0.85$), Fisher information is computed and used to protect the current LoRA weights. When PEM indicates rapid change ($\lambda_m < 0.6$), protection is relaxed to allow adaptation.
+\end{enumerate}
+
+\textbf{Feasibility:} Medium-high. Rank-2 LoRA adds negligible compute. The key challenge is avoiding catastrophic forgetting in the adapter weights, which EWC addresses at the cost of requiring Fisher information computation. Start with PersonaVLM's existing setup, adding a rank-2 LoRA adapter trained on the GRPO reward signal during test-time interactions. Compare against vanilla PersonaVLM on Persona-MME's 128k setting, targeting improvement on Visual Detail Recall (closing the gap from 50.70\% toward GPT-4o's 73.68\%) and Style alignment.
+
+\section{Conclusion}
+
+PersonaVLM demonstrates that long-term personalization requires a systems-level approach: structured multi-type memory (core, semantic, episodic, procedural), agentic multi-step retrieval, and momentum-based personality tracking. The result is a 7B model that surpasses GPT-4o on personalization benchmarks while consuming 93.7\% fewer tokens. Episodic memory emerges as the most critical component ($-12.41\%$ when removed), and the PEM's cosine-decay EMA provides a principled mechanism for balancing personality adaptability with stability.
+
+For our lab, PersonaVLM provides the first concrete architecture for per-user continual adaptation, complementing our existing continual learning work on world-knowledge adaptation (OAKS~\cite{oaks}), task-oriented experience (OEL~\cite{oel}), and capability-specific routing (TRACE~\cite{trace}). The most transferable insight is the \textbf{memory-type decomposition}: different kinds of information (facts, events, procedures, personality) require different persistence policies (immutable vs.\ mutable, per-turn vs.\ per-session). This principle generalises beyond personalization: any long-horizon agent should distinguish between append-only event logs and mutable state summaries.
+
+The PEM's cosine-decay EMA connects to a recurring theme across our 35 reviews: the \textbf{plasticity-stability trade-off} manifests everywhere---in continual learning (LLaVA-DyMoE's drift-aware routing), in RL (KnowRL's~\cite{knowrl} static vs.\ dynamic knowledge selection), in distillation (TESSY's~\cite{tessy} style preservation vs.\ capability transfer), and now in personality tracking. PersonaVLM's contribution is showing that a simple momentum schedule with cosine decay can effectively manage this trade-off at the per-user level, suggesting that similar lightweight mechanisms may suffice for other continual adaptation problems.
+
+\begin{thebibliography}{10}
+\bibitem{personavlm} Nie, C., et al. (2026). PersonaVLM: Long-Term Personalized Multimodal LLMs. \textit{arXiv:2604.13074}.
+\bibitem{oaks} Li, Z., et al. (2026). Can Large Language Models Keep Up? Benchmarking Online Adaptation to Continual Knowledge Streams. \textit{arXiv:2603.07392}.
+\bibitem{oel} Xie, S., et al. (2026). Online Experiential Learning for Language Models. \textit{arXiv:2603.16856}.
+\bibitem{dyMoE} Wang, Y., et al. (2026). On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large Vision Language Models. \textit{arXiv:2603.27481}.
+\bibitem{trace2skill} Chen, H., et al. (2026). Trace2Skill: Distill Trajectory-Local Lessons into Transferable Agent Skills. \textit{arXiv:2603.25158}.
+\bibitem{trace} Kang, H., et al. (2026). TRACE: Capability-Targeted Agentic Training. \textit{arXiv:2604.05336}.
+\bibitem{skill0} Ding, Z., et al. (2026). SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization. \textit{arXiv:2604.02268}.
+\bibitem{aat} Li, P., et al. (2026). Abstraction as a Memory-Efficient Inductive Bias for Continual Learning. \textit{arXiv:2603.17198}.
+\bibitem{knowrl} Yu, L., et al. (2026). KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance. \textit{arXiv:2604.12627}.
+\bibitem{tessy} Huang, Z., et al. (2026). How to Fine-Tune a Reasoning Model? A Teacher-Student Cooperation Framework. \textit{arXiv:2604.14164}.
+\end{thebibliography}
+
+\end{document}
