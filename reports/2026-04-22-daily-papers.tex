@@ -1,0 +1,223 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Agent-World --- Scaling Real-World\\Environment Synthesis for Self-Evolving Agent Intelligence}
+\author{Internbot --- Automated Research Review}
+\date{April 22, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Agent-World: Scaling Real-World Environment Synthesis for Evolving General Agent Intelligence \\
+\textbf{Authors:} Guanting Dong, Junting Lu, Junjie Huang, et al.\ (Renmin University \& ByteDance Seed) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.18292}{2604.18292} \\
+\textbf{Topics:} Continual Agent Learning, Self-Evolving Training, Environment Synthesis
+
+\subsection{Problem}
+
+LLM-based agents trained on fixed environments fail to generalise to the diversity of real-world tool interactions. Agent-World identifies two fundamental bottlenecks:
+
+\begin{itemize}
+    \item \textbf{Environment realism gap:} LLM-simulated environments (e.g., Simulator-8B) are scalable but hallucinate state transitions---achieving 31.8\% on $\tau^2$-Bench but only 2.4\% on MCP-Mark, where stateful real-world interaction logic matters. Programmatic environments provide stronger grounding but rely on limited open-source toolchains that mismatch real-world dynamics.
+
+    \item \textbf{Static training:} Existing methods train once on a fixed environment set. There is no mechanism to diagnose what the agent has \textit{not} learned and to synthesise targeted training data to close those gaps. Environment-scaling baselines like EnvScaler show uneven capability gains---strong on some domains, weak on others.
+\end{itemize}
+
+The core insight: agent capabilities and their training environments should \textbf{co-evolve} in a closed loop---as the agent improves, the system diagnoses remaining weaknesses and synthesises harder, more targeted environments.
+
+\subsection{Method}
+
+Agent-World comprises two components: agentic environment-task discovery and continuous self-evolving training.
+
+\paragraph{Environment Synthesis Pipeline.}
+Environment themes are collected from three real-world sources: MCP server specifications (Smithery.ai), tool documentation datasets, and industrial Product Requirement Documents. For each theme $m$, a \textbf{deep-research agent} $\mathcal{G}$ (GPT-OSS-120B with search, browser, compiler, and OS tools) mines real structured data from the web:
+\begin{equation}
+    D(m) = \mathcal{G}(m;\, \pi_\theta,\, \mathcal{T})
+\end{equation}
+A database complexification process $\phi$ iteratively enriches the data over $N$ rounds: $D^{(n+1)}(m) = \phi(D^{(n)}(m), m, \mathcal{T})$. A coding agent then generates tool interfaces with unit tests; tools are retained only if compilation succeeds and test accuracy exceeds 0.5. The final ecosystem: \textbf{1,978 environments and 19,822 tools}, organised into a 3-level taxonomy (20 first-tier, 50 second-tier, 2K+ third-tier categories).
+
+\paragraph{Dual Task Synthesis.}
+Two complementary strategies ensure comprehensive coverage:
+
+\textbf{Graph-based synthesis:} A weighted directed graph $G = (V, E)$ encodes tool dependencies---strong (output strictly required, $w = 3$), weak (output usable but not required, $w = 2$), and independent ($w = 1$). Random walks biased by edge weights generate tool-call sequences, from which an LLM produces task descriptions, executes ground-truth solutions in a sandbox, and generates structured rubrics. Tasks are retained only if a ReAct agent succeeds $\geq 2/5$ times.
+
+\textbf{Programmatic synthesis:} For non-linear reasoning (conditional branches, loops, aggregations), the LLM generates end-to-end Python scripts with complex control flows, debugs them in a sandbox, and produces multi-level assertion-based verification scripts.
+
+\paragraph{Structured Verifiable Reward.}
+\begin{equation}
+    r(x, y) = \begin{cases}
+        \mathbb{I}\!\left[\frac{1}{n}\sum_{j=1}^{n} \mathbb{I}[\mathrm{Judge}(x, y, r_j)] = 1\right] & \mathrm{if}\ x \in \mathcal{X}_{\mathrm{graph}} \\[4pt]
+        \mathbb{I}[\mathrm{Execute}(V_{\mathrm{code}}(y, y^*))] & \mathrm{if}\ x \in \mathcal{X}_{\mathrm{prog}}
+    \end{cases}
+\end{equation}
+Graph-based tasks use rubric-conditioned LLM judges (binary: all criteria must pass). Programmatic tasks use executable verification scripts.
+
+\paragraph{Self-Evolving Training Loop.}
+The environment ecosystem doubles as a diagnostic arena. At each round $r$:
+\begin{enumerate}
+    \item Synthesise fresh evaluation tasks and evaluate current policy $\pi^{(r)}$.
+    \item A diagnosis agent analyses failure patterns and identifies weak environments $\mathcal{W}^{(r)}$.
+    \item Generate targeted task-synthesis guidelines $\mathcal{G}_{\mathrm{guide}}^{(r)}$ for weak domains.
+    \item Optionally complexify databases for weak environments.
+    \item Synthesise targeted training tasks $\mathcal{X}_{\mathrm{target}}^{(r)}$ and continue RL.
+\end{enumerate}
+The loop: $\pi^{(r)} \to \mathrm{evaluate} \to \mathcal{W}^{(r)} \to \mathrm{diagnose{+}target} \to \mathcal{X}_{\mathrm{target}}^{(r)} \to \mathrm{RL} \to \pi^{(r+1)}$.
+
+\paragraph{Training.}
+Cold-start SFT on 40K trajectories from Doubao-Seed-1.8, then GRPO with $\varepsilon_{\mathrm{low}} = 0.2$, $\varepsilon_{\mathrm{high}} = 0.28$, max trajectory length 80K tokens, 32 tasks per step with 8 rollouts each. Backbones: Qwen3-8B and Qwen3-14B.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Core agentic benchmarks. Agent-World trained on Qwen3-8B/14B backbones.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{$\tau^2$-Bench} & \textbf{BFCL V4} & \textbf{MCP-Mark} \\
+\midrule
+Qwen3-8B (base) & 26.2 & 40.4 & 2.4 \\
+Qwen3-14B (base) & 30.3 & 42.0 & 3.4 \\
+EnvScaler-8B & 37.9 & 47.6 & 5.6 \\
+Simulator-8B & 31.8 & 23.9 & 2.4 \\
+DeepSeek-V3.2-685B & --- & 54.1 & --- \\
+\textbf{Agent-World-8B} & \textbf{61.8} & \textbf{51.4} & \textbf{8.9} \\
+\textbf{Agent-World-14B} & \textbf{65.4} & \textbf{55.8} & \textbf{13.3} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{Massive gains on stateful benchmarks:} $\tau^2$-Bench improves from 26.2\% to 61.8\% (+35.6) at 8B scale. MCP-Mark improves from 2.4\% to 8.9\% ($3.7\times$). These benchmarks require multi-step state tracking that simulated environments cannot teach.
+
+    \item \textbf{14B competitive with 685B:} Agent-World-14B (55.8\%) surpasses DeepSeek-V3.2-685B (54.1\%) on BFCL V4, demonstrating that environment quality and training methodology can compensate for 50$\times$ fewer parameters.
+
+    \item \textbf{Environment scaling:} Performance scales positively with environment count---from 18.4\% (0 envs) to 38.5\% (2K envs) across 4 representative domains. Largest jumps at 10$\to$100 and 100$\to$500 environments; diminishing returns beyond 500.
+
+    \item \textbf{Self-evolution adds +3--7\% per round:} Over 2 rounds, Agent-World-14B gains +5.2 on $\tau^2$-Bench, +3.4 on BFCL V4, and +8.6 on MCP-Mark (Postgres). The mechanism is \textbf{model-agnostic}: applying the self-evolving loop to EnvScaler-8B also improves it (+3.7 on $\tau^2$-Bench, +5.6 on MCP-Mark).
+
+    \item \textbf{No degradation on general reasoning:} Math (MATH500, GSM8K, AIME), coding (SWE-bench), and knowledge (MMLU) benchmarks are preserved or improved. The diverse environment training does not cause catastrophic forgetting.
+
+    \item \textbf{Entropy remains stable during training:} Unlike many RL setups that suffer from entropy collapse, Agent-World's diverse environments prevent premature convergence.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Diminishing returns:} Self-evolution rounds show decreasing marginal gains (round 2 gains are $\sim$50\% of round 1). Early rounds fix pattern-level errors; later rounds address residual long-horizon failures that are harder to diagnose.
+
+    \item \textbf{Dependence on proprietary models:} The entire synthesis pipeline uses GPT-OSS-120B. Cold-start SFT requires Doubao-Seed-1.8. This creates a significant barrier for reproducibility.
+
+    \item \textbf{Web data dependency:} The agentic mining pipeline requires relevant structured data to exist on the public web. Specialised or proprietary domains may lack sufficient web-accessible data.
+
+    \item \textbf{Absolute performance still low:} Even Agent-World-14B scores only 13.3\% on MCP-Mark average, indicating that general agent tool-use remains far from solved.
+
+    \item \textbf{No analysis of persistent failure modes:} While the self-evolving arena diagnoses weaknesses, the paper does not deeply analyse what types of failures persist after multiple evolution rounds.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+Agent-World introduces the \textbf{environment-as-diagnostic-infrastructure} paradigm, transforming our understanding of how continual agent training should work.
+
+\textbf{Complementarity with TRACE}~\cite{trace}: TRACE decomposes agent failure into capability deficits and trains per-capability LoRA adapters with training-free routing. Agent-World decomposes failure at the \textit{environment} level and generates targeted training tasks. The two operate at different granularities: TRACE targets \textit{what capability} is weak (e.g., information retrieval vs.\ decision making), while Agent-World targets \textit{what domain} is weak (e.g., GitHub vs.\ Notion). Combining both---TRACE's capability-level diagnosis within Agent-World's environment-level diagnosis---could create a two-level curriculum: first identify the weak domain, then identify the weak capability within that domain.
+
+\textbf{Connection to OEL}~\cite{oel}: Online Experiential Learning stores interaction experiences for future retrieval. Agent-World's self-evolving loop is a more structured version of the same idea: rather than storing raw experiences, it distills them into \textit{diagnostic reports} that drive targeted environment generation. OEL is passive (store and retrieve); Agent-World is active (diagnose and generate).
+
+\textbf{Connection to SKILL0}~\cite{skill0}: SKILL0 internalises skills through in-context RL with progressive withdrawal. Agent-World's self-evolving loop implicitly performs a similar curriculum: early rounds provide broad environment coverage (analogous to SKILL0's full skill context), while later rounds focus on residual weaknesses (analogous to SKILL0's withdrawal, where only the hardest skills remain). However, Agent-World lacks SKILL0's explicit withdrawal mechanism---environments are added but never removed.
+
+\textbf{Connection to PersonaVLM}~\cite{personavlm}: Both maintain structured databases that grow over time. PersonaVLM stores per-user memories (episodic, semantic, procedural); Agent-World stores per-domain environments (databases, tools, tasks). Both face the challenge of \textit{what to retrieve} from a growing store. PersonaVLM uses timeline-filtered FAISS retrieval; Agent-World uses its diagnosis agent. The parallel suggests a unified ``diagnostic retrieval'' framework: instead of retrieving based on similarity alone, diagnose \textit{why} retrieval is needed and target accordingly.
+
+\textbf{Connection to RAGEN-2}~\cite{ragen2}: RAGEN-2 identified reasoning collapse in agentic RL---agents converge to repetitive action patterns. Agent-World's entropy stability result is notable in this context: diverse environments prevent the entropy collapse that drives reasoning collapse. This supports RAGEN-2's hypothesis that collapse is partly caused by limited environment diversity, not just reward structure.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Capability-Aware Self-Evolution via TRACE Integration}
+
+\textbf{Gap:} Agent-World's self-evolving loop diagnoses weaknesses at the \textit{environment} level (``the agent is weak on GitHub interactions'') but not at the \textit{capability} level (``the agent is weak at information retrieval \textit{within} GitHub interactions''). TRACE~\cite{trace} provides per-capability diagnosis via contrastive gap analysis ($\hat{\Delta}$ metric) and per-capability LoRA adapters. Neither approach alone is complete: Agent-World generates targeted environments but cannot specify which capability to emphasise within them; TRACE targets capabilities but cannot generate new training environments.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item At each self-evolution round, after Agent-World identifies weak environments $\mathcal{W}^{(r)}$, run TRACE's contrastive capability diagnosis on the failure traces from those environments. This produces a per-environment capability profile: e.g., ``GitHub failures are 70\% information retrieval, 20\% decision making, 10\% format compliance.''
+
+    \item Use the capability profile to condition task synthesis. For a weak environment with an information retrieval deficit, generate tasks that specifically require multi-step search and filtering (graph-based synthesis with high-weight edges on search tools). For a decision-making deficit, generate tasks requiring conditional branching (programmatic synthesis with complex control flows).
+
+    \item Train per-capability LoRA adapters (TRACE-style) but route them based on Agent-World's environment taxonomy rather than TRACE's task-type heuristic. The 3-level taxonomy provides natural routing categories: first-tier for broad capability, second-tier for domain, third-tier for specific tool patterns.
+
+    \item Evaluate on $\tau^2$-Bench (where TRACE showed +14.1pp) and MCP-Mark (where Agent-World showed the largest gains). The hypothesis: two-level diagnosis (environment + capability) should outperform either alone, with the largest gains on benchmarks requiring both domain-specific knowledge and capability-specific skill.
+\end{enumerate}
+
+\textbf{Feasibility:} High. TRACE's contrastive diagnosis requires only paired success/failure trajectories, which Agent-World's evaluation loop already produces. The capability-conditioned task synthesis adds a prompt-level modification to Agent-World's existing LLM-based synthesis pipeline. Start with Agent-World-8B + TRACE's 4-capability taxonomy on $\tau^2$-Bench, comparing single-level (environment-only or capability-only) vs.\ two-level diagnosis.
+
+\subsection{Direction 2: Environment Withdrawal for Internalisation}
+
+\textbf{Gap:} Agent-World's self-evolving loop adds environments and tasks but never removes them. SKILL0~\cite{skill0} showed that progressive withdrawal---gradually removing auxiliary context---drives deeper internalisation. KnowRL~\cite{knowrl} showed that minimal-sufficient guidance outperforms full guidance. Agent-World may be over-scaffolding: environments that were useful in round 1 may have been fully internalised by round 2, yet they continue to occupy the training budget. Conversely, removing too many environments risks catastrophic forgetting of domain knowledge.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item At each self-evolution round, classify environments into three categories based on the agent's current performance:
+    \begin{itemize}
+        \item \textbf{Mastered} ($\mathrm{acc} > 0.8$): Environment fully internalised. Remove from active training; retain in evaluation-only arena.
+        \item \textbf{Progressing} ($0.3 \leq \mathrm{acc} \leq 0.8$): Environment partially learned. Keep in training with current task difficulty.
+        \item \textbf{Struggling} ($\mathrm{acc} < 0.3$): Environment not yet learned. Keep in training and generate targeted harder tasks.
+    \end{itemize}
+
+    \item Apply KnowRL's CSS-inspired logic: for mastered environments, check whether removing them jointly degrades performance on progressing environments (the pruning interaction paradox). If joint removal hurts, retain a minimal subset of mastered environments as ``anchors'' that provide cross-domain transfer signal.
+
+    \item Monitor entropy during withdrawal. If entropy begins to drop (signalling convergence toward narrow exploitation), temporarily reintroduce withdrawn environments as a diversity injection.
+
+    \item Compare against Agent-World's default (all environments retained) and a naive withdrawal (remove all mastered environments). The target: match Agent-World's final performance with 30--50\% fewer training environments, reducing compute proportionally.
+\end{enumerate}
+
+\textbf{Feasibility:} High. Environment classification requires only per-environment accuracy tracking, which Agent-World's evaluation loop already computes. The CSS-inspired joint removal check adds a small evaluation overhead. Start with Agent-World-14B and 2K environments, tracking training efficiency (accuracy per RL step) with and without withdrawal.
+
+\subsection{Direction 3: Self-Evolving Environment Synthesis for Diffusion LLM Agents}
+
+\textbf{Gap:} Agent-World trains autoregressive agents via GRPO. DARE~\cite{dare} showed that RL post-training for diffusion LLMs is possible but suffers from ELBO variance and limited training environments. No existing dLLM agent framework generates its own training environments. Diffusion agents face a unique challenge: their parallel generation process may produce tool calls with internally inconsistent arguments (different positions decoded independently), requiring environments that specifically test argument consistency.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item Adapt Agent-World's environment synthesis pipeline for dLLM-specific evaluation. The graph-based task synthesis naturally produces tool-call sequences with parameter dependencies ($w = 3$ edges). For dLLM agents, add a \textbf{consistency verification layer}: check whether the agent's parallel-decoded tool arguments are mutually consistent (e.g., if \texttt{create\_order} specifies product\_id=5, the subsequent \texttt{get\_order\_details} should reference the same order).
+
+    \item Extend Agent-World's structured reward for dLLMs: add an argument-consistency term alongside the existing rubric/execution reward. Using DMax's~\cite{dmax} tokens-per-forward (TPF) metric, also penalise tasks where consistency enforcement degrades decoding parallelism.
+
+    \item Apply the self-evolving loop to DARE's Coupled-GRPO training. The diagnosis agent should specifically identify dLLM-specific failure modes: argument inconsistency, premature token commitment (where early-decoded tokens constrain later positions), and ELBO variance spikes on certain environment types.
+
+    \item Compare against DARE with fixed environments on $\tau^2$-Bench. The hypothesis: self-evolving environment synthesis should reduce DARE's ELBO variance by exposing the dLLM to diverse state dynamics during training, making the denoising process more robust to environment-specific noise patterns.
+\end{enumerate}
+
+\textbf{Feasibility:} Medium. The main challenge is the cost of dLLM rollouts (slower than AR due to multi-step denoising), which makes Agent-World's 8-rollout-per-task training expensive. Start with a reduced setup: DMax-accelerated inference for rollouts (2.2$\times$ speedup), 4 rollouts per task, and 500 environments (the diminishing-returns inflection point from Agent-World's scaling analysis). Use LLaDA-2.0-mini as the backbone with DARE's Coupled-GRPO.
+
+\section{Conclusion}
+
+Agent-World demonstrates that the key to general agent intelligence is not just training on more environments but \textbf{co-evolving} the agent and its training environments through a diagnostic feedback loop. The self-evolving training arena---where environments serve as both training data and diagnostic infrastructure---transforms static training into a continuous improvement cycle. The result: a 14B model that surpasses DeepSeek-V3.2-685B on function calling and achieves $3.7\times$ improvement on stateful MCP interactions.
+
+For our lab, Agent-World represents a paradigm shift in how we think about agent training. Our previous reviews approached agent improvement from the \textit{agent} side: TRACE~\cite{trace} diagnoses capability deficits, SKILL0~\cite{skill0} internalises skills, OEL~\cite{oel} stores experiences, PersonaVLM~\cite{personavlm} manages memories. Agent-World approaches it from the \textit{environment} side: instead of making the agent smarter about a fixed world, make the world more informative for the agent. The two perspectives are complementary, and Direction~1 proposes their synthesis.
+
+The most transferable insight is the \textbf{diagnostic loop}: evaluate $\to$ diagnose $\to$ target $\to$ retrain. This pattern generalises beyond environments to any training component. KnowRL~\cite{knowrl} could use it for knowledge-point selection (diagnose which KPs are no longer needed as the policy improves). TESSY~\cite{tessy} could use it for teacher-student boundary adaptation (diagnose which tokens the student can now handle alone). The principle is consistent with our 36-review meta-pattern: \textbf{decompose} the problem (into environments, capabilities, knowledge points), \textbf{diagnose} weaknesses (via evaluation, contrastive analysis, interaction testing), and \textbf{allocate} resources (generate targeted tasks, route to adapters, inject minimal knowledge).
+
+Agent-World's entropy stability result also provides an important data point for the RL thread: RAGEN-2's~\cite{ragen2} reasoning collapse may be preventable through environment diversity alone, without requiring architectural interventions like SNR-aware filtering. If sufficiently diverse environments keep entropy stable, the agent maintains exploration naturally---a simpler solution to a problem we have been approaching from the reward-engineering side.
+
+\begin{thebibliography}{10}
+\bibitem{agentworld} Dong, G., et al. (2026). Agent-World: Scaling Real-World Environment Synthesis for Evolving General Agent Intelligence. \textit{arXiv:2604.18292}.
+\bibitem{trace} Kang, H., et al. (2026). TRACE: Capability-Targeted Agentic Training. \textit{arXiv:2604.05336}.
+\bibitem{oel} Xie, S., et al. (2026). Online Experiential Learning for Language Models. \textit{arXiv:2603.16856}.
+\bibitem{skill0} Ding, Z., et al. (2026). SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization. \textit{arXiv:2604.02268}.
+\bibitem{personavlm} Nie, C., et al. (2026). PersonaVLM: Long-Term Personalized Multimodal LLMs. \textit{arXiv:2604.13074}.
+\bibitem{ragen2} Wang, H., et al. (2026). RAGEN-2: Reasoning Collapse in Agentic RL. \textit{arXiv:2604.06268}.
+\bibitem{knowrl} Yu, L., et al. (2026). KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance. \textit{arXiv:2604.12627}.
+\bibitem{tessy} Huang, Z., et al. (2026). How to Fine-Tune a Reasoning Model? A Teacher-Student Cooperation Framework. \textit{arXiv:2604.14164}.
+\bibitem{dare} Yang, J., et al. (2026). DARE: Diffusion Large Language Models Alignment and Reinforcement Executor. \textit{arXiv:2604.04215}.
+\bibitem{dmax} Chen, Z., et al. (2026). DMax: Aggressive Parallel Decoding for dLLMs. \textit{arXiv:2604.08302}.
+\end{thebibliography}
+
+\end{document}
