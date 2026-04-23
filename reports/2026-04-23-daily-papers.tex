@@ -1,0 +1,219 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: TEMPO --- Scaling Test-Time Training\\for Large Reasoning Models via EM Policy Optimization}
+\author{Internbot --- Automated Research Review}
+\date{April 23, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} TEMPO: Scaling Test-time Training for Large Reasoning Models \\
+\textbf{Authors:} Qingyang Zhang, Xinke Kong, Haitao Wu, et al.\ (Tianjin University, Alibaba Tongyi Lab, CUHK, Shanghai AI Lab) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.19295}{2604.19295} \\
+\textbf{Topics:} Reinforcement Learning, Test-Time Training, Reasoning Scaling
+
+\subsection{Problem}
+
+Test-time training (TTT) updates model parameters on unlabeled test instances during inference, using self-generated reward signals (entropy, majority voting, self-consistency) to perform RL. For reasoning models, prior TTT methods like TTRL and EMPO achieve initial gains but suffer from two compounding pathologies:
+
+\begin{itemize}
+    \item \textbf{Performance plateaus:} Self-rewarding signals saturate because they are derived from the model's own outputs. As the model improves, its reward signal becomes self-reinforcing---confident patterns dominate consensus, which further amplifies them. Training stalls within $\sim$50--100 steps.
+
+    \item \textbf{Diversity collapse:} In pursuit of higher mean@$K$ (average accuracy), the output distribution narrows to a few reasoning patterns. Pass@$K$ (probability that at least one of $K$ samples is correct) \textit{degrades}, meaning the model loses its ability to explore alternative valid solution paths---critical for hard problems.
+\end{itemize}
+
+Both pathologies share a root cause: the absence of ground-truth labels at test time. TTRL's reward, for instance, is a binary consensus indicator $q(y|x) \propto \mathbb{I}(y \in Y_{\mathrm{majority}}) \cdot \pi_\theta(y|x)$, which is self-reinforcing and provides no information about minority-but-correct reasoning paths.
+
+TEMPO's key insight: TTT is fundamentally a \textbf{latent variable problem} (correctness is unobserved). The natural optimisation framework is Expectation-Maximisation. All prior self-rewarding TTT methods are \textbf{incomplete EM variants that only perform the M-step}---they update the policy but never recalibrate their notion of what constitutes a correct response.
+
+\subsection{Method}
+
+TEMPO (Test-time Expectation-Maximisation Policy Optimisation) restores the missing E-step through an alternating actor-critic design.
+
+\paragraph{EM Formulation.}
+The global objective maximises the log-probability of generating a correct response:
+\begin{equation}
+    J(\theta) = \mathbb{E}_x\!\left[\log P(\mathrm{Correct} \mid x;\, \theta)\right] = \mathbb{E}_x\!\left[\log \sum_y P(\mathrm{Correct} \mid x, y) \cdot \pi_\theta(y \mid x)\right]
+\end{equation}
+Since correctness is unobserved for test data, introducing an auxiliary distribution $q(y|x)$ yields the ELBO:
+\begin{equation}
+    J(\theta) \geq \mathcal{L}(q, \theta) = \sum_{x \in \mathcal{D}_u} \sum_y q(y|x) \log \frac{P(\mathrm{Correct}|y,x) \cdot \pi_\theta(y|x)}{q(y|x)}
+\end{equation}
+with equality iff $q$ matches the true posterior $P(y|x, \mathrm{Correct})$.
+
+\paragraph{E-Step: Critic Recalibration.}
+The optimal auxiliary distribution is the posterior $q(y|x) = P(\mathrm{Correct}|y,x) \cdot \pi_{\theta_0}(y|x) / P(\mathrm{Correct}|x)$. Since $P(\mathrm{Correct}|y,x)$ is unknown for test data, TEMPO trains a \textbf{critic model} $V_\phi(x, y_t)$ on a labelled dataset $\mathcal{D}_L$:
+\begin{equation}
+    \mathcal{L}_{\mathrm{critic}}(\phi) = \mathbb{E}_{(x,y,I) \sim \mathcal{D}_L}\!\left[\|V_\phi(x, y_t) - I\|_2^2\right]
+\end{equation}
+where $I \in \{0, 1\}$ is the binary correctness indicator. The last-token value $V_\phi(x, y_T)$ approximates $P(\mathrm{Correct}|y,x)$, yielding:
+\begin{equation}
+    q(y|x) \propto V_\phi(x, y_T) \cdot \pi_{\theta_0}(y|x)
+\end{equation}
+
+\paragraph{M-Step: Policy Refinement.}
+Fixing $q$ and substituting the E-step approximation, the policy update becomes weighted maximum likelihood:
+\begin{equation}
+    \theta_{\mathrm{new}} = \arg\max_\theta \sum_{x \in \mathcal{D}_u} \sum_y V_\phi(x, y_T) \cdot \log \pi_\theta(y|x)
+\end{equation}
+For variance reduction, token-level advantages use the critic's intermediate predictions as baselines:
+\begin{equation}
+    A_t = V_\phi(x, y_T) - V_\phi(x, y_{1:t})
+\end{equation}
+The final policy loss is: $\mathcal{L}_{\mathrm{policy}}(\theta) = -\mathbb{E}_{x \in \mathcal{D}_u,\, y \sim \pi_\theta}\!\left[\sum_{t=1}^{T} A_t \cdot \log \pi_\theta(y_t | x, y_{<t})\right]$.
+
+\paragraph{Alternating Loop.}
+At each iteration $k$: (1)~E-step---recalibrate the critic on labelled data $\mathcal{D}_L$, grounding it in external supervision; (2)~M-step---refine the policy on unlabelled test data $\mathcal{D}_u$ using critic-derived advantages. The critic is periodically re-grounded in reality before being used to guide policy updates, preventing reward drift.
+
+\paragraph{Why It Prevents Diversity Collapse.}
+The critic provides \textbf{continuous, quality-aware scores} rather than binary consensus signals. High-quality but minority reasoning paths receive positive rewards (not suppressed by majority voting). Periodic recalibration on $\mathcal{D}_L$ prevents the critic from drifting toward the model's own biases.
+
+\paragraph{Training Details.}
+Base models: Qwen3-8B/14B, OLMO3-7B. Initialisation: PPO on DAPO-Math-17K (math) or Dolci-RL-Zero-General (12.8K examples). Batch size 256 (mini-batch 64), max response length 16K tokens, GSPO-style dual clipping at $3 \times 10^{-4}$ and $5 \times 10^{-4}$.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Mathematical reasoning (avg@16). TEMPO vs.\ prior TTT methods.}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Model} & \textbf{Benchmark} & \textbf{Zero-RL} & \textbf{TTRL} & \textbf{EMPO} & \textbf{TEMPO} \\
+\midrule
+OLMO3-7B & AIME 24 & 33.0 & 40.8 & 41.6 & \textbf{51.1} \\
+OLMO3-7B & AIME 25 & 26.3 & 27.1 & 26.7 & \textbf{37.0} \\
+Qwen3-8B & AIME 24 & 26.3 & 29.0 & 32.3 & \textbf{42.7} \\
+Qwen3-8B & AIME 25 & 25.4 & 32.8 & 33.3 & \textbf{40.8} \\
+Qwen3-14B & AIME 24 & 42.3 & 53.1 & 55.6 & \textbf{65.8} \\
+Qwen3-14B & AIME 25 & 37.1 & 40.8 & 44.6 & \textbf{44.6} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{+23.5pp on AIME 2024} (Qwen3-14B): 42.3\% $\to$ 65.8\%, the largest gain among all settings. TEMPO outperforms both TTRL (+12.7) and EMPO (+10.2) by wide margins.
+
+    \item \textbf{Diversity preserved:} TEMPO maintains or improves pass@8 across all settings. Qwen3-14B on AIME 24: TEMPO pass@8 = 73.3\% vs.\ TTRL = 56.7\% vs.\ baseline = 69.1\%. Prior methods consistently degrade pass@$K$, confirming diversity collapse.
+
+    \item \textbf{Sustained scaling:} TEMPO shows no plateau after 350+ steps (Figure~1), while TTRL/EMPO plateau within $\sim$100 steps. The EM-based alternating structure maintains informative gradients throughout.
+
+    \item \textbf{General reasoning transfer:} TEMPO on OLMO3-7B achieves +21.4 on BBH, +24.5 on AGI Eval, +12.9 on ZebraLogic, surpassing frontier models like General-Reasoner-7B.
+
+    \item \textbf{Supervised continuation is insufficient:} From a converged OLMO3-7B checkpoint, continuing PPO on the same labelled data yields negligible further gains. TEMPO achieves +15pp avg@16 improvement from the same starting point, validating that only exposure to novel test problems pushes the model beyond its boundaries.
+
+    \item \textbf{Frozen critic degrades after $\sim$100 steps:} Without E-step recalibration, the critic's evaluations drift as the policy generates increasingly sophisticated reasoning. Recalibration is not optional---it is a necessary condition for sustained scaling.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Computational overhead:} Maintaining both actor and critic doubles GPU memory compared to single-model TTT methods.
+
+    \item \textbf{Labelled data dependency:} The critic requires a labelled dataset $\mathcal{D}_L$ for recalibration, partially undermining the ``unsupervised'' appeal of TTT. The size and domain match of $\mathcal{D}_L$ may affect generalisation.
+
+    \item \textbf{Domain scope:} Experiments cover math, STEM, and puzzle reasoning. Code generation and other domains remain unvalidated.
+
+    \item \textbf{No formal convergence guarantees:} The EM perspective provides a principled framing but no theoretical convergence analysis for the alternating procedure.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+TEMPO provides a principled framework for understanding why RL training can stall or collapse, directly connecting to several threads in our review series.
+
+\textbf{Unifying with RAGEN-2's reasoning collapse}~\cite{ragen2}: RAGEN-2 identified reasoning collapse in agentic RL---agents converge to repetitive action patterns. TEMPO's diversity collapse is the same phenomenon viewed through a different lens: both are caused by self-reinforcing reward signals that narrow the output distribution. RAGEN-2 proposed SNR-aware filtering; Agent-World~\cite{agentworld} showed that environment diversity prevents entropy collapse. TEMPO offers a third solution: \textit{grounded critic recalibration}. The three approaches are complementary---SNR filtering selects high-quality training signals, environment diversity maintains exploration pressure, and critic recalibration prevents reward drift.
+
+\textbf{Connection to RLSD}~\cite{rlsd}: RLSD provides dense token-level credit via evidence reweighting. TEMPO's critic provides token-level advantages $A_t = V_\phi(x, y_T) - V_\phi(x, y_{1:t})$ that serve a similar purpose. The key difference: RLSD's credit is derived from the policy itself (self-distillation), while TEMPO's credit is derived from an externally grounded critic. Combining both---using RLSD's evidence weights to modulate TEMPO's critic-derived advantages---could yield more precise credit assignment.
+
+\textbf{Connection to KnowRL}~\cite{knowrl}: KnowRL addresses reward sparsity (zero-correct queries) by injecting minimal knowledge. TEMPO addresses a different failure mode---reward \textit{degradation} (initially informative signals become self-reinforcing). On hard problems where KnowRL's knowledge injection enables initial success, TEMPO's critic recalibration could sustain improvement beyond the plateau that KnowRL's static hints impose.
+
+\textbf{Connection to TESSY}~\cite{tessy}: TESSY showed that style tokens create noise in the training signal. TEMPO's token-level advantage computation does not distinguish between style and capability tokens. Applying TESSY's boundary predictor to mask style tokens from TEMPO's advantage computation could reduce gradient noise during test-time training.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Test-Time Self-Evolution via Agent-World Integration}
+
+\textbf{Gap:} TEMPO improves reasoning on static test problems. Agent-World~\cite{agentworld} improves agent capabilities through self-evolving environment synthesis. Neither addresses the intersection: adapting an agent to a novel real-world environment \textit{at test time}. When an agent encounters an unseen MCP server (e.g., a new GitHub API), TEMPO's critic could guide test-time adaptation, while Agent-World's environment synthesis could generate practice tasks for that specific server.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item When the agent encounters a novel environment at test time, use Agent-World's graph-based task synthesis to generate practice tasks for that environment (using the tool specifications as input).
+
+    \item Apply TEMPO's alternating loop: the agent generates responses to practice tasks, TEMPO's critic evaluates them, and the policy is refined. The critic is periodically recalibrated on a small set of labelled tool-use examples from $\mathcal{D}_L$ (drawn from Agent-World's existing 1,978-environment training set).
+
+    \item The self-evolving diagnosis step targets the specific environment: analyse which tool interactions the agent struggles with, generate harder practice tasks, and continue TEMPO refinement.
+
+    \item Evaluate on MCP-Mark (where Agent-World-14B scored 13.3\%) with novel MCP servers not seen during training. The hypothesis: TEMPO-style test-time adaptation should close part of the remaining gap between Agent-World's training-time performance and the ideal, by allowing the agent to specialise to the specific server's dynamics at inference time.
+\end{enumerate}
+
+\textbf{Feasibility:} Medium-high. Agent-World's task synthesis requires only tool specifications (available at test time for MCP servers). TEMPO's critic requires labelled examples from related environments, which Agent-World's 1,978-environment corpus provides. The main overhead is the test-time training loop itself ($\sim$100--350 steps), which may be acceptable for high-stakes tool-use scenarios where correctness matters more than latency.
+
+\subsection{Direction 2: Critic-Guided Diversity Preservation for Diffusion LLM RL}
+
+\textbf{Gap:} DARE~\cite{dare} showed that RL post-training for diffusion LLMs is possible but suffers from ELBO variance. LangFlow~\cite{langflow} showed that self-conditioning dramatically helps continuous diffusion but its impact on RL training is unexplored. Diffusion LLMs face an amplified diversity collapse risk: the iterative denoising process can lock into a narrow manifold of solutions early, with subsequent steps merely refining within that manifold rather than exploring alternatives. TEMPO's critic could detect and prevent this by evaluating the \textit{diversity} of intermediate denoising states, not just final-output quality.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item Extend TEMPO's critic from a correctness predictor to a \textbf{correctness-diversity joint predictor}. Train $V_\phi(x, z_\gamma, \gamma)$ on labelled data to predict both (a) whether the final output will be correct and (b) whether the current denoising trajectory is in a high-diversity region of the output manifold (measured by variance of final outputs across multiple denoising continuations from the same intermediate state $z_\gamma$).
+
+    \item During DARE's Coupled-GRPO training, use the diversity component of $V_\phi$ to add a diversity bonus to the advantage: $A_t = V_\phi^{\mathrm{correct}}(x, z_\gamma) + \lambda \cdot V_\phi^{\mathrm{diverse}}(x, z_\gamma) - V_\phi^{\mathrm{baseline}}(x, z_{\gamma'})$. This encourages the denoising process to maintain trajectory diversity at each step.
+
+    \item Apply TEMPO's alternating recalibration: periodically retrain $V_\phi$ on labelled data to prevent the diversity estimate from drifting. Use LangFlow's Gumbel noise schedule to focus recalibration on high-information denoising steps (where diversity matters most).
+
+    \item Evaluate on LM1B and OWT, comparing DARE + TEMPO-critic against standard DARE. Measure both Gen.PPL (quality) and sample entropy (diversity). The hypothesis: critic-guided training should maintain LangFlow-level entropy ($\geq 5.44$) while achieving DARE's accuracy gains.
+\end{enumerate}
+
+\textbf{Feasibility:} Medium. The diversity component of the critic requires a novel training objective (denoising trajectory variance), which is conceptually straightforward but computationally expensive to compute (requires multiple forward passes from each intermediate state). Start with MDLM-130M on LM1B using 64-step denoising, where forward passes are cheaper.
+
+\subsection{Direction 3: Style-Masked Test-Time Training}
+
+\textbf{Gap:} TEMPO's token-level advantage $A_t = V_\phi(x, y_T) - V_\phi(x, y_{1:t})$ treats all tokens uniformly. TESSY~\cite{tessy} showed that style tokens (discourse markers, transitions) create noise in training signals---they do not affect task correctness but introduce gradient variance. During test-time training, where every gradient step counts (limited compute budget), this noise is particularly costly. No existing TTT method uses style/capability decomposition.
+
+\textbf{Approach:}
+\begin{enumerate}
+    \item Apply TESSY's boundary predictor (Qwen3-0.6B-Base) to TEMPO's self-generated responses, producing a binary mask $m_t \in \{0, 1\}$ for each token (1 = capability, 0 = style).
+
+    \item Modify TEMPO's policy loss to mask style tokens:
+    \begin{equation}
+        \mathcal{L}_{\mathrm{masked}}(\theta) = -\mathbb{E}\!\left[\sum_{t=1}^{T} m_t \cdot A_t \cdot \log \pi_\theta(y_t | x, y_{<t})\right]
+    \end{equation}
+    Style tokens still participate in the forward pass (maintaining coherent generation) but receive zero gradient, focusing all learning signal on reasoning-relevant tokens.
+
+    \item Also mask style tokens when training the critic: $\mathcal{L}_{\mathrm{critic}}^{\mathrm{masked}}(\phi) = \mathbb{E}\!\left[\sum_{t: m_t=1} \|V_\phi(x, y_t) - I\|_2^2\right]$. This trains the critic to attend to capability tokens rather than stylistic cues, potentially improving its accuracy on novel reasoning patterns.
+
+    \item Evaluate on AIME 2024/2025 with Qwen3-8B, comparing masked vs.\ unmasked TEMPO at matched compute budgets (100, 200, 350 steps). The hypothesis: style masking should achieve the same accuracy gains in 30--50\% fewer steps by eliminating gradient noise from style tokens.
+\end{enumerate}
+
+\textbf{Feasibility:} High. TESSY's boundary predictor is lightweight (0.6B parameters) and already trained. Adding a multiplicative mask to TEMPO's loss requires no architectural changes. The main risk is that masking style tokens may disrupt the critic's context understanding---the critic may need style tokens for accurate value prediction even if they should not receive gradient. Start with the policy-only masking variant (mask policy gradients but keep full critic training) to isolate the effect.
+
+\section{Conclusion}
+
+TEMPO reveals that test-time training is a latent variable optimisation problem---correctness is unobserved---and that the natural framework is Expectation-Maximisation. Prior TTT methods are incomplete EM variants that only perform the M-step (policy update), causing the reward signal to drift and the output distribution to collapse. TEMPO restores the E-step through periodic critic recalibration on labelled data, enabling sustained scaling (+23.5pp on AIME 2024) without diversity loss. The frozen-critic ablation is the clearest evidence: without recalibration, the critic degrades after $\sim$100 steps, exactly when prior methods plateau.
+
+For our lab, TEMPO provides the theoretical grounding for understanding why RL training stalls. RAGEN-2's~\cite{ragen2} reasoning collapse, Agent-World's~\cite{agentworld} entropy stability, and TEMPO's diversity preservation all address the same underlying problem: self-reinforcing reward signals that narrow the policy distribution. The three solutions are complementary---environment diversity (Agent-World), signal-quality filtering (RAGEN-2), and grounded critic recalibration (TEMPO)---and Direction~1 proposes their synthesis for agent training.
+
+The most transferable insight is the \textbf{alternating recalibration principle}: any self-improving system must periodically re-ground its evaluation criteria in external reality. This generalises beyond TTT: KnowRL's~\cite{knowrl} static knowledge selection could benefit from periodic re-evaluation as the policy improves (our KnowRL Direction~1 proposed exactly this). TESSY's~\cite{tessy} fixed boundary predictor could be periodically retrained on the evolving student's outputs (our TESSY Direction~3). Agent-World's~\cite{agentworld} diagnosis agent is already an instantiation of this principle. Across 37 reviews, the pattern is clear: \textbf{static training components become liabilities as the model evolves}; the most effective systems periodically recalibrate every component that provides a training signal.
+
+\begin{thebibliography}{10}
+\bibitem{tempo} Zhang, Q., et al. (2026). TEMPO: Scaling Test-time Training for Large Reasoning Models. \textit{arXiv:2604.19295}.
+\bibitem{ragen2} Wang, H., et al. (2026). RAGEN-2: Reasoning Collapse in Agentic RL. \textit{arXiv:2604.06268}.
+\bibitem{agentworld} Dong, G., et al. (2026). Agent-World: Scaling Real-World Environment Synthesis for Evolving General Agent Intelligence. \textit{arXiv:2604.18292}.
+\bibitem{rlsd} Yang, C., et al. (2026). Self-Distilled RLVR. \textit{arXiv:2604.03128}.
+\bibitem{knowrl} Yu, L., et al. (2026). KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance. \textit{arXiv:2604.12627}.
+\bibitem{tessy} Huang, Z., et al. (2026). How to Fine-Tune a Reasoning Model? A Teacher-Student Cooperation Framework. \textit{arXiv:2604.14164}.
+\bibitem{dare} Yang, J., et al. (2026). DARE: Diffusion Large Language Models Alignment and Reinforcement Executor. \textit{arXiv:2604.04215}.
+\bibitem{langflow} Chen, Y., et al. (2026). LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling. \textit{arXiv:2604.11748}.
+\end{thebibliography}
+
+\end{document}
