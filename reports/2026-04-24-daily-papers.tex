@@ -1,0 +1,229 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: LLaDA2.0-Uni --- Unifying Multimodal\\Understanding and Generation with Diffusion LLMs}
+\author{Internbot --- Automated Research Review}
+\date{April 24, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model \\
+\textbf{Authors:} Tiwei Bie, Haoxing Chen, Tieyuan Chen, Zhenglin Cheng, Long Cui, Kai Gan, Zhicheng Huang, Zhenzhong Lan, Haoquan Li, Jianguo Li, Tao Lin, et al.\ (Inclusion AI) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.20796}{2604.20796} \\
+\textbf{Topics:} Diffusion LLM, Multimodal Understanding and Generation, Discrete Diffusion
+
+\subsection{Problem}
+
+Multimodal large language models have bifurcated into specialized understanding systems (e.g., Qwen-VL, InternVL) and generation systems (e.g., Flux, Z-Image). A unified model serving both purposes would enable mutual enhancement, deployment efficiency, and novel interleaved reasoning-generation capabilities. Current unification attempts face fundamental obstacles:
+
+\begin{itemize}
+    \item \textbf{Semantic--reconstruction trade-off in tokenizers.} Existing unified discrete diffusion models (MMaDA, Lumina-DiMOO) use reconstruction-based VQ-VAE tokenizers. These tokens preserve pixel fidelity but discard high-level semantic information, crippling understanding performance---Lumina-DiMOO scores 7.2 on DocVQA and 7.6 on OCRBench despite strong generation results.
+    \item \textbf{Bidirectional attention degrades text.} Fully unconstrained bidirectional attention, while theoretically ideal for diffusion, empirically hurts text generation quality compared to block-wise or causal schemes.
+    \item \textbf{Fixed output length assumptions.} Prior discrete diffusion unified models assume fixed output lengths for understanding tasks, precluding open-ended question answering where response length varies dramatically.
+    \item \textbf{Hybrid objective fragility.} AR+Diffusion hybrids (BAGEL, HunyuanImage-3.0) require delicate balancing between autoregressive and diffusion losses during training.
+\end{itemize}
+
+\subsection{Method}
+
+LLaDA2.0-Uni addresses these challenges through a three-component architecture unified under a single block-wise masked diffusion objective.
+
+\paragraph{SigLIP-VQ Semantic Discrete Tokenizer.}
+The key architectural innovation is replacing reconstruction-based VQ-VAE with a \emph{semantics-optimized} tokenizer built on pre-trained SigLIP2-g ViT. The vector quantizer (codebook size 16,384, dimension 2,048) is placed after the ViT encoder and aligned with a pre-trained LLM, producing tokens optimized for reasoning rather than pixel reconstruction. This supports dynamic resolution: $\sim$256 tokens at $256 \times 256$, $\sim$1,024 at $512 \times 512$, and $\sim$2,048 at $800 \times 800$.
+
+\paragraph{16B MoE Diffusion Language Model Backbone.}
+The backbone extends LLaDA-2.0-mini (a Mixture-of-Experts dLLM) by appending all 16,384 SigLIP-VQ codebook tokens plus special resolution tokens to the vocabulary. The model employs block-wise attention from Block Diffusion Language Models: tokens attend freely within predefined blocks but selectively across blocks, balancing parallel decoding speed with coherent generation. Standard 1D RoPE is used with spatial information conveyed through special $\langle\mathrm{height}\rangle$ and $\langle\mathrm{width}\rangle$ tokens, enabling arbitrary resolution without architectural changes.
+
+The training loss follows the Block Diffusion LM objective:
+\begin{equation}
+    \mathcal{L}_{\mathrm{BDLM}}(\theta) = -\mathbb{E}_{t, x_0, x_t}\!\left[\frac{\alpha'_t}{1-\alpha_t}\sum_{k=1}^{K}\sum_{i=1}^{L_B}\mathbf{1}[x_{t,k}^{i}=\mathrm{[M]}]\log p_\theta(x_{0,k}^{i}\mid x_{0,<k}, x_{t,k})\right]
+\end{equation}
+where $K=L/L_B$ is the number of blocks, $\alpha_t$ is the noise schedule, and predictions are made only at masked positions. For SFT, a conditional variant $\mathcal{L}_{\mathrm{SFT}}$ additionally conditions on the input prompt $c$.
+
+\paragraph{Mask Token Reweighting (MTRS).}
+Since multimodal sample lengths vary by up to two orders of magnitude, naive averaging biases gradients toward long sequences. MTRS reweights per-sample losses:
+\begin{equation}
+    \mathcal{L}_{\mathrm{MTRS}} = \frac{\sum_j \beta_j \cdot \mathcal{L}_{\mathrm{SFT}}^{(j)}}{\sum_j \beta_j}, \quad \beta_j = \frac{1}{\sqrt{\sum_{k,i}\mathbf{1}[x_{t,k}^{i,(j)}=\mathrm{[M]}]}}
+\end{equation}
+where $\beta_j$ is the inverse square root of the masked token count per sample, equilibrating gradient contributions across diverse response lengths.
+
+\paragraph{Complementary Masking.}
+Each training sequence yields two antithetical instances using mask $m$ and its inverse $1-m$. Every token position appears uncorrupted exactly once per pair, doubling effective information utilization and eliminating token-level sampling bias.
+
+\paragraph{6B Diffusion Decoder.}
+Since SigLIP-VQ tokens lack a native image reconstruction mechanism, a 6B diffusion decoder (based on Z-Image-Base) converts the backbone's semantic tokens into pixel-space images. The decoder is the \emph{sole} conditioning signal---no redundant text prompts are used. It also performs $2\times$ super-resolution. A consistency-based distillation reduces sampling from 50 steps to 8 steps with negligible quality loss (GenEval 0.89 $\to$ 0.87) and 11.4$\times$ speedup (32.95 s/img $\to$ 2.90 s/img).
+
+\paragraph{Three-Stage Training.}
+\begin{itemize}
+    \item \textbf{Stage 0 (100B tokens):} Vision-language alignment using image captions and text data. Selective masking: only image tokens masked for generation tasks, only text tokens for understanding tasks. Generation resolution progresses from $256^2$ to $512^2$.
+    \item \textbf{Stage 1 (210B tokens):} Multi-task pre-training with OCR, grounding, counting, video, editing, style transfer, and controllable generation data.
+    \item \textbf{Stage 2 (80B tokens):} Supervised fine-tuning with high-quality multimodal data ($\sim$60M samples, 1:5 text-to-multimodal ratio). Context expands from 8K to 16K tokens.
+\end{itemize}
+
+\paragraph{SPRINT Inference Acceleration.}
+A sparse prefix retention mechanism prunes the KV cache using a composite importance score $s_i = \alpha \bar{I}_i + (1-\alpha) c_i$ combining mean-normalized key norms $\bar{I}_i$ and top-1 softmax confidence $c_i$. Modality-aware pruning applies separate keep ratios for text and image tokens. Non-uniform token unmasking accepts tokens exceeding a confidence threshold $\tau$, with a minimum acceptance floor to guarantee termination. This achieves 1.6$\times$ speedup with only $-0.6$ average score drop across 9 benchmarks.
+
+\subsection{Results}
+
+LLaDA2.0-Uni establishes a new state-of-the-art for unified discrete diffusion models across understanding, generation, and editing.
+
+\paragraph{Multimodal Understanding.}
+The model closes the gap between unified diffusion architectures and specialized VLMs. It performs on par with Qwen2.5-VL-7B (a specialized understanding model): MMStar 64.1 (vs.\ 63.9), MMBench-CN 81.2 (vs.\ 83.4), DocVQA 89.5 (vs.\ 94.9). Critically, it dramatically outperforms prior discrete diffusion unified models---Lumina-DiMOO scores 7.2 on DocVQA, 7.6 on OCRBench, and 12.1 on SimpleVQA where LLaDA2.0-Uni achieves 89.5, 75.7, and 44.0, respectively. Against the strongest AR+Diffusion hybrid BAGEL, it trails on some reasoning benchmarks (MMMU 50.1 vs.\ 55.3, MathVista 68.1 vs.\ 73.1) but leads on VL-RewardBench (47.8 vs.\ 28.9).
+
+\paragraph{Text-to-Image Generation.}
+GenEval overall: 0.89 (best among all unified models), with the highest position accuracy (0.90) across both unified and generation-only models. UniGenBench overall: 79.63 (new SOTA for unified models, surpassing even Seedream 3.0's 78.41). DPG-Bench: 87.76 (best unified). On WISE-Bench (reasoning-informed generation), adding a thinking mode yields 0.78, surpassing all baselines including generation-only specialists.
+
+\paragraph{Image Editing.}
+On MICo-Bench (multi-reference editing), LLaDA2.0-Uni achieves 47.1 overall---a new state-of-the-art surpassing even generation-only Qwen-Image-Edit (35.9) and BAGEL (34.4). On ImgEdit, it scores 3.92/5.0, outperforming all unified models.
+
+\paragraph{Interleaved Generation.}
+On the proposed InterGen benchmark (150 samples, 3 categories), LLaDA2.0-Uni outperforms Emu3.5 on most dimensions when evaluated by both Gemini-3 and Qwen3-VL judges.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Fine-grained visual detail:} SigLIP-VQ tokens sacrifice pixel fidelity for semantic richness, limiting detail-sensitive tasks. Text rendering remains weak (UniGenBench Text: 31.23 vs.\ Seedream 3.0's 69.86).
+    \item \textbf{Understanding gap vs.\ AR hybrids:} BAGEL still leads on several reasoning benchmarks (MMMU +5.2pp, MathVista +5.0pp), suggesting the block-wise diffusion paradigm has not fully closed the gap with autoregressive modeling for complex reasoning.
+    \item \textbf{Interleaved capabilities:} Described as ``preliminary exploration''---further data and model scaling are needed.
+    \item \textbf{RL integration:} Reinforcement learning for unified dLLMs remains an open challenge.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to \textbf{Topic 4: Diffusion LLM} and connects to several previously reviewed works in our series:
+
+\begin{itemize}
+    \item \textbf{Discrete diffusion lineage:} LLaDA2.0-Uni builds on the discrete diffusion foundation explored in our reviews of Cubic Discrete Diffusion, Generalized Discrete Diffusion from Snapshots, S2D2 (self-speculative decoding for dLLMs), DMax (aggressive parallel decoding), and DARE (alignment for dLLMs). It validates the block-wise attention scheme from Block Diffusion LMs as superior to full bidirectional attention for text.
+    \item \textbf{Continuous vs.\ discrete debate:} Our LangFlow review (Review \#33) showed continuous diffusion matching discrete approaches. LLaDA2.0-Uni demonstrates that discrete diffusion, when properly paired with semantic tokenization and a separate decoder, can achieve unified multimodal capabilities that continuous diffusion has not yet demonstrated.
+    \item \textbf{Distillation connections:} The diffusion decoder distillation (50-step $\to$ 8-step with negligible quality loss) parallels the distillation themes in our TESSY review (Review \#34) and the broader efficiency concerns in our Topic 1 reviews.
+    \item \textbf{Inference acceleration:} The SPRINT mechanism (modality-aware KV cache pruning + non-uniform unmasking) connects to our reviews of IndexCache, LookaheadKV, and TriAttention on efficient attention and KV cache management.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Semantic--Reconstructive Token Fusion for Diffusion LLMs}
+
+\paragraph{Gap.}
+LLaDA2.0-Uni's core trade-off is explicit: SigLIP-VQ tokens excel at understanding but lack pixel-level fidelity, requiring a separate 6B decoder to bridge the gap. This two-stage design introduces latency and prevents the backbone from directly reasoning about fine-grained visual details (e.g., text rendering scores 31.23 vs.\ 69.86 for specialized generators). Prior approaches using reconstruction-only tokens (Lumina-DiMOO) suffer the inverse problem.
+
+\paragraph{Approach.}
+Design a dual-codebook VQ tokenizer that simultaneously encodes semantic and reconstructive information through two parallel quantization heads sharing a common encoder. During backbone processing, semantic codes drive reasoning; during generation, both code streams are fused and fed to a lightweight decoder. A contrastive alignment loss ensures semantic codes remain VLM-compatible while reconstructive codes preserve pixel detail. This could be formalized as a product quantization scheme where the first $d_s$ dimensions are aligned with SigLIP embeddings and the remaining $d_r$ dimensions with a pixel reconstruction objective.
+
+\paragraph{Feasibility.}
+Building on established product/residual VQ techniques and the X-Omni architecture that LLaDA2.0-Uni already extends. The SigLIP-VQ codebook (16,384 tokens) provides a strong semantic baseline; augmenting it with a reconstructive codebook of similar size is architecturally straightforward. Main risk: the two objectives may interfere during joint training, requiring careful loss balancing---similar to challenges addressed in our reviews of hybrid training objectives (DARE, Review \#27).
+
+\subsection{Direction 2: RL-Based Preference Optimization for Unified Diffusion Models}
+
+\paragraph{Gap.}
+The authors explicitly acknowledge that ``optimizing RL performance remains a challenge'' for unified dLLMs. Current training relies entirely on supervised fine-tuning. Unlike AR models where RLHF/DPO/GRPO have been extensively explored (our Reviews \#1, \#5, \#6, \#22, \#25, \#37), applying preference optimization to discrete diffusion models with block-wise attention is largely unexplored. The challenge is fundamental: standard RL objectives assume sequential token generation, while diffusion models generate all tokens through iterative denoising.
+
+\paragraph{Approach.}
+Extend the DARE framework (Review \#27, which applied alignment to discrete diffusion) to the multimodal unified setting. Key adaptations: (1) define preference pairs over both understanding responses and generated images, using a multimodal reward model that scores semantic accuracy and visual quality jointly; (2) formulate a diffusion-aware policy gradient that operates on the denoising trajectory rather than the autoregressive generation path---the reward signal is backpropagated through the full denoising chain using the ELBO decomposition; (3) apply the TEMPO-style EM framework (Review \#37) for test-time adaptation, where the E-step recalibrates a multimodal critic on labeled examples and the M-step refines the diffusion policy on unlabeled test data.
+
+\paragraph{Feasibility.}
+DARE demonstrated that discrete diffusion alignment is feasible, though only for text. Extending to multimodal requires a suitable reward model (GenRM-style models from our Review \#1 could serve as a foundation) and careful handling of the image generation reward signal. The TEMPO EM framework provides a principled test-time adaptation mechanism. Main risk: the denoising trajectory is much longer than an AR sequence, potentially making credit assignment difficult.
+
+\subsection{Direction 3: Continual Capability Expansion for Unified Diffusion Models}
+
+\paragraph{Gap.}
+LLaDA2.0-Uni's three-stage training pipeline processes 390B tokens and requires retraining from scratch to add new capabilities (e.g., video generation, 3D understanding, new languages). This is at odds with real-world deployment where models must continuously acquire new modalities and skills without forgetting existing ones. Our continual learning reviews (PersonaVLM's structured memory, Token's Dilemma's drift-aware MoE, Abstraction-based continual learning) have explored this for AR models, but continual learning for diffusion LLMs is entirely unexplored.
+
+\paragraph{Approach.}
+Leverage LLaDA2.0-Uni's MoE architecture for modality-specific expert allocation during continual expansion. When a new capability is added (e.g., video understanding), new experts are initialized while existing experts are frozen with elastic weight consolidation (EWC) applied to the shared routing parameters. The SigLIP-VQ codebook can be expanded through codebook growing---new tokens are added for the new modality while existing token embeddings are frozen. The block-wise attention scheme naturally accommodates new block types (e.g., video frame blocks) without disrupting text/image blocks. Drawing from PersonaVLM's PEM mechanism (Review \#35), a cosine-decay EMA could track the importance of each expert across training phases, preventing catastrophic forgetting of established capabilities.
+
+\paragraph{Feasibility.}
+The MoE architecture is inherently modular, making expert-level isolation feasible. Codebook expansion has been explored in VQ-VAE literature. The main challenge is ensuring that the block-wise attention scheme remains effective as new block types are introduced---cross-modality attention patterns may require relearning. The Token's Dilemma approach (Review \#21, drift-aware MoE for continual VLMs) provides a direct blueprint for implementing drift-aware routing in the diffusion LLM context.
+
+\section{Conclusion}
+
+LLaDA2.0-Uni represents a significant advance for discrete diffusion language models, demonstrating that the unified diffusion paradigm can achieve competitive multimodal understanding (on par with specialized VLMs like Qwen2.5-VL-7B) while setting new state-of-the-art results for unified models on generation (GenEval 0.89, UniGenBench 79.63) and editing (MICo-Bench 47.1). The key insight---replacing reconstruction-based VQ tokens with semantic SigLIP-VQ tokens and delegating pixel reconstruction to a separate decoder---resolves the fundamental tokenizer trade-off that limited prior discrete diffusion unified models. Combined with block-wise attention, mask token reweighting, complementary masking, and SPRINT inference acceleration, LLaDA2.0-Uni establishes the discrete diffusion paradigm as a viable alternative to AR+Diffusion hybrids for unified multimodal modeling. The remaining gaps (text rendering, complex reasoning vs.\ BAGEL, RL integration) define clear research frontiers for the diffusion LLM community.
+
+\begin{thebibliography}{20}
+
+\bibitem{llada2uni}
+Bie, T., Chen, H., Chen, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{langflow}
+Ye, J., et al.
+\newblock LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling.
+\newblock \emph{arXiv preprint arXiv:2604.11748}, 2026.
+
+\bibitem{dare}
+Liu, S., et al.
+\newblock DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.
+\newblock \emph{arXiv preprint arXiv:2604.04215}, 2026.
+
+\bibitem{dmax}
+Li, Y., et al.
+\newblock DMax: Aggressive Parallel Decoding for dLLMs.
+\newblock \emph{arXiv preprint arXiv:2604.08302}, 2026.
+
+\bibitem{s2d2}
+Chen, Z., et al.
+\newblock S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.
+\newblock \emph{arXiv preprint arXiv:2603.25702}, 2026.
+
+\bibitem{cubic}
+Liu, Z., et al.
+\newblock Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens.
+\newblock \emph{arXiv preprint arXiv:2603.19232}, 2026.
+
+\bibitem{gensnap}
+Campbell, A., et al.
+\newblock Generalized Discrete Diffusion from Snapshots.
+\newblock \emph{arXiv preprint arXiv:2603.21342}, 2026.
+
+\bibitem{tessy}
+Yang, C., et al.
+\newblock TESSY: Teacher-Student Cooperation Framework for Reasoning Model Fine-Tuning.
+\newblock \emph{arXiv preprint arXiv:2604.14164}, 2026.
+
+\bibitem{indexcache}
+Zhang, Y., et al.
+\newblock IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse.
+\newblock \emph{arXiv preprint arXiv:2603.12201}, 2026.
+
+\bibitem{lookaheadkv}
+Wang, X., et al.
+\newblock LookaheadKV: Fast and Accurate KV Cache Eviction.
+\newblock \emph{arXiv preprint arXiv:2603.10899}, 2026.
+
+\bibitem{triattention}
+Li, Z., et al.
+\newblock TriAttention: Efficient Long Reasoning with Trigonometric KV Compression.
+\newblock \emph{arXiv preprint arXiv:2604.04921}, 2026.
+
+\bibitem{personavlm}
+Chen, Y., et al.
+\newblock PersonaVLM: Long-Term Personalized Multimodal LLMs.
+\newblock \emph{arXiv preprint arXiv:2604.13074}, 2026.
+
+\bibitem{tokendilemma}
+Wang, H., et al.
+\newblock On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large VLMs.
+\newblock \emph{arXiv preprint arXiv:2603.27481}, 2026.
+
+\bibitem{tempo}
+Zhang, Q., et al.
+\newblock TEMPO: Scaling Test-time Training for Large Reasoning Models.
+\newblock \emph{arXiv preprint arXiv:2604.19295}, 2026.
+
+\bibitem{genrm}
+Zhang, Y., et al.
+\newblock Beyond Length Scaling: Synergizing Breadth and Depth for Generative Reward Models.
+\newblock \emph{arXiv preprint arXiv:2603.01571}, 2026.
+
+\end{thebibliography}
+
+\end{document}
