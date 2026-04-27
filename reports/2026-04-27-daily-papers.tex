@@ -1,0 +1,211 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: LLaTiSA --- Difficulty-Stratified\\Time Series Reasoning via Visual Perception}
+\author{Internbot --- Automated Research Review}
+\date{April 27, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} LLaTiSA: Towards Difficulty-Stratified Time Series Reasoning from Visual Perception to Semantics \\
+\textbf{Authors:} Yueyang Ding, HaoPeng Zhang, Rui Dai, Yi Wang, Tianyu Zong, Kaikui Liu, Xiangxiang Chu \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.17295}{2604.17295} \\
+\textbf{Topics:} Time Series Reasoning, Foundation Models for Time Series, Vision-Language Models
+
+\subsection{Problem}
+
+Time series reasoning (TSR) with large language models faces two critical bottlenecks:
+
+\begin{itemize}
+    \item \textbf{Absence of principled difficulty taxonomies.} Existing TSR benchmarks (TSQA, BEDTime, TimeMCQ2) are fragmented: they either map traditional analytical tasks to text formats or emphasize scenario-agnostic patterns. Virtually all overlook the fundamental ability to read numerical values at specific indices---a prerequisite for any higher-order reasoning. Without a compositional difficulty hierarchy, one cannot diagnose \emph{where} models fail.
+    \item \textbf{Reliability deficits in evaluation.} Current benchmarks suffer from semantic ambiguities in labels, low-fidelity question-answer pairs, and absent reasoning chains. Without verified Chain-of-Thought (CoT) trajectories, it is impossible to distinguish perceptual failures (inability to read values) from genuine reasoning deficits.
+\end{itemize}
+
+Separately, the modality choice for time series input to LLMs remains unsettled: text serialization struggles with numerical precision and context length; single-image plots capture global patterns but lose local granularity; dedicated time series encoders (MLP, Q-former) require specialized architectures with limited generalization.
+
+\subsection{Method}
+
+LLaTiSA contributes a cognitive taxonomy, a large-scale dataset, and a dual-view VLM approach with curriculum training.
+
+\paragraph{Four-Level Cognitive Taxonomy.}
+Grounded in Bloom's Taxonomy (cognitive progression) and Bertin's Levels of Reading (visual perception), the hierarchy decomposes TSR into:
+\begin{itemize}
+    \item \textbf{L1 --- Numerical Read-out:} Point-level value retrieval and temporal indexing (min/max localization, start/end values, key event positions).
+    \item \textbf{L2 --- Pattern Perception:} Multi-scale temporal pattern identification, split into local pattern differentiation (morphological cues like spikes vs.\ smooth drops) and global pattern differentiation (trend recognition across entire series).
+    \item \textbf{L3 --- Semantic Reasoning:} Domain-specific interpretation integrating pattern recognition with numerical grounding and contextual knowledge. Distractors are engineered to be erroneous in numerical precision, temporal patterns, or contextual consistency.
+    \item \textbf{L4 --- Predictive Inference:} Successor identification---selecting the correct continuation from a pool of four candidate patches.
+\end{itemize}
+
+\paragraph{HiTSR Dataset (83k+ samples).}
+L1 contains 30,000 synthetic samples with controlled attributes (trend, seasonality, frequency, noise, spikes, turning points). L2 contains 50,703 synthetic samples with pattern differentiation questions generated via GPT-5 and cross-validated for ambiguity. L3 contains 3,121 real-world samples from ETT, Weather, Exchange Rate, Traffic, Electricity, and large-scale repositories (UTSD, Monash, Time-MMD). All CoT trajectories follow verified ``Perception-to-Reasoning'' logic with 10\% human-audited holdouts.
+
+\paragraph{Dual-View Visual Input.}
+The key design is feeding the VLM \emph{two} complementary visual inputs:
+\begin{enumerate}
+    \item A \textbf{time series plot} for macroscopic pattern inspection.
+    \item A \textbf{numerical table image} rendering data as a structured index-value table with precision-calibrated formatting for point-accurate verification.
+\end{enumerate}
+This bridges qualitative visual intuition and quantitative numerical precision without requiring text serialization or custom encoders. For L4 tasks, candidate predictions are rendered as a $2 \times 2$ grid of subplots.
+
+\paragraph{Curriculum Fine-Tuning.}
+Three-stage sequential SFT on Qwen3-VL-8B-Instruct:
+\begin{itemize}
+    \item \textbf{Stage 1:} L1 data (30k samples) --- numerical grounding.
+    \item \textbf{Stage 2:} L2 data (50.7k samples) --- pattern perception.
+    \item \textbf{Stage 3:} L3 data (3.1k samples) --- semantic reasoning.
+\end{itemize}
+An optional L4 extension (4,993 samples, LR $= 10^{-5}$, 2 epochs) adds predictive inference. The sequential curriculum is critical: joint training (shuffling all levels) drops L3 OOD accuracy by 10 percentage points, as the model fails to internalize compositional reasoning without progressive difficulty staging.
+
+\subsection{Results}
+
+LLaTiSA establishes state-of-the-art across all TSR levels.
+
+\paragraph{Out-of-Distribution Evaluation.}
+On held-out OOD test sets, LLaTiSA (plot + numerical table) achieves: L1 Min/Max accuracy 86.8\% (vs.\ GPT-4o's best 54.2\%), L2 Local pattern 75.6\% (vs.\ GPT-4o vision 72.2\%), L2 Global 97.5\% (vs.\ GPT-4o 96.7\%), and L3 semantic reasoning 67.0\% (vs.\ best baseline ChatTS 59.0\%). The gains are especially dramatic at L1, where even GPT-4o in vision-only mode achieves just 2.4\% on Min/Max---plots alone are catastrophically insufficient for numerical read-out.
+
+\paragraph{Encoding Strategy Comparison.}
+Under identical curriculum training, the dual-view visual approach (plot + numerical table) consistently outperforms all alternatives: text with indices (L3 OOD: 47.0\%), text without indices (43.0\%), plot only (62.0\%), numerical table only (32.0\%), and plot + text hybrids (57--60\%). The dual-view visual design achieves 67.0\%, demonstrating that complementary visual inputs are superior to any single modality or vision-text combination.
+
+\paragraph{Forecasting (L4).}
+After L4-specific fine-tuning, LLaTiSA reaches 83.3\% prediction accuracy, surpassing Claude-3.5-Sonnet (82.2\%), GPT-4.1 (79.1\%), and GPT-4o (75.6--78.3\%). Without L4 fine-tuning, the model achieves only 54.2\%, confirming that predictive capability requires explicit training.
+
+\paragraph{Real-World ECG Application.}
+On clinical ECG interpretation, LLaTiSA achieves superior lead coverage (84.0\% vs.\ GEM's 71.1\%) and lead accuracy (53.0\% vs.\ 46.4\%) using only 2.5\% of GEM's training data (30k vs.\ 1.186M samples). Diagnostic accuracy is lower (62.8\% vs.\ 87.2\%), indicating room for improvement in end-to-end diagnostic reasoning while fine-grained perception is already strong.
+
+\paragraph{Ablation Highlights.}
+CoT removal degrades L3 OOD by 12 percentage points (67.0\% $\to$ 55.0\%) and ECG OOD by 7.9 points. The extended curriculum study shows monotonic L3 OOD improvement with each stage: L1-only $\to$ 47.0\%, L1$\to$L2 $\to$ 56.0\%, L1$\to$L2$\to$L3 $\to$ 67.0\%. Training only on L2 catastrophically forgets L1 (accuracy drops to 10--14\%), confirming the necessity of sequential curriculum.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Understanding-centric:} The main contribution focuses on L1--L3 (understanding); L4 (generation/prediction) is only an appendix exploration. Full generative time series forecasting is not addressed.
+    \item \textbf{No RL fine-tuning:} The authors leave reinforcement learning on HiTSR as future work, noting that reward design is challenging when simultaneously supervising numerical precision and semantic logic.
+    \item \textbf{Diagnostic accuracy gap:} On ECG tasks, end-to-end diagnostic accuracy (62.8\%) lags behind domain-specialized models (87.2\%), despite superior fine-grained metrics.
+    \item \textbf{Cold-start and data efficiency:} The curriculum approach requires 83k+ samples across levels; robust initialization strategies for low-resource settings remain unexplored.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to \textbf{Topic 5: Time Series Forecasting} and connects to multiple previously reviewed works:
+
+\begin{itemize}
+    \item \textbf{Time series foundations:} Our Timer-S1 review (Review \#4) examined billion-scale time series foundation models with serial scaling, and QuitoBench (Review \#23) benchmarked open time series forecasting. LLaTiSA extends this line by introducing a principled cognitive hierarchy for evaluating \emph{reasoning} about time series, not just forecasting accuracy.
+    \item \textbf{Curriculum and continual learning:} The three-stage sequential curriculum directly parallels continual learning themes from our Topic 3 reviews. The finding that training only on L2 catastrophically forgets L1 (14\% accuracy) echoes catastrophic forgetting in PersonaVLM (Review \#35) and Abstraction-based CL (Review \#17). The curriculum can be viewed as a controlled continual learning setup where task difficulty increases progressively.
+    \item \textbf{Visual reasoning for diffusion models:} The dual-view input design (plot + table image) resonates with LLaDA2.0-Uni's (Review \#38) semantic tokenization approach---both work by providing complementary visual representations to overcome single-modality limitations.
+    \item \textbf{RL integration gap:} The authors' identified challenge of RL fine-tuning for TSR connects to our extensive RL reviews (TEMPO, KnowRL, FIPO, BandPO). Designing verifiable rewards that capture both numerical precision and semantic correctness could benefit from TEMPO's EM-based approach (Review \#37).
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: RL-Based Reward Design for Hierarchical Time Series Reasoning}
+
+\paragraph{Gap.}
+LLaTiSA explicitly identifies RL fine-tuning as future work, noting ``the complexity of reward design'' for simultaneously supervising numerical precision and semantic logic. Current SFT training is limited to the quality and coverage of the HiTSR dataset. Verifiable rewards for time series reasoning are fundamentally harder than for math (where answer correctness is binary), because TSR requires multi-granularity verification: exact numerical matching at L1, pattern classification at L2, and contextual consistency at L3.
+
+\paragraph{Approach.}
+Design a hierarchical verifiable reward function that decomposes into level-specific components: $R = \lambda_1 R_{\mathrm{L1}} + \lambda_2 R_{\mathrm{L2}} + \lambda_3 R_{\mathrm{L3}}$, where $R_{\mathrm{L1}}$ uses numerical tolerance matching (rewarding answers within $\epsilon$ of ground truth), $R_{\mathrm{L2}}$ uses pattern classifier agreement (a lightweight CNN verifier trained on HiTSR-L2), and $R_{\mathrm{L3}}$ uses semantic entailment checking against verified CoT trajectories. The TEMPO framework (Review \#37) provides a natural test-time adaptation mechanism: the E-step recalibrates the level-specific reward components on a small labeled calibration set, while the M-step refines the policy on unlabeled test time series. The curriculum structure of LLaTiSA maps naturally onto a staged RL schedule where each stage's reward focuses on the corresponding level.
+
+\paragraph{Feasibility.}
+The HiTSR dataset provides ground-truth annotations at all levels, enabling verifiable reward computation. The level-specific reward decomposition avoids the single-reward bottleneck. Main risk: reward hacking at L1 (memorizing numerical patterns without genuine perception)---addressable via OOD evaluation and the reward hacking analysis from our review series. GRPO or BandPO (Reviews \#5, \#22) provide suitable policy optimization algorithms.
+
+\subsection{Direction 2: Continual Modality Expansion for Time Series Foundation Models}
+
+\paragraph{Gap.}
+LLaTiSA demonstrates that dual-view visual input (plot + table) outperforms all alternatives, but the approach is limited to two fixed visual representations. Real-world time series analysis often benefits from additional modalities: spectrograms for frequency-domain analysis, wavelet decompositions for multi-scale patterns, correlation heatmaps for multivariate dependencies, and even audio sonification for anomaly detection. Adding these modalities post-hoc risks catastrophic forgetting of the carefully staged L1$\to$L2$\to$L3 curriculum.
+
+\paragraph{Approach.}
+Extend LLaTiSA's curriculum with a continual modality expansion framework. New visual representations (spectrograms, wavelets, heatmaps) are introduced as additional ``views'' using an elastic weight consolidation (EWC) mechanism on the VLM's attention layers to preserve existing dual-view capabilities. Drawing from Token's Dilemma (Review \#21), drift-aware routing in a lightweight MoE adapter layer routes different query types to modality-specialized experts: plot-experts for global patterns, table-experts for numerical precision, spectrogram-experts for frequency analysis. The PersonaVLM PEM mechanism (Review \#35) with cosine-decay EMA could track modality importance across training phases.
+
+\paragraph{Feasibility.}
+Qwen3-VL already handles multiple images natively. The MoE adapter adds minimal parameters. Main challenge: ensuring cross-modality consistency---the model should not give contradictory answers when reasoning from plot vs.\ spectrogram. A cross-view consistency loss could enforce agreement across modality-specific predictions.
+
+\subsection{Direction 3: Diffusion-Based Time Series Forecasting with Perception-Grounded Generation}
+
+\paragraph{Gap.}
+LLaTiSA's L4 (predictive inference) is limited to selecting among four candidate patches---a discriminative framing rather than true generative forecasting. Meanwhile, diffusion-based time series forecasting models generate predictions but lack the perceptual grounding that LLaTiSA demonstrates is essential. The perception-to-reasoning hierarchy (L1$\to$L2$\to$L3$\to$L4) suggests that accurate forecasting should be \emph{conditioned} on explicit perceptual understanding, not performed as a black-box generation task.
+
+\paragraph{Approach.}
+Build a perception-conditioned diffusion forecaster that chains LLaTiSA's reasoning with a discrete diffusion generation head. The pipeline: (1) LLaTiSA's L1--L3 stages produce a structured perception summary (trend, seasonality, anomalies, domain context) as a natural language description; (2) this description conditions a discrete diffusion decoder (following the block-wise masking approach from LLaDA2.0-Uni, Review \#38) that generates future time series values through iterative denoising. The perception summary acts as a semantic bottleneck that regularizes generation---the model cannot hallucinate patterns inconsistent with its own perceptual analysis. Training uses the S2D2 self-speculative decoding approach (Review \#19) for efficient inference.
+
+\paragraph{Feasibility.}
+Timer-S1 (Review \#4) demonstrated billion-scale time series foundation models; combining its forecasting architecture with LLaTiSA's perceptual hierarchy is architecturally feasible. The discrete diffusion decoder from LLaDA2.0-Uni provides a proven generation mechanism. Main risk: the natural language bottleneck may lose numerical precision during perception-to-generation transfer---mitigable by including the numerical table image as an additional conditioning signal for the decoder.
+
+\section{Conclusion}
+
+LLaTiSA makes a foundational contribution to time series reasoning by introducing a principled four-level cognitive taxonomy (L1--L4) that decomposes the problem from numerical read-out through pattern perception to semantic reasoning and prediction. The dual-view visual input design (plot + numerical table image) is elegantly simple yet highly effective, achieving 86.8\% L1 accuracy where GPT-4o manages only 2.4\% in vision-only mode and 54.2\% with text augmentation. The curriculum fine-tuning strategy (L1$\to$L2$\to$L3) demonstrates clear compositional benefits, with each stage building on the prior: L3 OOD accuracy improves monotonically from 47.0\% (L1-only) to 67.0\% (full curriculum). The paper's most impactful finding is that time series reasoning is fundamentally compositional---models that skip foundational perception fail at higher-level reasoning regardless of their scale. This insight, combined with the 83k-sample HiTSR dataset with verified CoT trajectories, provides a rigorous foundation for future work on time series foundation models.
+
+\begin{thebibliography}{15}
+
+\bibitem{llatisa}
+Ding, Y., Zhang, H., Dai, R., et al.
+\newblock LLaTiSA: Towards Difficulty-Stratified Time Series Reasoning from Visual Perception to Semantics.
+\newblock \emph{arXiv preprint arXiv:2604.17295}, 2026.
+
+\bibitem{timers1}
+Liu, M., et al.
+\newblock Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling.
+\newblock \emph{arXiv preprint arXiv:2603.04791}, 2026.
+
+\bibitem{quitobench}
+Chen, Y., et al.
+\newblock QuitoBench: A High-Quality Open Time Series Forecasting Benchmark.
+\newblock \emph{arXiv preprint arXiv:2603.26017}, 2026.
+
+\bibitem{tempo}
+Zhang, Q., et al.
+\newblock TEMPO: Scaling Test-time Training for Large Reasoning Models.
+\newblock \emph{arXiv preprint arXiv:2604.19295}, 2026.
+
+\bibitem{personavlm}
+Chen, Y., et al.
+\newblock PersonaVLM: Long-Term Personalized Multimodal LLMs.
+\newblock \emph{arXiv preprint arXiv:2604.13074}, 2026.
+
+\bibitem{tokendilemma}
+Wang, H., et al.
+\newblock On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large VLMs.
+\newblock \emph{arXiv preprint arXiv:2603.27481}, 2026.
+
+\bibitem{abstraction}
+Wang, Z., et al.
+\newblock Abstraction as a Memory-Efficient Inductive Bias for Continual Learning.
+\newblock \emph{arXiv preprint arXiv:2603.17198}, 2026.
+
+\bibitem{llada2uni}
+Bie, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{s2d2}
+Chen, Z., et al.
+\newblock S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.
+\newblock \emph{arXiv preprint arXiv:2603.25702}, 2026.
+
+\bibitem{knowrl}
+Li, X., et al.
+\newblock KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance.
+\newblock \emph{arXiv preprint arXiv:2604.12627}, 2026.
+
+\bibitem{bandpo}
+Zhang, Y., et al.
+\newblock BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM RL.
+\newblock \emph{arXiv preprint arXiv:2603.04918}, 2026.
+
+\bibitem{fipo}
+Li, Z., et al.
+\newblock FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2603.19835}, 2026.
+
+\end{thebibliography}
+
+\end{document}
