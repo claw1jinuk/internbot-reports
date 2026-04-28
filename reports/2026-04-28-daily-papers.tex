@@ -1,0 +1,235 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Memanto --- Typed Semantic Memory\\with Information-Theoretic Retrieval for Long-Horizon Agents}
+\author{Internbot --- Automated Research Review}
+\date{April 28, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents \\
+\textbf{Authors:} Seyed Moein Abtahi, Rasa Rahnema, Hetkumar Patel, Neel Patel, Majid Fekri, Tara Khani \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.22085}{2604.22085} \\
+\textbf{Topics:} Agent Memory Systems, Long-Horizon Agents, Continual Learning, Information-Theoretic Retrieval
+
+\subsection{Problem}
+
+As LLMs transition from stateless single-turn inference to persistent multi-session autonomous agents, memory becomes the primary architectural bottleneck. Current agent memory systems suffer from six specific failure modes:
+
+\begin{itemize}
+    \item \textbf{Passive context injection:} Systems inject a static context blob at conversation start rather than allowing on-demand querying. This fails when context exceeds the window, contains irrelevant content, or misses recently stored facts.
+    \item \textbf{No temporal awareness:} Memories lack decay signals---a deadline from yesterday has different urgency than a preference from six months ago.
+    \item \textbf{No provenance tracking:} Systems cannot distinguish between explicitly stated facts, inferred patterns, and potentially outdated information.
+    \item \textbf{Flat, untyped stores:} Episodic, semantic, and procedural memories are flattened into a single undifferentiated store, destroying retrieval semantics.
+    \item \textbf{No contradiction handling:} When new information conflicts with existing memory, systems silently overwrite or create inconsistency, producing ``constraint drift''---gradual erosion of the agent's world model coherence.
+    \item \textbf{High ingestion overhead (``The Memory Tax''):} Hybrid graph+vector systems (Mem0, Zep, A-MEM) require LLM-mediated entity extraction, graph schema maintenance, and multi-query retrieval, producing multi-second write latencies and compounding costs.
+\end{itemize}
+
+\subsection{Method}
+
+Memanto addresses all six limitations through typed semantic memory, information-theoretic retrieval, and architectural simplicity.
+
+\paragraph{Six Design Desiderata.}
+The paper formalizes requirements for production agentic memory: (D1) queryable on demand, not pre-injected; (D2) temporally aware with decay; (D3) confidence and provenance tracking; (D4) typed and hierarchical storage; (D5) contradiction-aware resolution; (D6) zero-overhead ingestion with no LLM calls at write time.
+
+\paragraph{Typed Semantic Memory Schema (13 Categories).}
+Extending ENGRAM's 3-type approach (episodic/semantic/procedural), Memanto implements 13 built-in memory types: \emph{fact}, \emph{preference}, \emph{decision}, \emph{commitment}, \emph{goal}, \emph{event}, \emph{instruction}, \emph{relationship}, \emph{context}, \emph{learning}, \emph{observation}, \emph{error}, and \emph{artifact}. Each type carries distinct retrieval semantics and implicit priority/decay signals. The typing enables type-filtered retrieval---agents can query specifically for commitments, decisions, or errors rather than searching an undifferentiated store.
+
+\paragraph{Moorcheh Information-Theoretic Search Engine.}
+The retrieval backbone introduces three algorithmic innovations:
+\begin{itemize}
+    \item \textbf{Maximally Informative Binarization (MIB):} Compresses high-dimensional embedding vectors into compact binary representations with $32\times$ compression and no measurable retrieval-relevant signal loss. Eliminates index construction entirely, enabling instant write-to-search availability (satisfying D6).
+    \item \textbf{Efficient Distance Metric (EDM):} Replaces cosine similarity with an information-theoretic distance that scores memory chunks by their \emph{ability to reduce uncertainty in the query context}, rather than geometric proximity in embedding space.
+    \item \textbf{Information-Theoretic Score (ITS):} A normalized $[0, 1]$ relevance score quantifying the decision-theoretic value of each chunk. ITS enables deterministic, threshold-based retrieval: the same query always produces the same results.
+\end{itemize}
+Independent MAIR benchmark validation shows 64--74\% NDCG@10 at 9.6\,ms distance calculation latency (vs.\ 37--86\,ms for PGVector/Qdrant), with 2,000+ QPS and 6.6$\times$ end-to-end speedup over Pinecone + Cohere reranking.
+
+\paragraph{Conflict Resolution.}
+When a new memory semantically contradicts an existing memory of the same type (detected via similarity matching against the agent's namespace), Memanto notifies the agent and offers three resolution options: \emph{supersede} (replace), \emph{retain} (keep old), or \emph{annotate} (preserve both with conflict flag). Supersession is non-destructive---old entries are marked but retained for temporal reconstruction.
+
+\paragraph{Temporal Versioning.}
+Three query modalities: \emph{as-of} (retrieve state at a specific historical timestamp), \emph{changed-since} (all memories modified within a time range), and \emph{current-only} (non-superseded ground-truth state).
+
+\paragraph{Architectural Complexity.}
+The paper formalizes complexity as $C = B_{\mathrm{graph}} + B_{\mathrm{llm\_ingest}} + B_{\mathrm{multi\_query}} + B_{\mathrm{recursive}}$ where each $B \in \{0, 1\}$. Memanto scores $0/4$; Hindsight (the accuracy leader) scores $4/4$; Mem0 (graph) and Zep score $3/4$.
+
+\subsection{Results}
+
+\paragraph{Benchmark Performance.}
+On LongMemEval (500 curated questions, $\sim$115K tokens across $\sim$50 sessions) and LoCoMo (multi-modal dialogue, up to 35 sessions and 300 turns):
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{System} & \textbf{LoCoMo} & \textbf{LongMemEval} & \textbf{Architecture} & \textbf{Complexity} \\
+\midrule
+\textbf{Memanto} & \textbf{87.1\%} & \textbf{89.8\%} & Vector Only & \textbf{0/4} \\
+Hindsight & 89.6\% & 91.4\% & Hybrid (Reflection) & 4/4 \\
+EmergenceMem & -- & 86.0\% & Hybrid (Graph+Vec) & -- \\
+Zep & 75.1\% & 71.2\% & Hybrid (Graph+Vec) & 3/4 \\
+Letta & 74.0\% & -- & Local Filesystem & 2/4 \\
+Mem0 (graph) & 68.4\% & -- & Hybrid (Graph+Vec) & 3/4 \\
+Mem0 (vector) & 66.9\% & -- & Vector Only & 1/4 \\
+Full Context & 72.9\% & 60.2\% & Full Context & N/A \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Memanto achieves within 1.6--2.5\,pp of Hindsight while operating at complexity $0/4$ vs.\ $4/4$, surpassing Mem0 (vector) by +20.2\,pp on LoCoMo.
+
+\paragraph{Progressive Ablation (Key Finding).}
+A five-stage ablation from naive baseline to final system reveals the dominant lever:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Intervention} & \textbf{LMEval $\Delta$} & \textbf{LoCoMo $\Delta$} & \textbf{Cumulative LMEval} \\
+\midrule
+Baseline ($k{=}10$, $\tau{=}0.15$) & -- & -- & 56.6\% \\
+Recall expansion ($k{=}40$, $\tau{=}0.10$) & \textbf{+20.4\,pp} & \textbf{+6.6\,pp} & 77.0\% \\
+Prompt optimization & +2.2\,pp & +0.1\,pp & 79.2\% \\
+Maximum recall ($k{=}100$, $\tau{=}0.05$) & +5.8\,pp & +3.4\,pp & 85.0\% \\
+Model upgrade (Gemini 3) & +4.8\,pp & +0.8\,pp & 89.8\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Recall expansion contributes the single largest improvement (+20.4\,pp), validating the ``recall over precision'' principle: providing LLMs with broader, noisier candidate sets and relying on in-context reasoning to filter outperforms narrow, high-precision retrieval windows. Accuracy plateaus above $k{=}60$ with an inflection at $k{=}40$.
+
+\paragraph{Operational Cost.}
+For 1,000 daily memory operations per agent: Memanto costs \$0.50/day (0 LLM calls per write, $<$10\,ms ingest latency) vs.\ Mem0 (graph) at \$2.32/day (2+ LLM calls per write, $\sim$2\,s ingest latency)---a \$662/agent annual savings.
+
+\paragraph{LongMemEval Category Breakdown.}
+Single-session assistant: 100.0\%, single-session user: 95.7\%, preference: 93.3\%, knowledge update: 93.6\%, temporal reasoning: 88.0\%, multi-session: 81.2\%. Multi-session remains the hardest category, requiring cross-session information synthesis.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Retrieval engine as black box:} The core Moorcheh ITS formulations (MIB, EDM) are deferred to a companion paper, making independent verification difficult from this paper alone.
+    \item \textbf{Manual type assignment:} Memory types must be user-specified at write time; automated classification is planned but not yet implemented.
+    \item \textbf{Conflict resolution untested:} Neither benchmark systematically tests contradictory memories, so the conflict resolution mechanism---a key architectural contribution---lacks empirical validation.
+    \item \textbf{Conversational benchmarks only:} Non-conversational agentic workflows (research agents, code generation, multi-agent coordination) remain untested.
+    \item \textbf{Benchmark saturation:} Manual inspection found $\sim$5--7\% labeling inconsistencies in both benchmarks, establishing a ceiling independent of architecture quality.
+    \item \textbf{No multi-agent memory sharing:} Namespace architecture isolates agent memories; shared memory with access control is under development.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to \textbf{Topic 3: Continual Learning for LLM Agents} and connects to multiple previously reviewed works:
+
+\begin{itemize}
+    \item \textbf{Structured memory architectures:} PersonaVLM (Review \#35) introduced multi-type memory (core, semantic, episodic, procedural) with PEM for personality tracking. Memanto extends this concept to 13 typed categories with formal conflict resolution and temporal versioning. Both share the insight that typed memory outperforms flat stores, but Memanto operates at the system level rather than within model weights.
+    \item \textbf{Agent self-evolution:} Agent-World (Review \#36) demonstrated self-evolving diagnostic loops for agent training. Memanto's \emph{learning}, \emph{observation}, and \emph{error} memory types could serve as the persistent substrate for such self-evolving loops---agents accumulate lessons across sessions rather than losing them at context boundaries.
+    \item \textbf{Continual learning and catastrophic forgetting:} The sequential curriculum finding from LLaTiSA (Review \#39) showed that training only on higher-level tasks catastrophically forgets lower-level capabilities. Memanto's non-destructive supersession addresses an analogous problem: new memories do not erase old ones, enabling full temporal reconstruction---the memory analogue of preventing catastrophic forgetting.
+    \item \textbf{Efficiency--accuracy trade-off:} The ``recall over precision'' principle (broad retrieval + LLM filtering $>$ narrow precision retrieval) parallels the efficiency themes in our Topic 1 reviews. The 32$\times$ binary compression in Moorcheh connects to our quantization reviews (Codebook Optimisation, Review \#30).
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Automated Memory Typing via RL with Retrieval Reward}
+
+\paragraph{Gap.}
+Memanto requires user-specified memory type assignment at write time---a notable gap that the authors acknowledge. Mistyping a ``commitment'' as a ``fact'' changes its retrieval priority and decay behavior, potentially causing the agent to miss deadlines or ignore obligations. Manual typing is impractical for autonomous agents processing thousands of memory operations daily.
+
+\paragraph{Approach.}
+Train a lightweight memory type classifier using reinforcement learning with retrieval-based rewards. The classifier takes a memory text and conversation context as input and predicts one of 13 types. The reward signal is \emph{downstream retrieval utility}: when a correctly typed memory is successfully retrieved and used to answer a future query (verified by the ITS score and answer correctness), the classifier receives a positive reward. Mistyped memories that are retrieved but irrelevant (or not retrieved when needed) receive negative rewards. This can leverage the GRPO framework (from our RL reviews) with the ITS score as a verifiable reward signal. The classifier could be a small adapter on the agent's backbone, adding negligible latency to satisfy Memanto's D6 (zero-overhead ingestion). Drawing from TESSY's style/capability decomposition (Review \#34), the classifier could learn to distinguish ``what the memory says'' (content) from ``how the memory should be used'' (type).
+
+\paragraph{Feasibility.}
+The 13-type schema provides clear discrete labels. Memanto's benchmark data (LongMemEval, LoCoMo) contains naturally typed memories that can serve as training signal. Main risk: reward sparsity---the utility of correct typing may only become apparent many turns later, requiring long-horizon credit assignment. TEMPO's EM approach (Review \#37) could help by recalibrating the typing reward model periodically.
+
+\subsection{Direction 2: Continual Memory Consolidation via Diffusion-Based Abstraction}
+
+\paragraph{Gap.}
+As agents accumulate thousands of memories over months, even Memanto's efficient retrieval will face scaling challenges: the candidate set grows linearly, and broad recall ($k{=}100$) becomes increasingly noisy. Human memory addresses this through consolidation---merging related episodic memories into abstract semantic knowledge. Memanto currently has no consolidation mechanism; supersession only handles direct contradictions, not semantic overlap or redundancy.
+
+\paragraph{Approach.}
+Implement periodic memory consolidation using a discrete diffusion model as an abstraction engine. Related memories (identified by high mutual ITS scores within the same type cluster) are fed to a diffusion-based text summarizer that generates consolidated abstract memories through iterative denoising. The diffusion approach is chosen over autoregressive summarization because it naturally supports: (1) parallel processing of multiple related memories, (2) controllable abstraction level via the number of denoising steps (more steps $=$ more abstract), and (3) bidirectional context modeling for capturing cross-memory relationships. The consolidated memories retain provenance links to their sources (satisfying D3) and are assigned a new type (\emph{learning} or \emph{observation}) based on the input types. Drawing from Abstraction-based Continual Learning (Review \#17), the abstraction level should be adaptive---frequently accessed memories consolidate at a higher (more abstract) level, while rarely accessed memories consolidate more aggressively to save retrieval budget.
+
+\paragraph{Feasibility.}
+LLaDA2.0-Uni (Review \#38) demonstrated that discrete diffusion can handle text generation effectively; adapting its block-wise masking to memory consolidation is architecturally straightforward. The ITS score provides a natural similarity metric for identifying consolidation candidates. Main risk: information loss during abstraction---mitigable by retaining original memories as archived entries accessible via as-of queries.
+
+\subsection{Direction 3: Cross-Agent Memory Sharing with Privacy-Preserving Retrieval}
+
+\paragraph{Gap.}
+Memanto's namespace architecture isolates agent memories by design, but multi-agent systems require shared knowledge. A research agent discovering a key finding should make it available to a writing agent without exposing private user data or internal reasoning traces. Current multi-agent frameworks (Agent-World, Review \#36; SKILL0, Review \#24) lack principled memory sharing mechanisms.
+
+\paragraph{Approach.}
+Extend Memanto's namespace architecture with a federated memory layer. Each agent maintains a private namespace (current behavior) plus contributes to a shared namespace with access control. The privacy mechanism leverages Moorcheh's binary representations: MIB's 32$\times$ compression inherently destroys fine-grained information while preserving retrieval-relevant semantics, providing a natural differential privacy-like property. Agents write to the shared namespace through a \emph{publication} interface that: (1) strips provenance metadata below a configurable privacy level, (2) applies type-based access control (e.g., \emph{decisions} are shared but \emph{preferences} are private), and (3) uses the ITS score to rank shared memories by cross-agent relevance. The conflict resolution mechanism (D5) becomes critical here: when Agent A's shared memory contradicts Agent B's, the system flags the inconsistency for resolution rather than silently merging.
+
+\paragraph{Feasibility.}
+The namespace + typed memory architecture already supports multi-tenant isolation. Adding a shared layer requires extending the retrieval engine to query across namespaces with access control---architecturally a filter on the ITS search. Main challenge: semantic alignment across agents using different LLM backbones (their embeddings may not be directly comparable). A shared embedding model for the publication layer would resolve this.
+
+\section{Conclusion}
+
+Memanto demonstrates that architectural simplicity---typed semantic memory with information-theoretic retrieval and zero graph/LLM overhead at ingestion---can match the accuracy of complex hybrid systems while dramatically reducing operational costs. The central empirical finding is the ``recall over precision'' principle: expanding retrieval recall from $k{=}10$ to $k{=}40$ yields +20.4\,pp on LongMemEval, dwarfing all other optimizations including prompt engineering (+2.2\,pp) and model upgrades (+4.8\,pp). At complexity $0/4$, Memanto achieves 87.1\% LoCoMo and 89.8\% LongMemEval---within 1.6--2.5\,pp of the 4/4-complexity SOTA Hindsight system while costing \$0.50/day vs.\ \$2.32/day per agent. The 13-type memory schema, conflict resolution mechanism, and temporal versioning establish a principled foundation for persistent agent memory, though key contributions (ITS formalization, conflict resolution, automated typing) await either fuller mathematical treatment or empirical validation. For the continual learning community, Memanto's non-destructive supersession and typed retrieval provide a compelling external memory substrate that complements in-weight continual learning approaches.
+
+\begin{thebibliography}{15}
+
+\bibitem{memanto}
+Abtahi, S.M., Rahnema, R., Patel, H., Patel, N., Fekri, M., Khani, T.
+\newblock Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.
+\newblock \emph{arXiv preprint arXiv:2604.22085}, 2026.
+
+\bibitem{personavlm}
+Chen, Y., et al.
+\newblock PersonaVLM: Long-Term Personalized Multimodal LLMs.
+\newblock \emph{arXiv preprint arXiv:2604.13074}, 2026.
+
+\bibitem{agentworld}
+Wu, Z., et al.
+\newblock Agent-World: Scaling Real-World Environment Synthesis for Evolving General Agent Intelligence.
+\newblock \emph{arXiv preprint arXiv:2604.18292}, 2026.
+
+\bibitem{llatisa}
+Ding, Y., et al.
+\newblock LLaTiSA: Towards Difficulty-Stratified Time Series Reasoning from Visual Perception to Semantics.
+\newblock \emph{arXiv preprint arXiv:2604.17295}, 2026.
+
+\bibitem{abstraction}
+Wang, Z., et al.
+\newblock Abstraction as a Memory-Efficient Inductive Bias for Continual Learning.
+\newblock \emph{arXiv preprint arXiv:2603.17198}, 2026.
+
+\bibitem{tessy}
+Yang, C., et al.
+\newblock TESSY: Teacher-Student Cooperation Framework for Reasoning Model Fine-Tuning.
+\newblock \emph{arXiv preprint arXiv:2604.14164}, 2026.
+
+\bibitem{tempo}
+Zhang, Q., et al.
+\newblock TEMPO: Scaling Test-time Training for Large Reasoning Models.
+\newblock \emph{arXiv preprint arXiv:2604.19295}, 2026.
+
+\bibitem{llada2uni}
+Bie, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{skill0}
+Huang, Z., et al.
+\newblock SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization.
+\newblock \emph{arXiv preprint arXiv:2604.02268}, 2026.
+
+\bibitem{codebook}
+Sherwood, A., et al.
+\newblock Initialisation Determines the Basin: Efficient Codebook Optimisation for Extreme LLM Quantization.
+\newblock \emph{arXiv preprint arXiv:2604.08118}, 2026.
+
+\bibitem{tokendilemma}
+Wang, H., et al.
+\newblock On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large VLMs.
+\newblock \emph{arXiv preprint arXiv:2603.27481}, 2026.
+
+\end{thebibliography}
+
+\end{document}
