@@ -1,0 +1,221 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: How Much Is One Recurrence Worth?\\Iso-Depth Scaling Laws for Looped Language Models}
+\author{Internbot --- Automated Research Review}
+\date{April 29, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} How Much Is One Recurrence Worth? Iso-Depth Scaling Laws for Looped Language Models \\
+\textbf{Authors:} Kristian Schwethelm, Daniel Ruckert, Georgios Kaissis (TU Munich, Imperial College London, HPI / U.\ Potsdam) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.21106}{2604.21106} \\
+\textbf{Topics:} LLM Efficiency, Scaling Laws, Parameter Sharing, Looped Transformers
+
+\subsection{Problem}
+
+Looped (depth-recurrent) transformers iterate a shared block of layers $r$ times, decoupling unique parameter count from effective depth at fixed per-token inference FLOPs. This promises parameter efficiency and test-time compute scaling---more computation per token without growing the model. Recent looped LMs (Huginn, Ouro) have renewed interest in this architecture.
+
+However, a fundamental question remains unanswered: \emph{can a transformer block looped $r$ times fully replace $r$ non-looped blocks at matched compute?} In practice, most looped LMs use only small recurrence counts ($r \leq 4$), suggesting a cost. Concurrent work (Parcae) studies compute-optimal $r$ at fixed parameter memory but varies sharing, effective depth, and inference cost simultaneously, making it impossible to isolate the parameter-sharing cost from the effective depth benefit.
+
+\subsection{Method}
+
+The paper introduces an \textbf{iso-depth} experimental design that holds effective depth constant while varying recurrence, enabling clean measurement of the parameter-sharing cost through a joint scaling law.
+
+\paragraph{Architecture.}
+The prelude-recur-coda template fixes effective depth at $L_{\mathrm{eff}} = n_{\mathrm{prelude}} + r \cdot n_{\mathrm{recur}} + n_{\mathrm{coda}} = 20$ layers with $(n_{\mathrm{prelude}}, n_{\mathrm{coda}}) = (2, 2)$. The recurrent block contains $n_{\mathrm{recur}} = 16/r$ layers, giving 16, 8, 4, 2 recurrent layers for $r \in \{1, 2, 4, 8\}$. A linear input-injection layer $W_{\mathrm{inject}} \in \mathbb{R}^{d \times 2d}$ (initialized as $[I \mid 0]$) feeds the original hidden state into each recurrence. Width is parameterized as $d_{\mathrm{model}} = 64s$ for integer scale factor $s$.
+
+\paragraph{Parameter Decomposition.}
+Unique non-embedding parameters split into:
+\begin{equation}
+    N = N_{\mathrm{once}} + N_{\mathrm{rec}}, \quad N_{\mathrm{once}} = (n_{\mathrm{prelude}} + n_{\mathrm{coda}}) \cdot n_b, \quad N_{\mathrm{rec}} = n_{\mathrm{recur}} \cdot n_b + n_i
+\end{equation}
+where $n_b = 12d^2$ per block and $n_i = 2d^2$ for the injection layer. At $s{=}10$: $N \in \{98.3, 59.8, 40.2, 30.3\}$M for $r \in \{1, 2, 4, 8\}$---a $\sim$3.2$\times$ parameter shrinkage from $r{=}1$ to $r{=}8$.
+
+\paragraph{Joint Scaling Law with Recurrence-Equivalence Exponent $\phi$.}
+The core contribution is a joint scaling law that extends the Chinchilla formulation:
+\begin{equation}
+    L(N_{\mathrm{once}}, N_{\mathrm{rec}}, D, r) = E + A \cdot \left(N_{\mathrm{once}} + r^\phi \cdot N_{\mathrm{rec}}\right)^{-\alpha} + B \cdot D^{-\beta}
+\end{equation}
+where $N_{\mathrm{eff}} = N_{\mathrm{once}} + r^\phi \cdot N_{\mathrm{rec}}$ is the \textbf{effective parameter count}. The exponent $\phi$ directly quantifies how much one recurrence is worth:
+\begin{itemize}
+    \item $\phi = 0$: pure sharing cost; extra recurrences yield no improvement.
+    \item $\phi = 1$: fully-unrolled equivalence; each recurrence contributes as much as an unshared block.
+    \item $0 < \phi < 1$: partial recovery---the practical regime.
+\end{itemize}
+
+\paragraph{Experimental Setup.}
+116 pretraining runs across $r \in \{1, 2, 4, 8\}$ spanning $\sim$50$\times$ in training compute ($C \in \{4.64 \times 10^{17}, \ldots, 2.15 \times 10^{19}\}$ FLOPs). All models use RMSNorm, RoPE, QK normalization, squared-ReLU MLPs, FlashAttention-2/3, MuonH optimizer with base LR $= 0.014$, batch size 262,144 tokens, trained on FineWeb-Edu with Llama-2 tokenizer. Fitting uses Huber loss on log-space validation loss with L-BFGS-B, best of 500 random restarts. Total compute: $\sim$5,000 GPU-hours on A100/H100.
+
+\paragraph{$\Delta\phi$ as a Design Metric.}
+The paper proposes $\Delta\phi$ for comparing looped LM modifications. Two interventions are probed:
+\begin{itemize}
+    \item \textbf{Truncated BPTT:} Backpropagates through only $\lceil r/2 \rceil$ recurrences, saving $\sim$30\% training FLOPs. $\phi$ drops from 0.45 to 0.38---loops become less powerful per recurrence.
+    \item \textbf{Hyperconnections:} Per-iteration mixing via learnable parameters ($r(K^2 + 2K)$ scalars). $\phi$ jumps from 0.45 to 0.65---each recurrence is worth substantially more.
+\end{itemize}
+
+\subsection{Results}
+
+\paragraph{Core Finding: $\phi = 0.46$.}
+The joint fit yields $\phi = 0.459$ with 95\% bootstrap CI $[0.41, 0.53]$ ($R^2 = 0.997$). Neither $\phi = 0$ nor $\phi = 1$ is reached in any of 200 bootstrap resamples. This means each shared recurrence recovers about \textbf{47\% of the capacity of a unique block}.
+
+Concretely for $r{=}4$: a 410M-parameter looped model has the effective capacity of a $\sim$580M non-looped model ($r^{\phi} = 4^{0.46} \approx 1.86$ blocks' worth per shared block), but incurs the training cost of a 1B non-looped model.
+
+\paragraph{Loss Gap at Matched Compute.}
+The loss frontier for looped models trails the baseline by 0.03--0.06 nats ($r{=}2$), 0.05--0.08 nats ($r{=}4$), and 0.09--0.12 nats ($r{=}8$), growing monotonically with $r$. \textbf{No looped-baseline crossover is observed} within the compute window or at $\sim$20$\times$ extrapolation.
+
+\paragraph{Extrapolation ($s{=}34$, $\sim$4$\times 10^{20}$ FLOPs, 47B tokens).}
+$r{=}1$ validation loss: 2.047 nats; $r{=}4$: 2.108 nats (gap: +0.061, inside the predicted $[0.05, 0.08]$ band). The scaling law extrapolates cleanly.
+
+\paragraph{Compute-Optimal Allocation.}
+Looped variants prefer \textbf{wider models} with \textbf{fewer total tokens}: data-scaling exponent $a_D \in [0.61, 0.67]$ vs.\ 0.52 for non-looped, meaning looped models should spend a larger fraction of compute on model width rather than tokens.
+
+\paragraph{Design Probe Results.}
+Truncated BPTT: $\phi$ drops to 0.38 ($\Delta\phi = -0.07$). The $\sim$30\% FLOPs savings enables more tokens but each recurrence is worth less---a token-budget reallocation, not a genuine loop improvement. Hyperconnections: $\phi$ jumps to 0.65 ($\Delta\phi = +0.20$). At $r{=}2$, hyperconnections even match or beat $r{=}1$ at some budgets. Compute-optimal allocation shifts to narrower widths, \emph{lowering} per-token inference FLOPs---a genuine architectural improvement.
+
+\paragraph{Downstream Evaluation (Five-Axis).}
+At the largest budget ($2.15 \times 10^{19}$ FLOPs): parametric knowledge (TriviaQA, NQ) tracks validation-loss ordering ($r{=}1$ leads); reading comprehension and compositional symbolic tasks close the gap ($r \in \{2, 4\}$ match $r{=}1$); reasoning primitives and math remain compute-floored with no per-$r$ signal.
+
+\paragraph{Stability.}
+$\phi$ shows no drift with scale: low-budget half gives $\phi = 0.44$, high-budget half gives $\phi = 0.49$, consistent within bootstrap uncertainty.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Fixed architecture:} 20 effective layers with $(2, 2)$ prelude/coda. Different depth allocations may shift $\phi$.
+    \item \textbf{Limited recurrence range:} Iso-depth design caps $r$ at $r_{\max} = 16$; the power-law $r^\phi$ is a local approximation.
+    \item \textbf{No reasoning advantage confirmed:} Reasoning-heavy tasks remain compute-floored at both the grid scale and $\sim$20$\times$ extrapolation. The hypothesized reasoning benefit of recurrence is not observed.
+    \item \textbf{Modest compute window:} $\sim$50$\times$ range ($\sim$5K GPU-hours total); whether $\phi$ changes at frontier scale is unknown.
+    \item \textbf{$\phi$ is recipe-dependent:} It reflects the specific training setup (optimizer, data, schedule) and changes with architectural modifications.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to \textbf{Topic 1: LLM Efficiency} and connects to multiple previously reviewed works:
+
+\begin{itemize}
+    \item \textbf{Inference efficiency:} Our reviews of IndexCache (Review \#9), LookaheadKV (Review \#10), and TriAttention (Review \#26) focused on KV cache and attention efficiency. Looped transformers offer a complementary efficiency axis: parameter sharing reduces memory footprint by $\sim$3.2$\times$ (at $r{=}8$) while maintaining effective depth. The $\phi = 0.46$ finding quantifies exactly how much capacity is sacrificed for this memory saving.
+    \item \textbf{Distillation and compression:} TESSY (Review \#34) and self-distillation (Review \#18) explored knowledge compression. Looped transformers can be seen as an implicit form of self-distillation: the shared block must learn a general-purpose computation that applies across multiple depth positions. The $\phi$ exponent measures the ``compression loss'' of this implicit distillation.
+    \item \textbf{Scaling law methodology:} The joint scaling law with $\phi$ provides a template for quantifying architectural choices as scaling exponents---an approach that could be applied to other efficiency techniques (quantization, pruning, sparse attention) to measure their capacity cost.
+    \item \textbf{Diffusion LLM connection:} Block-wise attention in LLaDA2.0-Uni (Review \#38) and iterative denoising in discrete diffusion models share a structural similarity with looped transformers: repeated computation over the same representation. The $\phi$ framework could quantify whether sharing denoising blocks across diffusion steps incurs a similar capacity cost.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Measuring $\phi$ for Quantized and Pruned Looped Transformers}
+
+\paragraph{Gap.}
+The paper establishes $\phi = 0.46$ for full-precision looped transformers with standard training. However, real-world deployment combines multiple efficiency techniques: quantization, pruning, and parameter sharing are not mutually exclusive. Whether $\phi$ changes under aggressive quantization (e.g., 4-bit or 2-bit weights) is unknown. Quantization error could compound across recurrences---each loop iteration re-uses the same quantized weights, potentially amplifying rounding errors that a non-looped model distributes across unique blocks.
+
+\paragraph{Approach.}
+Extend the iso-depth scaling law framework to include a quantization dimension. Train looped models at multiple bit-widths ($\{2, 4, 8, 16\}$ bits) and fit a generalized scaling law $L(N_{\mathrm{once}}, N_{\mathrm{rec}}, D, r, b) = E + A \cdot (N_{\mathrm{once}} + r^{\phi(b)} \cdot N_{\mathrm{rec}})^{-\alpha} + B \cdot D^{-\beta}$ where $\phi(b)$ is bit-width-dependent. If $\phi$ decreases with lower bit-widths, it indicates that quantization and looping compound negatively, and practitioners should choose wider models with fewer recurrences. The Codebook Optimisation approach from our Review \#30 could be applied to find optimal quantization codebooks specifically for looped blocks. Additionally, combining with the hyperconnections insight ($\Delta\phi = +0.20$) could partially offset quantization-induced $\phi$ degradation.
+
+\paragraph{Feasibility.}
+The experimental framework is already established (116 runs in the original paper). Adding a bit-width sweep multiplies runs by $\sim$4$\times$, requiring $\sim$20K GPU-hours---substantial but feasible. Post-training quantization (PTQ) is cheaper to probe initially; quantization-aware training (QAT) for the full grid would be the definitive test.
+
+\subsection{Direction 2: Adaptive Recurrence Depth via RL for Test-Time Compute Scaling}
+
+\paragraph{Gap.}
+The paper uses a fixed recurrence count $r$ for all inputs. However, the hypothesized reasoning benefit of looped transformers lies in \emph{adaptive} computation: easy tokens need few recurrences while hard tokens need many. The $\phi = 0.46$ finding is an \emph{average} across all tokens; for reasoning-heavy tokens, $\phi$ might be higher (recurrence is more valuable) while for factual-recall tokens, $\phi$ might be lower. The paper's downstream analysis hints at this: compositional symbolic tasks show no gap between $r{=}4$ and $r{=}1$ ($-0.004$ nats), while parametric knowledge shows a large gap ($+0.108$ nats).
+
+\paragraph{Approach.}
+Train a lightweight halting controller that decides, per-token, whether to continue looping or exit early. The controller is optimized via RL with a reward that balances task performance against compute cost: $R = R_{\mathrm{task}} - \lambda \cdot r_{\mathrm{used}}/r_{\mathrm{max}}$. Drawing from TEMPO's EM framework (Review \#37), the E-step recalibrates the halting threshold on a small labeled set, while the M-step refines the controller on unlabeled data. This could yield per-token $\phi$ estimates---effectively measuring how much each recurrence is worth for different token types. The KnowRL approach (Review \#32) of minimal-sufficient knowledge guidance could inform the controller about when sufficient computation has been applied.
+
+\paragraph{Feasibility.}
+Universal Transformers with adaptive halting have been explored, but not with modern scaling law methodology or RL-based control. The iso-depth framework provides the evaluation infrastructure. Main risk: the halting controller may learn trivial policies (always halt early or always use maximum recurrence). The per-token $\phi$ measurement requires careful experimental design to avoid confounding token difficulty with position effects.
+
+\subsection{Direction 3: Looped Diffusion LLM Blocks for Parameter-Efficient Denoising}
+
+\paragraph{Gap.}
+Discrete diffusion LLMs (LLaDA2.0-Uni, DMax, DARE from our reviews) perform iterative denoising where each step applies the same or similar computation to progressively refine predictions. This is structurally analogous to looped transformers: repeated application of shared parameters to an evolving representation. Current diffusion LLMs use either the same parameters across all denoising steps (implicit looping) or step-conditioned parameters (unique per step). The parameter-sharing cost of the former has never been measured using a scaling law framework.
+
+\paragraph{Approach.}
+Apply the iso-depth scaling law methodology to discrete diffusion LLMs. Define ``recurrence'' as sharing denoising blocks across $T$ diffusion steps, with a prelude (initial noise processing) and coda (final token prediction) kept unique. Fit the joint scaling law $L(N_{\mathrm{once}}, N_{\mathrm{rec}}, D, T, \phi_{\mathrm{diff}})$ to measure $\phi_{\mathrm{diff}}$---the recurrence-equivalence exponent for diffusion denoising steps. If $\phi_{\mathrm{diff}} > \phi_{\mathrm{AR}} = 0.46$, it would indicate that parameter sharing across denoising steps is \emph{less costly} than across depth in autoregressive models, potentially because denoising steps operate on increasingly refined representations (a natural curriculum). This connects to S2D2's self-speculative decoding (Review \#19) and DMax's aggressive parallel decoding (Review \#29), both of which exploit redundancy across denoising steps.
+
+\paragraph{Feasibility.}
+The experimental framework transfers directly: replace the autoregressive prelude-recur-coda with a diffusion prelude-denoise-coda architecture. The DARE training infrastructure (Review \#27) provides a suitable codebase. Main challenge: diffusion LLM training is more expensive than AR training at equivalent scale, so the 116-run grid may need to be reduced. The hyperconnections probe ($\Delta\phi = +0.20$) suggests that architectural modifications specifically designed for inter-step information flow could substantially improve $\phi_{\mathrm{diff}}$.
+
+\section{Conclusion}
+
+This paper provides the first clean measurement of the parameter-sharing cost in looped transformers: $\phi = 0.46$ means each shared recurrence recovers about 47\% of the capacity of a unique block. The iso-depth experimental design, which holds effective depth constant while varying recurrence, isolates this cost from confounding factors and yields a joint scaling law that collapses 20 per-architecture parameters into 6 joint parameters ($R^2 = 0.997$). The practical implication is clear: a 410M looped model ($r{=}4$) has the effective capacity of a $\sim$580M non-looped model but incurs the training cost of a 1B model. No looped-baseline crossover is observed at any compute scale tested, including $\sim$20$\times$ extrapolation. However, the $\Delta\phi$ metric reveals that architectural modifications can substantially change this trade-off: hyperconnections boost $\phi$ to 0.65 ($\Delta\phi = +0.20$), suggesting that the 47\% recovery rate is not a fundamental limit but a property of the current training recipe. For the LLM efficiency community, $\phi$ provides a rigorous single-number benchmark against which future looped LM designs can be measured.
+
+\begin{thebibliography}{15}
+
+\bibitem{isodepth}
+Schwethelm, K., Ruckert, D., Kaissis, G.
+\newblock How Much Is One Recurrence Worth? Iso-Depth Scaling Laws for Looped Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.21106}, 2026.
+
+\bibitem{indexcache}
+Zhang, Y., et al.
+\newblock IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse.
+\newblock \emph{arXiv preprint arXiv:2603.12201}, 2026.
+
+\bibitem{lookaheadkv}
+Wang, X., et al.
+\newblock LookaheadKV: Fast and Accurate KV Cache Eviction.
+\newblock \emph{arXiv preprint arXiv:2603.10899}, 2026.
+
+\bibitem{triattention}
+Li, Z., et al.
+\newblock TriAttention: Efficient Long Reasoning with Trigonometric KV Compression.
+\newblock \emph{arXiv preprint arXiv:2604.04921}, 2026.
+
+\bibitem{tessy}
+Yang, C., et al.
+\newblock TESSY: Teacher-Student Cooperation Framework for Reasoning Model Fine-Tuning.
+\newblock \emph{arXiv preprint arXiv:2604.14164}, 2026.
+
+\bibitem{selfdistill}
+Xu, M., et al.
+\newblock Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs?
+\newblock \emph{arXiv preprint arXiv:2603.24472}, 2026.
+
+\bibitem{codebook}
+Sherwood, A., et al.
+\newblock Initialisation Determines the Basin: Efficient Codebook Optimisation for Extreme LLM Quantization.
+\newblock \emph{arXiv preprint arXiv:2604.08118}, 2026.
+
+\bibitem{llada2uni}
+Bie, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{tempo}
+Zhang, Q., et al.
+\newblock TEMPO: Scaling Test-time Training for Large Reasoning Models.
+\newblock \emph{arXiv preprint arXiv:2604.19295}, 2026.
+
+\bibitem{knowrl}
+Li, X., et al.
+\newblock KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance.
+\newblock \emph{arXiv preprint arXiv:2604.12627}, 2026.
+
+\bibitem{s2d2}
+Chen, Z., et al.
+\newblock S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.
+\newblock \emph{arXiv preprint arXiv:2603.25702}, 2026.
+
+\bibitem{dmax}
+Li, Y., et al.
+\newblock DMax: Aggressive Parallel Decoding for dLLMs.
+\newblock \emph{arXiv preprint arXiv:2604.08302}, 2026.
+
+\bibitem{dare}
+Liu, S., et al.
+\newblock DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.
+\newblock \emph{arXiv preprint arXiv:2604.04215}, 2026.
+
+\end{thebibliography}
+
+\end{document}
