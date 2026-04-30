@@ -1,0 +1,218 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: V-GRPO --- Online RL for Denoising\\Generative Models via ELBO-Based Surrogates}
+\author{Internbot --- Automated Research Review}
+\date{April 30, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think \\
+\textbf{Authors:} Bingda Tang, Yuhui Zhang, Xiaohan Wang, Jiayuan Mao, Ludwig Schmidt, Serena Yeung-Levy (Stanford, Tsinghua, Amazon FAR / UPenn) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.23380}{2604.23380} \\
+\textbf{Topics:} Reinforcement Learning, Diffusion Models, Policy Optimization, GRPO
+
+\subsection{Problem}
+
+Aligning denoising generative models (diffusion, flow matching) with human preferences via post-training RL is a key challenge. Policy-gradient methods like GRPO require exact log-likelihoods, which are intractable for diffusion models. Two paradigms have emerged:
+
+\begin{itemize}
+    \item \textbf{MDP-based methods} (DDPO, DPOK, DanceGRPO, FlowGRPO, MixGRPO, BranchGRPO): Frame generation as a Markov Decision Process where each denoising step is a state-action pair. The trajectory probability factorizes into tractable Gaussian transition kernels. \emph{Limitations:} confined to first-order SDE discretizations, slow convergence, tight coupling between optimization and rollout kernels, and increasingly elaborate designs (sliding windows, branching trees) to patch inefficiency.
+    \item \textbf{ELBO-based surrogates}: Use pretraining objectives connected to the evidence lower bound as tractable substitutes for log-likelihood. Simpler, but prior work (DDPO, FPO) reported significant underperformance on visual generation tasks.
+\end{itemize}
+
+The paper's key insight: the ELBO-based gap is \emph{not fundamental}. It stems from excessive variance in the surrogates, fixable with a carefully chosen set of variance reduction and gradient regularization techniques.
+
+\subsection{Method}
+
+V-GRPO integrates ELBO-based surrogates with GRPO, treating multi-step generation as an \textbf{atomic action} rather than decomposing it into per-step MDP transitions.
+
+\paragraph{ELBO-Based Surrogate.}
+The intractable log-likelihood is replaced by the negative pretraining loss conditioned on the generated output:
+\begin{equation}
+    \log \pi_\theta(o_i \mid c) \;\longleftarrow\; -\mathcal{L}_w(\theta \mid o_i, c) = -\mathbb{E}_{t, \epsilon}\!\left[w_t \left\| \mathrm{NN}_t^\theta(z_t, c) - r_t(o_i, \epsilon)\right\|_2^2\right]
+\end{equation}
+where $z_t = a_t o_i + b_t \epsilon$ is the noised sample and $r_t$ is the regression target. This is justified by the ELBO bound: $\mathrm{ELBO}^\theta(x) \leq \log \pi_\theta(x)$. The importance ratio for GRPO becomes:
+\begin{equation}
+    \rho_i^\theta = \exp\!\left(-\mathcal{L}_w(\theta \mid o_i, c) + \mathcal{L}_w(\theta_{\mathrm{old}} \mid o_i, c)\right)
+\end{equation}
+
+\paragraph{Surrogate Variance Reduction (3 Techniques).}
+\begin{enumerate}
+    \item \textbf{Group-shared timestep-noise pairs:} A fixed set of $(t_j, \epsilon_j)$ for $j = 1, \ldots, N_{\mathrm{MC}}$ is sampled once and shared across all outputs in a GRPO group. This dramatically reduces within-group variance (CV drops from 0.170 to 0.038).
+    \item \textbf{Stratified timestep sampling:} Timesteps are drawn from uniform strata rather than i.i.d., ensuring coverage of the full diffusion schedule.
+    \item \textbf{Adaptive loss weighting:} Using $x$-prediction reparameterization with self-normalizing weights:
+    \begin{equation}
+        \mathcal{L}_{\mathrm{adaptive}}(\theta \mid o_i, c) = \mathbb{E}_{t, \epsilon}\!\left[\frac{\|x^\theta(z_t) - o_i\|_2^2}{\mathrm{sg}\!\left(\frac{1}{d}\|x^\theta(z_t) - o_i\|_1\right)}\right]
+    \end{equation}
+    where $\mathrm{sg}(\cdot)$ is stop-gradient and $d$ is output dimensionality.
+\end{enumerate}
+Collectively, these reduce the coefficient of variation of surrogate magnitude from 0.230 to 0.128.
+
+\paragraph{Gradient Step Regularization (3 Techniques).}
+\begin{enumerate}
+    \item \textbf{Importance ratio clipping:} Standard GRPO clipping $\mathrm{clip}(\rho_i, 1{-}\epsilon, 1{+}\epsilon)$, essential for suppressing loss spikes.
+    \item \textbf{KL penalty:} A simplified KL divergence against the behavior policy:
+    \begin{equation}
+        D_i^{\mathrm{simple}}(\pi_\theta \| \pi_{\theta_{\mathrm{old}}}) = \mathbb{E}_{t, \epsilon}\!\left[\|x^\theta(z_t) - x^{\theta_{\mathrm{old}}}(z_t)\|_2^2\right]
+    \end{equation}
+    Critical for preserving prior capabilities during multi-stage training.
+    \item \textbf{Advantage soft-clipping:} $A_{\mathrm{soft}} = \eta \cdot \tanh(A / \eta)$, which smoothly bounds extreme advantages. Essential for fully on-policy settings (1 gradient step per iteration) where importance ratio clipping is inapplicable.
+\end{enumerate}
+
+\paragraph{Decoupled Optimization and Rollout.}
+Since V-GRPO does not depend on rollout transition kernels, it can use \emph{any sampler} during rollout (e.g., DPMSolver++, a second-order ODE solver) while MDP methods are locked to first-order SDE discretizations. This is a fundamental flexibility advantage.
+
+\subsection{Results}
+
+\paragraph{FLUX.1-dev (300 iterations, 4 reward ensemble).}
+V-GRPO outperforms all MDP-based baselines across every reward metric. At 16+4 sampling steps: HPSv2.1 0.372 (vs.\ MixGRPO 0.367), PickScore 0.241 (vs.\ 0.237), ImageReward 1.731 (vs.\ 1.629), UnifiedReward 3.437 (vs.\ 3.418). At 150 iterations, V-GRPO already matches MixGRPO at 300 iterations---a \textbf{2$\times$ convergence speedup}.
+
+\paragraph{SD 3.5 Medium (5-stage curriculum, 580 gradient steps).}
+V-GRPO matches DiffusionNFT performance with $\sim$3$\times$ fewer gradient steps (580 vs.\ 1,700) and $\sim$2.2$\times$ fewer NFE per step (53.8 vs.\ 120 average). Compared to FlowGRPO ($>$5K steps): GenEval 0.91 vs.\ 0.95, OCR 0.91 vs.\ 0.66, HPSv2.1 0.341 vs.\ 0.274, ImageReward 1.52 vs.\ 1.06. V-GRPO achieves substantially better reward alignment with an order of magnitude fewer steps.
+
+\paragraph{Single-Reward Efficiency.}
+On GenEval: V-GRPO reaches 0.97 in 600 steps vs.\ DiffusionNFT 0.98 in 1K steps vs.\ FlowGRPO 0.97 in 4K steps. On OCR: V-GRPO reaches 0.98 in just 25 steps vs.\ DiffusionNFT 0.97 in 150 steps.
+
+\paragraph{Key Ablation Findings.}
+(1) Removing any variance reduction technique destabilizes training on FLUX.1-dev; the naive baseline (no variance reduction) fails entirely. (2) $N_{\mathrm{MC}} = 4$ is sufficient; $N_{\mathrm{MC}} = 2$ prevents convergence. (3) $x$-prediction parameterization is optimal; $\epsilon$-prediction with adaptive weighting causes training collapse. (4) KL penalty preserves prior capabilities during multi-stage training (GenEval 0.91 vs.\ 0.87 with clipping alone). (5) Advantage soft-clipping stabilizes fully on-policy training but underperforms clipping for coarse-grained rewards.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{No single regularization is universally best:} Different gradient regularization strategies (clipping, KL, soft-clipping) are optimal for different configurations, requiring manual selection.
+    \item \textbf{Higher rollout NFE:} Using DPMSolver++ during rollout precludes reusing model predictions for importance ratios, incurring higher NFE from the behavior policy (e.g., 16+4=20 vs.\ MixGRPO's 25).
+    \item \textbf{Text-to-image only:} Generalization to video, audio, 3D, or discrete text diffusion is not explored.
+    \item \textbf{Numerical precision:} FP32 required for surrogate computation and backward pass (BF16 during rollout), adding implementation complexity.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper uniquely bridges \textbf{Topic 2: Reinforcement Learning} and \textbf{Topic 4: Diffusion LLM}:
+
+\begin{itemize}
+    \item \textbf{GRPO for diffusion:} V-GRPO directly extends the GRPO framework that underlies many of our RL reviews (BandPO Review \#5, FIPO Review \#22, Self-Distilled RLVR Review \#25, KnowRL Review \#32). The adaptation from autoregressive token generation to denoising trajectories requires replacing per-token log-probabilities with ELBO-based surrogates---a key methodological bridge.
+    \item \textbf{RL for discrete diffusion LLMs:} DARE (Review \#27) applied alignment to discrete diffusion LLMs using a modified DPO objective. V-GRPO's ELBO-based approach offers a potentially superior alternative: instead of per-step MDP formulations, treat the entire denoising trajectory as an atomic action. This could simplify DARE-style alignment for models like LLaDA2.0-Uni (Review \#38).
+    \item \textbf{Variance reduction parallels:} The group-shared timestep-noise pairs technique is structurally analogous to GRPO's group-relative advantage normalization---both reduce variance by sharing a reference across the group. The stratified sampling parallels the ``recall over precision'' insight from Memanto (Review \#40): broader, more uniform coverage beats narrow high-fidelity estimation.
+    \item \textbf{Multi-stage training:} The 5-stage curriculum for SD 3.5 M echoes the curriculum training approach from LLaTiSA (Review \#39) and LLaDA2.0-Uni's 3-stage pipeline. The KL penalty's role in preserving prior capabilities across stages connects to catastrophic forgetting themes from our Topic 3 reviews.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: V-GRPO for Discrete Diffusion Language Models}
+
+\paragraph{Gap.}
+V-GRPO is demonstrated exclusively on continuous diffusion models for image generation. Discrete diffusion LLMs (LLaDA2.0-Uni, DMax, S2D2 from our reviews) operate in a fundamentally different space: tokens are masked and denoised through iterative unmasking rather than continuous Gaussian denoising. DARE (Review \#27) applied DPO to discrete diffusion but required per-step MDP decomposition. The V-GRPO insight---that ELBO-based surrogates with proper variance control can replace MDP formulations---has not been tested for discrete token denoising.
+
+\paragraph{Approach.}
+Adapt V-GRPO to discrete diffusion by replacing the continuous ELBO surrogate with its discrete counterpart. The discrete masked diffusion pretraining objective (cross-entropy loss at masked positions) serves as a natural ELBO surrogate: $\log \pi_\theta(o \mid c) \leftarrow -\mathcal{L}_{\mathrm{CE}}(\theta \mid o, c) = -\mathbb{E}_t\!\left[\sum_{i \in \mathrm{masked}} \log p_\theta(x_i \mid x_t, c)\right]$. The three variance reduction techniques transfer: (1) group-shared mask patterns (analogous to shared timestep-noise pairs), (2) stratified mask-ratio sampling across the diffusion schedule, (3) adaptive loss weighting via token-level confidence. The advantage soft-clipping and KL penalty adapt naturally since discrete diffusion already has tractable token-level distributions. This would provide an online RL alternative to DARE's offline DPO, enabling iterative preference optimization for models like LLaDA2.0-Uni.
+
+\paragraph{Feasibility.}
+The discrete ELBO surrogate is arguably \emph{simpler} than the continuous case since cross-entropy at masked positions is already the standard pretraining loss. The main challenge is that discrete diffusion generates all tokens simultaneously (parallel decoding), so the ``group'' for GRPO must be defined over complete outputs rather than autoregressive prefixes. LLaDA2.0-Uni's block-wise attention provides natural grouping boundaries. Implementation can build on DARE's codebase with V-GRPO's surrogate replacement.
+
+\subsection{Direction 2: Reward Model Recalibration for Multi-Stage Diffusion RL}
+
+\paragraph{Gap.}
+V-GRPO's 5-stage curriculum for SD 3.5 M uses different reward functions per stage (human preference, GenEval, OCR), and the KL penalty prevents catastrophic forgetting of prior-stage capabilities. However, the reward models themselves are static---they do not adapt to the improving policy. As the model improves, reward saturation reduces the effective learning signal, a problem identified in our TEMPO review (Review \#37). V-GRPO's ablations show that the final stages (4--5) require significantly fewer steps (50, 30) than early stages (150, 200), suggesting diminishing returns from static rewards.
+
+\paragraph{Approach.}
+Integrate TEMPO's EM-based reward recalibration into V-GRPO's multi-stage pipeline. The E-step recalibrates each stage's reward model on a small set of human-labeled examples that reflect the current policy's quality level, while the M-step runs V-GRPO with the recalibrated reward. For visual generation, the E-step could use a small set of expert-ranked image pairs to shift the reward model's decision boundary as the policy improves. The recalibration frequency maps naturally to V-GRPO's stage transitions. Additionally, drawing from the reward hacking analysis in our broader RL review series, the evaluation-time hybrid sampling strategy (trained model for 80\% of steps, base model for 20\%) could be formalized as a reward regularization mechanism rather than a post-hoc hack.
+
+\paragraph{Feasibility.}
+TEMPO demonstrated EM-based recalibration for language reasoning; adapting to visual rewards requires a multimodal reward model that can be efficiently recalibrated. Models like UnifiedReward (already used in V-GRPO's reward ensemble) provide a suitable foundation. Main risk: recalibration overhead may negate V-GRPO's efficiency advantage if the E-step requires substantial computation.
+
+\subsection{Direction 3: Unified ELBO-Based RL for Multimodal Diffusion Models}
+
+\paragraph{Gap.}
+LLaDA2.0-Uni (Review \#38) unifies text understanding and image generation under a single discrete diffusion objective but lacks RL-based alignment (acknowledged as an open challenge). V-GRPO demonstrates ELBO-based RL for image diffusion. Combining these would enable preference optimization that jointly aligns both text reasoning and image generation quality---a capability no current system provides.
+
+\paragraph{Approach.}
+Design a unified V-GRPO variant for multimodal diffusion models. The key challenge is defining the ELBO surrogate over heterogeneous outputs (text + images). For LLaDA2.0-Uni's architecture: the backbone's block-wise masked diffusion loss serves as the text ELBO surrogate, while the 6B decoder's flow matching loss serves as the image ELBO surrogate. The unified surrogate is a weighted combination: $\mathcal{L}_{\mathrm{unified}} = \lambda_{\mathrm{text}} \mathcal{L}_{\mathrm{CE}} + \lambda_{\mathrm{img}} \mathcal{L}_{\mathrm{FM}}$, with importance ratios computed from the combined surrogate. The reward function is multimodal: text quality (correctness, coherence) + image quality (human preference, compositional accuracy) + cross-modal consistency (text-image alignment). V-GRPO's variance reduction techniques apply independently to each modality's surrogate, with group-shared noise patterns per modality.
+
+\paragraph{Feasibility.}
+Both surrogate components (discrete CE for text, flow matching for images) are standard pretraining losses, satisfying V-GRPO's core requirement. The multimodal reward can be composed from existing models (e.g., UnifiedReward for images, GenRM from Review \#1 for text). Main challenge: balancing the text and image surrogate weights ($\lambda_{\mathrm{text}}, \lambda_{\mathrm{img}}$) to prevent one modality from dominating the gradient. LLaDA2.0-Uni's MTRS (mask token reweighting) provides a precedent for handling this balance.
+
+\section{Conclusion}
+
+V-GRPO demonstrates that online RL for diffusion models is simpler than previously believed: ELBO-based surrogates, long dismissed as inferior to MDP formulations, \emph{outperform} all MDP-based methods when combined with proper variance reduction (group-shared timestep-noise pairs, stratified sampling, adaptive loss weighting) and gradient regularization (importance ratio clipping, KL penalty, advantage soft-clipping). The method achieves 2$\times$ convergence speedup over MixGRPO on FLUX.1-dev and matches DiffusionNFT with 3$\times$ fewer gradient steps on SD 3.5 M, while being fundamentally simpler---it decouples optimization from rollout, enabling any sampler during generation. The core insight is treating multi-step denoising as an atomic action rather than decomposing it into per-step MDP transitions. For the diffusion LLM community, this opens a direct path to applying GRPO-style preference optimization to discrete diffusion models by replacing the continuous ELBO with the discrete masked diffusion pretraining loss.
+
+\begin{thebibliography}{15}
+
+\bibitem{vgrpo}
+Tang, B., Zhang, Y., Wang, X., Mao, J., Schmidt, L., Yeung-Levy, S.
+\newblock V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\bibitem{dare}
+Liu, S., et al.
+\newblock DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.
+\newblock \emph{arXiv preprint arXiv:2604.04215}, 2026.
+
+\bibitem{llada2uni}
+Bie, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{bandpo}
+Zhang, Y., et al.
+\newblock BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM RL.
+\newblock \emph{arXiv preprint arXiv:2603.04918}, 2026.
+
+\bibitem{fipo}
+Li, Z., et al.
+\newblock FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2603.19835}, 2026.
+
+\bibitem{selfdistrlvr}
+Wang, Z., et al.
+\newblock Self-Distilled RLVR.
+\newblock \emph{arXiv preprint arXiv:2604.03128}, 2026.
+
+\bibitem{knowrl}
+Li, X., et al.
+\newblock KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance.
+\newblock \emph{arXiv preprint arXiv:2604.12627}, 2026.
+
+\bibitem{tempo}
+Zhang, Q., et al.
+\newblock TEMPO: Scaling Test-time Training for Large Reasoning Models.
+\newblock \emph{arXiv preprint arXiv:2604.19295}, 2026.
+
+\bibitem{dmax}
+Li, Y., et al.
+\newblock DMax: Aggressive Parallel Decoding for dLLMs.
+\newblock \emph{arXiv preprint arXiv:2604.08302}, 2026.
+
+\bibitem{s2d2}
+Chen, Z., et al.
+\newblock S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.
+\newblock \emph{arXiv preprint arXiv:2603.25702}, 2026.
+
+\bibitem{llatisa}
+Ding, Y., et al.
+\newblock LLaTiSA: Towards Difficulty-Stratified Time Series Reasoning from Visual Perception to Semantics.
+\newblock \emph{arXiv preprint arXiv:2604.17295}, 2026.
+
+\bibitem{memanto}
+Abtahi, S.M., et al.
+\newblock Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.
+\newblock \emph{arXiv preprint arXiv:2604.22085}, 2026.
+
+\bibitem{genrm}
+Zhang, Y., et al.
+\newblock Beyond Length Scaling: Synergizing Breadth and Depth for Generative Reward Models.
+\newblock \emph{arXiv preprint arXiv:2603.01571}, 2026.
+
+\end{thebibliography}
+
+\end{document}
