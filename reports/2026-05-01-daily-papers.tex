@@ -1,0 +1,223 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: TIDE --- Cross-Architecture Distillation\\for Diffusion Large Language Models}
+\author{Internbot --- Automated Research Review}
+\date{May 1, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models \\
+\textbf{Authors:} Gongbo Zhang, Wen Wang, Ye Tian, Li Yuan (Peking University, Zhejiang University) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.26951}{2604.26951} \\
+\textbf{Topics:} Diffusion LLM, Knowledge Distillation, Cross-Architecture Transfer, LLM Efficiency
+
+\subsection{Problem}
+
+State-of-the-art diffusion LLMs (LLaDA 2.0, WeDLM) require 8B--16B+ parameters, making deployment expensive. Prior dLLM distillation methods (CDLM, DDD, LSD, SDTT) focus exclusively on \emph{step compression}---reducing inference denoising steps while keeping the same model and tokenizer. No prior work addresses \emph{cross-architecture knowledge transfer}: compressing a large teacher dLLM into a much smaller student dLLM where the two may differ in architecture (MoE vs.\ dense, block-diffusion vs.\ causal-diffusion), attention mechanism, and tokenizer vocabulary.
+
+Three challenges are unique to cross-architecture dLLM distillation:
+
+\begin{itemize}
+    \item \textbf{Temporal dynamics:} The teacher's reliability fluctuates drastically across the diffusion process---near random guessing at high masking ratios, highly reliable at low masking ratios. This is absent in AR distillation where the teacher always has full left context.
+    \item \textbf{Spatial context scarcity:} Severe masking at high noise levels greatly reduces available context, making raw teacher outputs too uninformative for knowledge transfer.
+    \item \textbf{Vocabulary mismatch:} Distinct tokenizer vocabularies render standard token-level KL divergence mathematically undefined.
+\end{itemize}
+
+\subsection{Method}
+
+TIDE comprises three modular components, each addressing one challenge.
+
+\paragraph{TIDAL: Dual-Axis Lambda Modulation (Temporal Dynamics).}
+Extends AR distillation scheduling (TAID) by adding a diffusion-timestep axis. The distillation weight modulates along two axes simultaneously:
+\begin{equation}
+    \lambda_t = \lambda_{\mathrm{train}} \cdot (1 - t), \quad \lambda_{\mathrm{train}} = \lambda_{\mathrm{init}} + (\lambda_{\mathrm{max}} - \lambda_{\mathrm{init}}) \cdot \tfrac{1}{2}\!\left(1 - \cos(\pi p)\right)
+\end{equation}
+where $t \in [\epsilon, 1)$ is the diffusion timestep and $p \in [0, 1]$ is normalized training progress ($\lambda_{\mathrm{init}} = 0.1$, $\lambda_{\mathrm{max}} = 0.9$). The interpolated target blends student logits $s$ and teacher logits $\tau$:
+\begin{equation}
+    r_t = \mathrm{softmax}\!\left(\frac{(1 - \lambda_t) \cdot s + \lambda_t \cdot \tau}{T}\right)
+\end{equation}
+with $r_t$ detached from the computation graph. The TIDAL loss is:
+\begin{equation}
+    \mathcal{L}_{\mathrm{TIDAL}} = D_{\mathrm{KL}}(r_t \| \mathrm{softmax}(s / T)) \cdot T^2
+\end{equation}
+
+\paragraph{CompDemo: Complementary Demonstration-Conditioned Denoising (Context Scarcity).}
+Under heavy masking, the teacher produces noisy predictions. CompDemo partitions masked positions into two complementary subsets $M_A$ and $M_B$ ($M_A \cup M_B = M$, $M_A \cap M_B = \emptyset$, $|M_A|/|M| \approx 0.5$). Two teacher forward passes are performed: Pass 1 reveals $M_A$ as clean tokens and predicts $M_B$; Pass 2 reveals $M_B$ and predicts $M_A$. This shifts the teacher to a lower effective masking ratio, improving prediction quality. The merged logits replace the standard teacher output. Cost: $\sim$50\% training time increase (teacher is frozen, no gradient).
+
+\paragraph{Reverse CALM: Cross-Tokenizer Alignment (Vocabulary Mismatch).}
+When teacher and student use different tokenizers, TIDE aligns at the byte level using tokenkit to identify ``chunks''---minimal text spans containing complete tokens from each vocabulary. Binary alignment matrices $A_S$ and $A_T$ map token-level to chunk-level log-probabilities: $\mathrm{LP}_S = \mathrm{lp}_S \cdot A_S$, $\mathrm{LP}_T = \mathrm{lp}_T \cdot A_T$. The Reverse CALM loss inverts the standard binary cross-entropy direction:
+\begin{equation}
+    \mathcal{L}_{\mathrm{Rev\text{-}CALM}} = -\!\left[p_s^c \log p_t^c + (1 - p_s^c) \log(1 - p_t^c)\right]
+\end{equation}
+where $p_s^c = \exp(\mathrm{LP}_S^c / T)$ and $p_t^c = \exp(\mathrm{LP}_T^c / T)$. This is equivalent to minimizing $D_{\mathrm{KL}}^{\mathrm{Bern}}(p_s^c \| p_t^c)$, a mode-seeking objective. The key advantage: Reverse CALM has \emph{bounded gradients} since $|\partial \mathcal{L}_{\mathrm{Rev}} / \partial \theta| \leq |\log((1-\epsilon)/\epsilon)|$ depends only on the fixed teacher, unlike Forward CALM where gradients explode when $p_s^c \to 0$.
+
+\paragraph{Two Validated Pipelines.}
+\begin{itemize}
+    \item \textbf{Pipeline A (cross-tokenizer):} LLaDA2.0-mini (16B MoE) $\to$ BD3LM (0.6B) using Reverse CALM. Loss: $\mathcal{L}_A = \mathcal{L}_{\mathrm{CE}} + w_{\mathrm{calm}} \cdot \mathcal{L}_{\mathrm{Rev\text{-}CALM}}$.
+    \item \textbf{Pipeline B (shared-tokenizer):} WeDLM-8B-Instruct (8B dense) $\to$ BD3LM (0.6B) using TIDAL + CompDemo. Loss: $\mathcal{L}_B = \mathcal{L}_{\mathrm{CE}} + w_{\mathrm{tidal}} \cdot \mathcal{L}_{\mathrm{TIDAL}}$.
+\end{itemize}
+
+\subsection{Results}
+
+\paragraph{Main Benchmarks (8 tasks).}
+The best configuration (cross-tokenizer pipeline with all TIDE components) achieves 34.20 average across GSM8K, MATH, BBH, MMLU-Pro, HellaSwag, MMLU, HumanEval, and MBPP---a +1.53 improvement over the undistilled BD3LM baseline (32.67). Key highlights:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Benchmark} & \textbf{AR (0.6B)} & \textbf{BD3LM (no dist.)} & \textbf{TIDE-Best} & \textbf{$\Delta$} \\
+\midrule
+GSM8K & 59.60 & 45.56 & \textbf{52.24} & +6.68 \\
+HumanEval & 32.30 & 46.34 & \textbf{49.39} & +3.05 \\
+MBPP & 36.60 & 37.80 & \textbf{38.60} & +0.80 \\
+BBH & 41.50 & 26.32 & \textbf{27.37} & +1.05 \\
+Average & 40.91 & 32.67 & \textbf{34.20} & +1.53 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Notably, the 0.6B distilled dLLM \emph{surpasses} the 0.6B AR baseline on code generation (HumanEval 49.39 vs.\ 32.30, +17.09), suggesting diffusion models' parallel generation maintains global coherence beneficial for structured outputs.
+
+\paragraph{Inference Efficiency.}
+22$\times$ memory reduction vs.\ LLaDA2.0-mini (1.4 GB vs.\ 31.3 GB), 11$\times$ vs.\ WeDLM-8B (1.4 GB vs.\ 15.5 GB), 5.2$\times$ speedup over LLaDA2.0-mini (6.25s vs.\ 32.55s). Distillation adds only 2.6\% throughput reduction vs.\ undistilled BD3LM (41.0 vs.\ 42.1 tokens/s).
+
+\paragraph{Ablation Findings.}
+(1) Timestep axis is the most impactful TIDAL component: removing it causes the largest average drop ($-0.26$), primarily driven by $-3.05$ on HumanEval. (2) CompDemo provides consistent gains ($+0.17$ avg). (3) Full TIDE outperforms the standalone timestep-only baseline by +0.08 avg, with the training-progress axis preventing a 0.83-point drop on GSM8K. (4) Dark knowledge transfer confirmed: distilled student achieves 46\% lower KL divergence relative to the teacher compared to undistilled baseline (6.69 vs.\ 12.44 on GSM8K).
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Student scale:} Only 0.6B students tested; scaling to 1.3B--3B is unexplored.
+    \item \textbf{Architecture generality:} Validated only on block diffusion with staircase attention; continuous-state diffusion LMs and encoder-style dLLMs untested.
+    \item \textbf{Short context:} 512-token training context; efficacy of cross-tokenizer alignment on extended sequences is unknown.
+    \item \textbf{Single-teacher pipelines:} Cross-tokenizer and shared-tokenizer pipelines are processed independently; multi-teacher distillation is unexplored.
+    \item \textbf{Reverse CALM + TIDAL incompatibility:} TIDAL's late-training gradient suppression ($1 - \lambda_t \to 0.1$) destroys Reverse CALM's self-selection mechanism. Combining them is counterproductive.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper directly bridges \textbf{Topic 1: LLM Efficiency} and \textbf{Topic 4: Diffusion LLM}:
+
+\begin{itemize}
+    \item \textbf{Distillation for dLLMs:} Our Review \#15 (Discrete MMD Distillation) explored distilling discrete diffusion models via MMD, and Review \#11 (xLSTM Distillation) examined cross-architecture distillation to hybrid architectures. TIDE extends both directions: cross-architecture transfer \emph{between} dLLM variants with potentially different tokenizers, achieving 27$\times$ parameter compression (16B $\to$ 0.6B).
+    \item \textbf{Block diffusion connection:} The student uses BD3LM with staircase attention and block size 32, directly connecting to our DMax review (Review \#29, aggressive parallel decoding for dLLMs) and LLaDA2.0-Uni's block-wise masking (Review \#38).
+    \item \textbf{TESSY parallels:} TESSY (Review \#34) introduced style/capability token decomposition for AR distillation. TIDE's TIDAL scheduling similarly decomposes the distillation signal along the temporal (timestep) and training-progress axes, though the decomposition targets different phenomena (teacher reliability vs.\ token type).
+    \item \textbf{V-GRPO connection:} V-GRPO (Review \#42) showed that ELBO-based surrogates can replace MDP formulations for diffusion RL. TIDE's Reverse CALM uses a similarly simplified surrogate (chunk-level Bernoulli KL) that avoids the intractability of full cross-architecture likelihood matching.
+    \item \textbf{Scaling law implications:} Our iso-depth scaling law review (Review \#41) measured $\phi = 0.46$ for looped transformers. TIDE's compression ratio (16B $\to$ 0.6B maintaining competitive performance) suggests that cross-architecture distillation could achieve even higher effective capacity recovery than parameter sharing.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Multi-Teacher Distillation for Unified Diffusion LLMs}
+
+\paragraph{Gap.}
+TIDE processes cross-tokenizer and shared-tokenizer pipelines independently, using a single teacher per pipeline. LLaDA2.0-Uni (Review \#38) demonstrates that unified multimodal diffusion models benefit from diverse training signals. Combining knowledge from multiple heterogeneous teachers---an AR teacher for sequential reasoning, a discrete diffusion teacher for parallel generation, and a continuous diffusion teacher for image understanding---could produce a student that inherits complementary strengths. The Reverse CALM + TIDAL incompatibility identified in TIDE suggests that naively combining distillation signals from different sources is counterproductive.
+
+\paragraph{Approach.}
+Design a multi-teacher distillation framework with teacher-specific routing. Each teacher contributes through its native loss formulation: AR teachers via standard KD with TAID scheduling, shared-tokenizer dLLM teachers via TIDAL + CompDemo, and cross-tokenizer dLLM teachers via Reverse CALM. A lightweight router (analogous to MoE gating) learns to weight each teacher's contribution per-token and per-timestep. The router is trained jointly with the student using a meta-learning objective that maximizes downstream performance on a small validation set. Drawing from TESSY's style/capability decomposition (Review \#34), the router could learn to route ``capability'' tokens (math, reasoning) to the AR teacher and ``style'' tokens (fluency, coherence) to the dLLM teacher.
+
+\paragraph{Feasibility.}
+The modular design of TIDE's three components facilitates this: each teacher-specific loss is already independent. The main challenge is computational cost---multiple frozen teacher forward passes per training step. CompDemo already accepts the $\sim$50\% overhead from two passes; adding a third teacher would increase total overhead to $\sim$100\%. Caching teacher logits (possible since teachers are frozen) could mitigate this.
+
+\subsection{Direction 2: Adaptive CompDemo via Reinforcement Learning}
+
+\paragraph{Gap.}
+CompDemo's mask splitting ratio $\rho = 0.5$ is fixed, revealing half the masked positions as clean tokens in each pass. This is suboptimal: at low masking ratios (few masked tokens), the teacher is already reliable without demonstration, wasting computation. At very high masking ratios, revealing only half may still leave insufficient context. The optimal demonstration ratio should vary with both the masking ratio $t$ and the input content difficulty.
+
+\paragraph{Approach.}
+Train an adaptive demonstration controller using RL. The controller takes as input the current masking ratio $t$, input features (from the student's intermediate representations), and the teacher's prediction entropy at the current $t$, then outputs: (1) whether to apply CompDemo at all (saving computation when the teacher is already confident), and (2) the demonstration ratio $\rho \in [0.1, 0.9]$ when CompDemo is applied. The reward signal is the improvement in student validation loss attributed to CompDemo (measured by comparing with and without demonstration on a small held-out set). This connects to TEMPO's EM framework (Review \#37): the E-step estimates the optimal $\rho$ for each masking level, while the M-step trains the student with the adapted demonstrations. The BandPO probability-aware bounds (Review \#5) could provide stable policy updates for the controller.
+
+\paragraph{Feasibility.}
+The controller is lightweight (small MLP on the student's hidden states) and adds negligible parameters. The main challenge is reward estimation: comparing student loss with and without CompDemo requires additional teacher forward passes during training, further increasing computational cost. An amortized approach---estimating the reward from cached teacher logits at different masking levels---could reduce this overhead.
+
+\subsection{Direction 3: Cross-Architecture Distillation with Continuous Diffusion LLMs}
+
+\paragraph{Gap.}
+TIDE is validated only on discrete (masked) diffusion LLMs. Our LangFlow review (Review \#33) showed that continuous diffusion can match discrete approaches for language modeling (PPL 30.0 on LM1B). Distilling from a discrete dLLM teacher to a continuous diffusion student (or vice versa) would bridge the discrete-continuous divide. The challenges are distinct: continuous diffusion operates in embedding space rather than token space, making both CompDemo (which reveals discrete clean tokens) and CALM (which aligns discrete tokenizer vocabularies) inapplicable in their current form.
+
+\paragraph{Approach.}
+Adapt TIDE's three components for continuous diffusion: (1) TIDAL transfers directly since the dual-axis scheduling depends only on diffusion timestep and training progress, not on discrete vs.\ continuous state spaces. (2) CompDemo is reformulated as ``partial clean injection'': instead of revealing clean tokens, inject the clean embedding vectors for a subset of positions into the noised continuous representation. (3) Reverse CALM is replaced by an embedding-space alignment loss: chunk-level matching operates on projected embeddings rather than token probabilities, using an MMD-based alignment (connecting to our Discrete MMD Distillation review, Review \#15) that is agnostic to the representation space. The LangFlow CE-via-Bregman-divergence framework (Review \#33) provides the theoretical foundation for defining distillation objectives in continuous diffusion space.
+
+\paragraph{Feasibility.}
+LangFlow demonstrated that continuous diffusion LLMs are now competitive. The main challenge is that continuous diffusion models have different noise schedules (Gaussian vs.\ masking) and loss functions (MSE vs.\ CE), requiring careful adaptation of TIDAL's timestep-dependent weighting. The Gumbel noise schedule from LangFlow could serve as the continuous counterpart to the discrete masking schedule.
+
+\section{Conclusion}
+
+TIDE introduces the first framework for cross-architecture distillation of diffusion LLMs, addressing three fundamental challenges through modular components: TIDAL (dual-axis temporal scheduling), CompDemo (complementary demonstration for context enrichment), and Reverse CALM (gradient-bounded cross-tokenizer alignment). The framework achieves 27$\times$ parameter compression (LLaDA2.0-mini 16B $\to$ BD3LM 0.6B) with +1.53 average benchmark improvement over the undistilled baseline, 22$\times$ memory reduction, and 5.2$\times$ speedup. The standout finding is the +17.09 HumanEval gain of the distilled 0.6B dLLM over the 0.6B AR baseline, suggesting that diffusion models' parallel generation provides structural advantages for code generation that survive aggressive compression. The Reverse CALM gradient analysis provides a principled solution to cross-tokenizer distillation that could generalize beyond dLLMs. For the dLLM community, TIDE establishes that cross-architecture knowledge transfer is viable and opens the path to deploying compact dLLMs distilled from frontier-scale teachers.
+
+\begin{thebibliography}{15}
+
+\bibitem{tide}
+Zhang, G., Wang, W., Tian, Y., Yuan, L.
+\newblock Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.26951}, 2026.
+
+\bibitem{discretemmd}
+Liu, Y., et al.
+\newblock Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD.
+\newblock \emph{arXiv preprint arXiv:2603.20155}, 2026.
+
+\bibitem{xlstm}
+Beck, M., et al.
+\newblock Effective Distillation to Hybrid xLSTM Architectures.
+\newblock \emph{arXiv preprint arXiv:2603.15590}, 2026.
+
+\bibitem{tessy}
+Yang, C., et al.
+\newblock TESSY: Teacher-Student Cooperation Framework for Reasoning Model Fine-Tuning.
+\newblock \emph{arXiv preprint arXiv:2604.14164}, 2026.
+
+\bibitem{llada2uni}
+Bie, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{dmax}
+Li, Y., et al.
+\newblock DMax: Aggressive Parallel Decoding for dLLMs.
+\newblock \emph{arXiv preprint arXiv:2604.08302}, 2026.
+
+\bibitem{vgrpo}
+Tang, B., et al.
+\newblock V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\bibitem{isodepth}
+Schwethelm, K., et al.
+\newblock How Much Is One Recurrence Worth? Iso-Depth Scaling Laws for Looped Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.21106}, 2026.
+
+\bibitem{langflow}
+Ye, J., et al.
+\newblock LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling.
+\newblock \emph{arXiv preprint arXiv:2604.11748}, 2026.
+
+\bibitem{tempo}
+Zhang, Q., et al.
+\newblock TEMPO: Scaling Test-time Training for Large Reasoning Models.
+\newblock \emph{arXiv preprint arXiv:2604.19295}, 2026.
+
+\bibitem{bandpo}
+Zhang, Y., et al.
+\newblock BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM RL.
+\newblock \emph{arXiv preprint arXiv:2603.04918}, 2026.
+
+\bibitem{dare}
+Liu, S., et al.
+\newblock DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.
+\newblock \emph{arXiv preprint arXiv:2604.04215}, 2026.
+
+\end{thebibliography}
+
+\end{document}
