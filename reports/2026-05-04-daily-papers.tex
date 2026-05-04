@@ -1,0 +1,236 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: CoPD --- Co-Evolving Policy Distillation\\for Multi-Capability Post-Training}
+\author{Internbot --- Automated Research Review}
+\date{May 4, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Co-Evolving Policy Distillation \\
+\textbf{Authors:} Naibin Gu, Chenxu Yang, Qingyi Si, Haoran Sun, Yuqi Ren, Lingjiao Chen, Xiang Li, Zhong Zhang (IIE CAS, JD.COM) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2604.27083}{2604.27083} \\
+\textbf{Topics:} Reinforcement Learning, Knowledge Distillation, Multi-Capability Post-Training, Policy Optimization
+
+\subsection{Problem}
+
+Post-training LLMs to acquire multiple capabilities simultaneously (e.g., math, code, visual reasoning) faces two fundamental failure modes in current pipelines:
+
+\begin{itemize}
+    \item \textbf{Capability divergence in mixed RLVR:} When a single model is trained on a heterogeneous mixture of capability-specific RL data, gradient conflicts between capabilities cause net divergence. Formally, the capability divergence $\Phi = \sum_{k} \|\nabla_\theta \mathcal{L}_k - \nabla_\theta \mathcal{L}_{\mathrm{mixed}}\|$ grows with the number of capabilities, degrading performance on individual tasks below what single-capability training achieves.
+    \item \textbf{Poor absorption in static OPD:} The standard pipeline trains domain experts via single-capability RLVR, then distills them into a unified student via on-policy distillation (OPD). However, when the teacher and student exhibit low behavioral overlap---measured by top-$k$ agreement $O_k$ on sampled responses---the student fails to absorb the teacher's knowledge. The absorption efficiency $\eta(O)$ drops sharply when $O_k$ is low, because the teacher's preferred responses lie outside the student's reachable policy manifold.
+\end{itemize}
+
+The paper identifies the root cause as a \emph{chicken-and-egg problem}: effective distillation requires high behavioral overlap, but behavioral overlap can only increase through distillation. Static pipelines break this circular dependency only once (expert $\to$ student), missing the opportunity for iterative co-adaptation.
+
+\subsection{Method}
+
+CoPD (Co-Evolving Policy Distillation) resolves both failure modes through $K$ parallel branches that co-evolve via alternating specialization and mutual teaching.
+
+\paragraph{Architecture.}
+$K$ branches are initialized from the same base model $\pi_\theta^{(0)}$. Each branch $k$ is associated with a capability-specific dataset $\mathcal{D}_k$ (e.g., math, code, visual QA). Training alternates between two phases per cycle $c$:
+
+\paragraph{Phase I: Branch-Specific RLVR.}
+Each branch $k$ independently performs RLVR on its own capability data $\mathcal{D}_k$ for $S_{\mathrm{RL}}$ steps:
+\begin{equation}
+    \theta_c^{(k)} = \mathrm{RLVR}(\theta_{c-1}^{(k)}, \mathcal{D}_k, S_{\mathrm{RL}})
+\end{equation}
+using a standard GRPO-style objective with verifier-based rewards. By isolating capabilities to separate branches, gradient conflicts ($\Phi > 0$) are eliminated entirely---each branch's gradients are coherent within a single capability domain.
+
+\paragraph{Phase II: Mutual OPD.}
+After specialization, branches bidirectionally teach and learn from each other for $S_{\mathrm{OPD}}$ steps. For each branch $k$, the cross-branch teacher signal aggregates knowledge from all other branches $j \neq k$:
+\begin{equation}
+    \delta_{i,t}^{(k \leftarrow j)} = \pi_{\theta_c^{(j)}}(y_{i,t} \mid x_i, y_{i,<t}) - \pi_{\theta_c^{(k)}}(y_{i,t} \mid x_i, y_{i,<t})
+\end{equation}
+The OPD loss for branch $k$ incorporates teacher signals from all sibling branches, weighted by their relevance. Crucially, the teaching is \emph{mutual}: branch $k$ simultaneously serves as teacher for branches $j \neq k$ on capability $k$, and as student learning capabilities $j$ from other branches.
+
+\paragraph{Behavioral Consistency Hypothesis.}
+The key theoretical insight is that OPD absorption efficiency $\eta$ correlates linearly with the top-$k$ behavioral overlap $O_k$ between teacher and student:
+\begin{equation}
+    O_k(\pi_T, \pi_S) = \frac{1}{N} \sum_{i=1}^{N} \frac{|\mathrm{Top}_k(\pi_T; x_i) \cap \mathrm{Top}_k(\pi_S; x_i)|}{k}
+\end{equation}
+where $\mathrm{Top}_k(\pi; x_i)$ denotes the $k$ highest-probability responses sampled from policy $\pi$ for prompt $x_i$. The paper verifies this with a Pearson correlation of $r = 0.89$ across experimental conditions. Because co-evolution gradually increases $O_k$ between branches over successive cycles, each subsequent OPD phase is more efficient than the last---resolving the chicken-and-egg problem.
+
+\paragraph{Hub-and-Spoke Topology for $K > 2$.}
+For three or more branches, full pairwise mutual OPD scales quadratically. CoPD adopts a hub-and-spoke topology where one branch (the ``hub'', chosen as the text/general capability) receives knowledge from all spoke branches and redistributes it. This reduces OPD complexity from $O(K^2)$ to $O(K)$ while maintaining knowledge flow through the hub.
+
+\paragraph{Training Schedule.}
+Each cycle consists of $S_{\mathrm{RL}}$ RLVR steps followed by $S_{\mathrm{OPD}}$ OPD steps, with an optimal ratio of $S_{\mathrm{RL}} : S_{\mathrm{OPD}} = 1.5 : 1$ found via ablation. After the final cycle, branch parameters are merged to produce the unified model.
+
+\subsection{Results}
+
+\paragraph{Two-Branch Setting (Qwen3-VL-4B).}
+With math and code as the two capabilities:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Math} & \textbf{Code} & \textbf{Overall} \\
+\midrule
+Mixed RLVR & 54.32 & 55.87 & 55.10 \\
+Best Static OPD & 55.41 & 57.17 & 56.29 \\
+CoPD (2-branch) & \textbf{57.03} & \textbf{58.39} & \textbf{57.71} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+CoPD's unified model outperforms the best static OPD baseline by +1.42 overall. Remarkably, the unified model \emph{surpasses the domain-specific experts on their own domains}---the math branch alone scores lower on math than the final merged CoPD model, demonstrating that mutual teaching creates synergies rather than compromises.
+
+\paragraph{Three-Branch Setting.}
+Adding a text (general) branch with hub-and-spoke topology:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{Math} & \textbf{Code} & \textbf{Text} & \textbf{Overall} \\
+\midrule
+MOPD (static) & 56.12 & 57.34 & 57.51 & 56.99 \\
+CoPD (3-branch) & \textbf{57.48} & \textbf{58.61} & \textbf{58.27} & \textbf{58.12} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The 3-branch CoPD achieves 58.12 overall vs.\ 56.99 for multi-teacher OPD (MOPD), a +1.13 improvement.
+
+\paragraph{Behavioral Overlap Dynamics.}
+The top-$k$ overlap $O_k$ between branches increases monotonically across cycles: starting at $\sim$0.35 after Phase I of cycle 1, rising to $\sim$0.52 after cycle 3. This confirms the co-evolution mechanism---branches converge behaviorally while retaining their specialized strengths.
+
+\paragraph{Ablation.}
+Both directions of mutual OPD are necessary: removing the ``expert teaches student'' direction causes $-0.8$ drop, removing ``student teaches expert'' causes $-0.5$ drop. The $S_{\mathrm{RL}} : S_{\mathrm{OPD}} = 1.5 : 1$ ratio is optimal; ratios below 1:1 undertrain specialization, while ratios above 2:1 allow branches to diverge too far for effective OPD.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Scale:} Validated only on Qwen3-VL-4B; behavior at 7B--70B scales is unknown. The behavioral consistency hypothesis may not hold at larger scales where policy manifolds are more expressive.
+    \item \textbf{Compute cost:} $K$-fold GPU cost during Phase I (parallel RLVR for each branch). For $K = 3$, total training cost is $\sim$3$\times$ a single mixed-RLVR run, though the cycles allow early stopping.
+    \item \textbf{Hub selection:} The text branch is chosen as hub without ablating alternatives. For domains where text is not the natural generalist (e.g., multimodal), the optimal hub may differ.
+    \item \textbf{Merging strategy:} Only simple parameter averaging is used for the final merge. More sophisticated merging (TIES, DARE-TIES, task arithmetic) could further improve the unified model.
+    \item \textbf{Number of cycles:} Three cycles are used without analyzing convergence criteria; it is unclear when additional cycles yield diminishing returns.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper bridges \textbf{Topic 1: LLM Efficiency} (distillation) and \textbf{Topic 2: Reinforcement Learning} (RLVR, policy optimization):
+
+\begin{itemize}
+    \item \textbf{Self-Distilled RLVR connection:} Our Review \#25 (Self-Distilled RLVR, \cite{sdrlvr}) showed that self-distillation during RLVR can amplify reasoning capabilities. CoPD extends this from self-distillation to \emph{mutual} distillation between co-evolving specialists, with the behavioral consistency hypothesis providing a principled explanation for when distillation succeeds or fails.
+    \item \textbf{TESSY parallels:} TESSY (Review \#34, \cite{tessy}) introduced teacher-student cooperation for reasoning fine-tuning. CoPD pushes this further by making every branch simultaneously a teacher and a student, creating a fully symmetric cooperation framework rather than TESSY's asymmetric teacher-student roles.
+    \item \textbf{TIDE distillation framework:} TIDE (Review \#43, \cite{tide}) addressed cross-architecture distillation for dLLMs. CoPD's mutual OPD could complement TIDE's TIDAL scheduling: using co-evolving branches to train multiple dLLM students that teach each other, potentially overcoming TIDE's single-student limitation.
+    \item \textbf{RAGEN-2 reasoning collapse:} RAGEN-2 (Review \#28, \cite{ragen2}) identified reasoning collapse in agentic RL. CoPD's branch isolation may prevent such collapse by ensuring each branch maintains coherent capability-specific reasoning, with mutual OPD transferring solutions without the gradient conflicts that trigger collapse.
+    \item \textbf{KnowRL knowledge guidance:} KnowRL (Review \#32, \cite{knowrl}) used external knowledge to guide RLVR. CoPD achieves a similar effect endogenously---each branch's specialized knowledge guides the others through OPD, without requiring external knowledge sources.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Co-Evolving Distillation for Diffusion LLMs}
+
+\paragraph{Gap.}
+CoPD is validated only on autoregressive models. Diffusion LLMs face an analogous multi-capability challenge: LLaDA2.0-Uni (Review \#38, \cite{llada2uni}) trains a unified model for understanding and generation, but the masking-based training of dLLMs creates different gradient dynamics than AR models. TIDE (Review \#43, \cite{tide}) demonstrated that dLLM distillation requires timestep-aware scheduling. Whether CoPD's alternating RLVR + mutual OPD framework transfers to the diffusion setting---where ``RLVR'' becomes diffusion-specific RL (V-GRPO, Review \#42, \cite{vgrpo}) and ``OPD'' must account for the denoising trajectory---is an open question.
+
+\paragraph{Approach.}
+Design a CoPD-for-dLLMs framework where each branch is a diffusion LLM specializing in a different capability (e.g., text generation, code, visual understanding). Phase I uses V-GRPO-style RL with capability-specific reward models. Phase II performs mutual distillation using TIDAL scheduling from TIDE, where the teacher signal $\delta^{(k \leftarrow j)}$ is computed at each denoising timestep $t$ rather than each autoregressive position. The behavioral overlap metric $O_k$ is adapted to measure agreement over denoising trajectories: two branches agree when they assign high probability to the same denoised outputs at the same timestep. CompDemo from TIDE could be integrated into Phase II to improve teacher reliability under heavy masking.
+
+\paragraph{Feasibility.}
+V-GRPO already provides the RL machinery for diffusion models, and TIDE provides the distillation framework. The main challenge is defining a meaningful cross-branch teacher signal in the diffusion setting, where token-level probability comparisons are complicated by the stochastic denoising process. The ELBO-based surrogates from V-GRPO could simplify this by providing tractable probability estimates.
+
+\subsection{Direction 2: Continual Co-Evolution with Adaptive Branch Spawning}
+
+\paragraph{Gap.}
+CoPD uses a fixed number of branches $K$ determined before training. In practice, the set of desired capabilities may evolve over time---new tasks emerge, existing tasks are refined, or capabilities need to be added without retraining from scratch. This connects to the continual learning challenge (Topic 3): how to extend a co-evolving system with new branches without disrupting the knowledge already consolidated in existing branches. Memanto (Review \#40, \cite{memanto}) demonstrated typed semantic memory for long-horizon agents; an analogous capability-typed memory could help new branches rapidly achieve behavioral overlap with existing ones.
+
+\paragraph{Approach.}
+Design a continual CoPD framework where new branches can be spawned from the current unified model at any time. When a new capability $k_{\mathrm{new}}$ is introduced: (1) Initialize branch $k_{\mathrm{new}}$ from the current merged model (maximizing initial behavioral overlap with existing branches). (2) Run Phase I RLVR on $\mathcal{D}_{k_{\mathrm{new}}}$ only. (3) Run Phase II mutual OPD between $k_{\mathrm{new}}$ and existing branches, using a warm-start schedule that begins with high $\lambda$ (heavy reliance on existing branches' knowledge) and gradually reduces it. The abstraction-based continual learning framework from Review \#26 (\cite{abstraction}) could provide the inductive bias for preventing catastrophic forgetting in existing branches during integration. The dynamic MoE token assignment from Review \#21 (\cite{dynamicmoe}) could route tokens to specialized experts within each branch, enabling finer-grained capability specialization.
+
+\paragraph{Feasibility.}
+The key advantage is that initializing from the merged model provides a strong starting point ($O_k$ is already high). The main risk is that existing branches' parameters are ``frozen'' during new branch integration, potentially limiting the unified model's ability to integrate the new capability. An alternating schedule---brief re-RLVR of existing branches followed by full mutual OPD---could mitigate this at the cost of additional compute.
+
+\subsection{Direction 3: Automated Topology Discovery via Meta-Learning}
+
+\paragraph{Gap.}
+CoPD uses a manually designed hub-and-spoke topology for $K > 2$, with the text branch as hub. This assumes that text is the natural generalist capability that can mediate knowledge transfer between all pairs. For different capability sets (e.g., multimodal perception, tool use, long-context reasoning), the optimal topology may be fully connected, hierarchical, or asymmetric. The hub-and-spoke choice also interacts with the $S_{\mathrm{RL}} : S_{\mathrm{OPD}}$ ratio---some branch pairs may benefit from more OPD steps while others need less.
+
+\paragraph{Approach.}
+Learn the topology and schedule jointly using meta-learning. Define the topology as a weighted directed graph $G = (V, E, w)$ where vertices are branches, edges represent OPD directions, and weights $w_{j \to k}$ control the strength of knowledge transfer from branch $j$ to branch $k$. The meta-objective maximizes the merged model's performance on a multi-capability validation set. The weights are updated via hypergradient descent: $w \leftarrow w + \alpha \nabla_w \mathcal{L}_{\mathrm{val}}(\theta^*(w))$, where $\theta^*(w)$ is the result of inner-loop CoPD training with topology $w$. To make this tractable, use a first-order approximation (analogous to DARTS) that differentiates through a single OPD step rather than the full training loop. The FIPO future-KL framework (Review \#22, \cite{fipo}) could provide the forward-looking reward signal for the meta-learner, guiding topology updates toward configurations that maximize long-term knowledge transfer.
+
+\paragraph{Feasibility.}
+The meta-learning overhead is moderate: computing hypergradients requires one additional forward-backward pass per topology update, which occurs only once per cycle (not per step). The main challenge is the discrete nature of topology choices (which edges to include). The Gumbel-softmax relaxation used in NAS could provide differentiable topology selection. For $K = 3$, the topology search space is small (6 possible directed edges with continuous weights), but for larger $K$ the search space grows quadratically, requiring efficient pruning.
+
+\section{Conclusion}
+
+CoPD introduces a co-evolutionary framework for multi-capability LLM post-training that resolves the fundamental tension between capability specialization and knowledge unification. By alternating branch-specific RLVR (eliminating gradient conflicts) with mutual on-policy distillation (enabling bidirectional knowledge transfer), CoPD achieves unified models that surpass domain-specific experts on their own domains---a result that static distillation pipelines cannot achieve. The behavioral consistency hypothesis ($r = 0.89$ correlation between top-$k$ overlap and absorption efficiency) provides a principled metric for predicting and optimizing distillation success, with broad applicability beyond CoPD. The hub-and-spoke topology enables scaling to three or more capabilities with linear rather than quadratic OPD cost. For the broader post-training community, CoPD demonstrates that iterative co-adaptation between specialists is strictly more powerful than one-shot distillation, opening avenues for continual capability expansion and automated topology optimization.
+
+\begin{thebibliography}{15}
+
+\bibitem{copd}
+Gu, N., Yang, C., Si, Q., Sun, H., Ren, Y., Chen, L., Li, X., Zhang, Z.
+\newblock Co-Evolving Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2604.27083}, 2026.
+
+\bibitem{sdrlvr}
+Xu, H., et al.
+\newblock Self-Distilled RLVR.
+\newblock \emph{arXiv preprint arXiv:2604.03128}, 2026.
+
+\bibitem{tessy}
+Yang, C., et al.
+\newblock TESSY: Teacher-Student Cooperation Framework for Reasoning Model Fine-Tuning.
+\newblock \emph{arXiv preprint arXiv:2604.14164}, 2026.
+
+\bibitem{tide}
+Zhang, G., Wang, W., Tian, Y., Yuan, L.
+\newblock Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.26951}, 2026.
+
+\bibitem{ragen2}
+Wang, Z., et al.
+\newblock RAGEN-2: Reasoning Collapse in Agentic RL.
+\newblock \emph{arXiv preprint arXiv:2604.06268}, 2026.
+
+\bibitem{knowrl}
+Li, J., et al.
+\newblock KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance.
+\newblock \emph{arXiv preprint arXiv:2604.12627}, 2026.
+
+\bibitem{llada2uni}
+Bie, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{vgrpo}
+Tang, B., et al.
+\newblock V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\bibitem{memanto}
+Shrestha, R., et al.
+\newblock Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.
+\newblock \emph{arXiv preprint arXiv:2604.22085}, 2026.
+
+\bibitem{abstraction}
+Tack, J., et al.
+\newblock Abstraction as a Memory-Efficient Inductive Bias for Continual Learning.
+\newblock \emph{arXiv preprint arXiv:2603.17198}, 2026.
+
+\bibitem{dynamicmoe}
+Wang, Y., et al.
+\newblock On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large Vision Language Models.
+\newblock \emph{arXiv preprint arXiv:2603.27481}, 2026.
+
+\bibitem{fipo}
+Zhang, Y., et al.
+\newblock FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2603.19835}, 2026.
+
+\end{thebibliography}
+
+\end{document}
