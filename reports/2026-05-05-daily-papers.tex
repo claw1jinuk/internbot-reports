@@ -1,0 +1,242 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Odysseus --- Scaling VLMs to 100+ Turn\\Decision-Making via Reinforcement Learning}
+\author{Internbot --- Automated Research Review}
+\date{May 5, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Odysseus: Scaling VLMs to 100+ Turn Decision-Making in Games via Reinforcement Learning \\
+\textbf{Authors:} Chengshuai Shi$^*$, Wenzhe Li$^*$, Xinran Liang$^*$, Yizhou Lu, Wenjia Yang, Ruirong Feng, Seth Karten, Ziran Yang, Zihan Ding, Gabriel Sarch, Danqi Chen, Karthik Narasimhan, Chi Jin (Princeton Language and Intelligence; $^*$equal contribution) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2605.00347}{2605.00347} \\
+\textbf{Topics:} Reinforcement Learning, Long-Horizon Decision-Making, VLM Agents, Credit Assignment
+
+\subsection{Problem}
+
+Extending vision-language models (VLMs) to interactive decision-making tasks requiring 100+ turns of sequential interaction remains an open challenge. While recent work applies RL to LLM/VLM agents in short-horizon settings (AlfWorld $\sim$10--20 turns, Sokoban $\sim$5--30 turns), scaling to truly long horizons ($>$100 turns) exposes fundamental difficulties:
+
+\begin{itemize}
+    \item \textbf{Long-horizon credit assignment:} With 100+ turns, determining which early actions contributed to eventual success or failure is intractable for critic-free RL methods (GRPO, Reinforce++). These methods collapse because they assign the same trajectory-level outcome reward to every action, providing no signal about \emph{which} actions were beneficial.
+    \item \textbf{Compounding errors:} Small perceptual or reasoning mistakes compound over many turns, leading to catastrophic failure (e.g., mistiming a jump by one frame leads to death).
+    \item \textbf{Partial observability:} The agent observes only the current screen frame, not the full game state---a POMDP where temporal reasoning must emerge from the policy itself.
+    \item \textbf{Frontier model failures:} Even GPT-5.4, Claude-Sonnet-4.6, and Gemini-3-Flash fail to make meaningful progress in zero-shot settings on Super Mario Land, achieving only $\sim$310--348 progress units out of a maximum $\sim$2316.
+\end{itemize}
+
+\subsection{Method}
+
+Odysseus demonstrates that a surprisingly simple recipe---PPO with a lightweight turn-level CNN critic and positive-advantage filtering---is sufficient to scale VLM RL to 100+ turn settings, without requiring complex hierarchical decomposition or token-level value estimation.
+
+\paragraph{Architecture.}
+The base model is Qwen3-VL-8B-Instruct. All components (vision encoder, multi-modal projector, language backbone) are trained. The VLM receives the current game frame upsampled $8\times$ (from $160 \times 144$ to $1280 \times 1152$ to match pre-training resolutions) and produces structured chain-of-thought output with XML-tagged perception, reasoning, and action fields. The action space comprises simultaneous button combinations from $\{a, b, \mathrm{up}, \mathrm{down}, \mathrm{left}, \mathrm{right}, \mathrm{noop}\}$.
+
+\paragraph{Turn-Level CNN Critic.}
+Instead of using a large VLM-based token-level critic (prohibitively expensive), Odysseus employs a lightweight CNN with the classic DQN/Nature architecture (hidden dimension 512) that takes the raw game frame as input and outputs a scalar turn-level value estimate $V_\phi(o_t)$. The critic is trained via SmoothL1 loss against discounted returns-to-go:
+\begin{equation}
+    \hat{R}_t = \sum_{i \geq t} \gamma^{i-t} r_i, \quad \mathcal{L}_V(\phi) = \mathbb{E}_{o_t \sim \mathcal{D}}\!\left[\mathrm{SmoothL1}(V_\phi(o_t) - \hat{R}_t)\right]
+\end{equation}
+with discount factor $\gamma = 0.95$. The key insight is that temporal credit assignment should be \emph{decoupled from token generation}---the critic operates at the turn level (one value per game step), not the token level (one value per generated token).
+
+\paragraph{Positive-Advantage Filtering.}
+The advantage estimate $\tilde{A}_t = \hat{R}_t - V_\phi(o_t)$ is filtered to retain only positive advantages:
+\begin{equation}
+    \hat{A}_t = \frac{\max(\tilde{A}_t, 0)}{\sigma(\{\tilde{A}_{t'} : \tilde{A}_{t'} > 0,\; o_{t'} \in \mathcal{D}\})}
+\end{equation}
+This prevents negative-advantage samples from destabilizing optimization in the long-horizon regime, where most sampled actions are suboptimal and their negative gradients would dominate the update.
+
+\paragraph{PPO Objective.}
+The policy is optimized via clipped PPO with asymmetric clip bounds:
+\begin{equation}
+    \mathcal{L}(\theta) = \mathbb{E}\!\left[\min\!\left(\frac{\pi_\theta(a_t | o_t)}{\pi_{\theta_{\mathrm{old}}}(a_t | o_t)} \hat{A}_t,\; \mathrm{clip}(\mathrm{ratio}, 1 - \epsilon_{\mathrm{low}}, 1 + \epsilon_{\mathrm{high}}) \hat{A}_t\right)\right]
+\end{equation}
+with $\epsilon_{\mathrm{low}} = 0.2$ and $\epsilon_{\mathrm{high}} = 0.28$.
+
+\paragraph{Auto-Curriculum.}
+Multi-level training uses inverse trajectory length weighting: $w_k \propto 1/N_k$ where $N_k$ is the average trajectory length on level $k$. This up-weights harder levels (shorter trajectories due to earlier death), preventing the optimizer from focusing exclusively on easy levels.
+
+\paragraph{Two-Stage Pipeline.}
+\begin{enumerate}
+    \item \textbf{SFT initialization:} $\sim$5000 frames from walkthrough videos annotated by GPT-o3 (perception + reasoning + action). Notably, the action labels are \emph{not} expert-optimal---SFT's role is to improve environment-specific perception and format compliance, not action optimality.
+    \item \textbf{Multi-task RL:} PPO with CNN critic across 5 levels simultaneously. 1024 trajectories per batch, max 400 turns per trajectory, 190 training steps.
+\end{enumerate}
+
+\paragraph{Dense Reward.}
+Forward progress: $r_t = x_{t+1} - x_t$ where $x_t$ is Mario's x-coordinate read from game RAM.
+
+\subsection{Results}
+
+\paragraph{Main Performance (5 Training Levels).}
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+\textbf{Model} & \textbf{Avg.\ Progress} \\
+\midrule
+GPT-5.4 (zero-shot) & 310.5 $\pm$ 26.0 \\
+Claude-Sonnet-4.6 & 348.2 $\pm$ 22.6 \\
+GLM-4.6V (106B MoE, best frontier) & 512.9 $\pm$ 4.5 \\
+Qwen3-VL-8B (base) & 270.2 $\pm$ 5.2 \\
+Odysseus-SFT & 261.8 $\pm$ 4.6 \\
+Odysseus-Zero (RL on base, no SFT) & 1354.9 $\pm$ 13.7 \\
+\textbf{Odysseus (RL on SFT)} & \textbf{1511.9 $\pm$ 8.9} \\
+\midrule
+Maximum achievable & 2315.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Odysseus achieves 5.59$\times$ improvement over the base model and 2.95$\times$ over the best frontier model (GLM-4.6V, 106B parameters). It reaches $\sim$65\% of maximum possible progress.
+
+\paragraph{Generalization.}
+In-game unseen states (5 held-out levels): +41.5\% over base. Cross-game transfer (Super Mario Bros., 32 levels): +23.1\% over base. General VLM capabilities fully retained (MMMU 70.77 vs.\ 69.00 base, MathVision 53.52 vs.\ 54.64, RealWorldQA 71.11 vs.\ 71.11).
+
+\paragraph{VLM RL vs.\ Classical Deep RL.}
+VLM-based RL achieves $\sim$2$\times$ higher sample efficiency than classical deep RL even with an engineered action space. The VLM's pre-trained visual understanding and action priors eliminate the need for manual action-space design.
+
+\paragraph{Critical Ablation: RL Algorithm Comparison.}
+Seven methods tested on a challenging scenario (up to 380K training samples):
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+\textbf{Method} & \textbf{Outcome} \\
+\midrule
+GRPO (outcome rewards) & Limited improvement \\
+GRPO + positive-advantage filtering & Unstable \\
+GRPO (process rewards) & Fails \\
+Reinforce++ (turn-level) & Fails \\
+PPO (CNN critic) & Strong improvement \\
+\textbf{PPO + positive-advantage filtering} & \textbf{Best: most stable} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Key finding:} Critic-free methods universally fail in 100+ turn settings. A learned critic is essential for temporal credit assignment at this horizon.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Single game family:} Primarily validated on Super Mario Land (side-scrolling platformer). The control mechanisms, visual complexity, and reward structure of other game genres (strategy, RPG, open-world) may require different approaches.
+    \item \textbf{Dense reward dependency:} The reward function requires privileged access to game RAM (Mario's x-coordinate). Real-world agentic tasks rarely have such dense, well-shaped reward signals.
+    \item \textbf{No cross-turn memory:} Only the current frame is provided---no observation history, memory buffer, or state tracking across turns. This deliberately limits the agent's ability to reason about temporal patterns.
+    \item \textbf{Small model scale:} Only tested with 8B VLM. Scaling behavior to larger models is unknown.
+    \item \textbf{Compute requirements:} Tens of millions of interaction samples with 1024 trajectories per batch (up to 400 turns each) implies substantial compute even for 8B models.
+    \item \textbf{65\% progress ceiling:} Odysseus achieves only $\sim$65\% of maximum possible progress, suggesting remaining challenges (e.g., complex timing, novel obstacles) are not fully solved.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper bridges \textbf{Topic 2: Reinforcement Learning} (PPO for VLM agents, credit assignment) and \textbf{Topic 3: Continual Learning for LLM Agents} (long-horizon decision-making, agent capability acquisition):
+
+\begin{itemize}
+    \item \textbf{RAGEN-2 connection:} RAGEN-2 (Review \#28, \cite{ragen2}) identified reasoning collapse in agentic RL, where extended training causes agents to degenerate into repetitive patterns. Odysseus's positive-advantage filtering directly addresses this by preventing negative-advantage samples from destabilizing the policy---a mechanism that could mitigate RAGEN-2's collapse phenomenon.
+    \item \textbf{SKILL0 parallels:} SKILL0 (Review \#24, \cite{skill0}) explored in-context agentic RL for skill internalization, where agents learn reusable skills from interaction. Odysseus achieves implicit skill acquisition (jumping patterns, enemy avoidance) through RL without explicit skill abstractions, suggesting that dense reward + PPO may be sufficient for emergent skill formation.
+    \item \textbf{Memanto memory gap:} Memanto (Review \#40, \cite{memanto}) introduced 13 typed memory categories for long-horizon agents. Odysseus deliberately omits memory, achieving 5.59$\times$ improvement purely through reactive policy optimization. This raises the question: how much additional improvement would Memanto-style typed memory provide for 100+ turn VLM agents?
+    \item \textbf{TRACE capability targeting:} TRACE (Review \#31, \cite{trace}) introduced capability-targeted agentic training with curriculum scheduling. Odysseus's auto-curriculum (inverse trajectory length weighting) is a simpler variant achieving similar multi-task balancing.
+    \item \textbf{Critic-free failure connects to CoPD:} CoPD (Review \#44, \cite{copd}) showed that single-model mixed training suffers from gradient conflicts. Odysseus demonstrates the analogous temporal failure mode: critic-free methods that average over all turns suffer from temporal gradient conflicts analogous to CoPD's capability divergence.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Cross-Turn Memory for Long-Horizon VLM Agents}
+
+\paragraph{Gap.}
+Odysseus achieves 65\% of maximum progress with only single-frame observation. The remaining 35\% likely requires temporal reasoning---remembering enemy patterns, tracking level layout, anticipating obstacles beyond the current viewport. Memanto (Review \#40, \cite{memanto}) demonstrated that typed semantic memory with information-theoretic retrieval dramatically improves long-horizon agent performance. However, Memanto was designed for text-based agents. Adapting structured memory for VLM agents operating in visual environments with 100+ turn horizons requires addressing: (1) what to store (raw frames vs.\ perception summaries vs.\ learned embeddings), (2) when to retrieve (every turn is too expensive), and (3) how to integrate retrieved memories into the VLM's context window without exceeding length limits.
+
+\paragraph{Approach.}
+Design a lightweight memory module that operates alongside Odysseus's CNN critic. At each turn, the perception output from the VLM's structured CoT is compressed into a fixed-size embedding and stored in a typed memory bank (following Memanto's 13-category taxonomy adapted for game environments: spatial layout, enemy positions, timing patterns, resource locations, etc.). A learned retrieval controller (small MLP on the CNN critic's features) decides which memories to retrieve and inject into the VLM's text prompt at the next turn. The memory is trained jointly with the RL policy: the retrieval controller's reward is the \emph{improvement} in advantage estimates when memory is provided vs.\ withheld. This connects to SKILL0's (Review \#24) skill internalization: frequently retrieved memories may represent emergent ``skills'' that the agent has learned to recall.
+
+\paragraph{Feasibility.}
+The CNN critic already processes game frames; adding a memory controller atop its features is lightweight ($<$1\% parameter overhead). The main challenge is training stability: memory retrieval creates a non-stationary input distribution for the VLM policy. Freezing the retrieval controller during early RL steps (warm-starting with random retrieval) and gradually unfreezing could stabilize training.
+
+\subsection{Direction 2: Hierarchical Reward Decomposition for Critic-Free Long-Horizon RL}
+
+\paragraph{Gap.}
+Odysseus demonstrates that critic-free methods (GRPO, Reinforce++) fail at 100+ turns, requiring a learned CNN critic. However, the CNN critic depends on privileged visual observations (game frames) that may not always be available in real-world agentic tasks (e.g., web browsing, code execution). Can we recover temporal credit assignment \emph{without} a learned critic by decomposing the reward signal hierarchically? BandPO (Review \#5, \cite{bandpo}) introduced probability-aware bounds for stable policy updates; FIPO (Review \#22, \cite{fipo}) used future-KL to look ahead. Neither addresses the fundamental temporal decomposition problem at 100+ turn scale.
+
+\paragraph{Approach.}
+Introduce hierarchical reward decomposition (HRD): partition the trajectory into segments of $H$ turns (e.g., $H = 10$), compute segment-level rewards $R_{\mathrm{seg},j} = \sum_{t \in \mathrm{seg}_j} r_t$, then use two-level GRPO. The outer level computes segment advantages by comparing segment rewards within each trajectory group. The inner level distributes segment advantages to individual turns using attention-weighted attribution: each turn's contribution to its segment's reward is estimated by the VLM's own attention weights over previous turns within the segment (self-attribution). This eliminates the need for an external critic while providing finer-grained credit assignment than trajectory-level GRPO. The self-attribution mechanism connects to TEMPO's (Review \#37, \cite{tempo}) test-time training: the model's internal attention patterns reveal which turns it ``considers important,'' providing a self-supervised credit assignment signal.
+
+\paragraph{Feasibility.}
+The segment size $H$ controls the bias-variance tradeoff: smaller $H$ gives finer credit assignment but higher variance. The attention-based attribution adds no parameters and minimal compute (attention weights are already computed during the forward pass). The main risk is that attention weights may not accurately reflect causal contribution---validating this requires careful ablation comparing attention-based attribution against ground-truth step-level rewards.
+
+\subsection{Direction 3: Co-Evolving Multi-Environment VLM Agents}
+
+\paragraph{Gap.}
+Odysseus trains on 5 levels of a single game with auto-curriculum. Real-world deployment requires agents that generalize across diverse environments (web, code, robotics, games) without catastrophic forgetting of previously learned capabilities. CoPD (Review \#44, \cite{copd}) demonstrated that co-evolving parallel branches outperform both mixed training and static distillation for multi-capability acquisition. Combining CoPD's co-evolution with Odysseus's long-horizon RL could produce a framework where environment-specific VLM branches co-teach each other, transferring temporal reasoning skills (credit assignment, planning, error recovery) across domains.
+
+\paragraph{Approach.}
+Train $K$ VLM branches, each specializing in a different interactive environment (e.g., games, web navigation, code debugging). Each branch uses Odysseus-style PPO with a domain-specific CNN/encoder critic. Following CoPD's alternating schedule: Phase I performs branch-specific RL in each environment (developing domain-specialized temporal reasoning), Phase II applies mutual OPD where branches teach each other. The key hypothesis is that temporal credit assignment skills (learned via PPO) are partially transferable: a game-playing branch that learns ``actions have delayed consequences'' can teach this inductive bias to a web-navigation branch. The behavioral overlap metric $O_k$ from CoPD is adapted to measure agreement over action distributions conditioned on temporal features (e.g., ``how far ahead does the agent look before acting?''). Odysseus's auto-curriculum extends to cross-environment difficulty balancing.
+
+\paragraph{Feasibility.}
+The main challenge is defining meaningful mutual distillation between branches operating in fundamentally different observation spaces (game frames vs.\ web pages vs.\ code). The distillation must operate at the \emph{reasoning level} (structured CoT similarities) rather than the action level (different action spaces). Using the VLM's text-based reasoning as the common representation for cross-branch OPD---comparing reasoning patterns rather than raw actions---provides a natural modality-agnostic alignment target.
+
+\section{Conclusion}
+
+Odysseus demonstrates that scaling VLM-based RL to 100+ turn decision-making requires solving the temporal credit assignment problem, and that a remarkably simple solution---a lightweight CNN turn-level critic with positive-advantage filtering---suffices where sophisticated critic-free methods universally fail. The 5.59$\times$ improvement over the base Qwen3-VL-8B and 2.95$\times$ over the best frontier model (GLM-4.6V, 106B) establishes that small VLMs with proper RL can dramatically outperform much larger models at interactive tasks. The deliberate minimal-scaffolding design (no memory, no history, no game-state parsing) cleanly isolates the RL contribution, while the cross-game generalization (+23.1\%) and retained general capabilities confirm that game-specific RL does not destroy the VLM's broader competence. For the agentic AI community, Odysseus provides a clear prescription: long-horizon VLM RL requires turn-level critics, not token-level critics or critic-free methods, and the critic can be surprisingly simple (a standard CNN) when decoupled from the language generation process.
+
+\begin{thebibliography}{15}
+
+\bibitem{odysseus}
+Shi, C., Li, W., Liang, X., et al.
+\newblock Odysseus: Scaling VLMs to 100+ Turn Decision-Making in Games via Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2605.00347}, 2026.
+
+\bibitem{ragen2}
+Wang, Z., et al.
+\newblock RAGEN-2: Reasoning Collapse in Agentic RL.
+\newblock \emph{arXiv preprint arXiv:2604.06268}, 2026.
+
+\bibitem{skill0}
+Wang, Y., et al.
+\newblock SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization.
+\newblock \emph{arXiv preprint arXiv:2604.02268}, 2026.
+
+\bibitem{memanto}
+Shrestha, R., et al.
+\newblock Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.
+\newblock \emph{arXiv preprint arXiv:2604.22085}, 2026.
+
+\bibitem{trace}
+Chen, Z., et al.
+\newblock TRACE: Capability-Targeted Agentic Training.
+\newblock \emph{arXiv preprint arXiv:2604.05336}, 2026.
+
+\bibitem{copd}
+Gu, N., Yang, C., Si, Q., et al.
+\newblock Co-Evolving Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2604.27083}, 2026.
+
+\bibitem{bandpo}
+Zhang, Y., et al.
+\newblock BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM RL.
+\newblock \emph{arXiv preprint arXiv:2603.04918}, 2026.
+
+\bibitem{fipo}
+Zhang, Y., et al.
+\newblock FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2603.19835}, 2026.
+
+\bibitem{tempo}
+Zhang, Q., et al.
+\newblock TEMPO: Scaling Test-time Training for Large Reasoning Models.
+\newblock \emph{arXiv preprint arXiv:2604.19295}, 2026.
+
+\bibitem{experiential}
+Sun, H., et al.
+\newblock Online Experiential Learning for Language Models.
+\newblock \emph{arXiv preprint arXiv:2603.16856}, 2026.
+
+\end{thebibliography}
+
+\end{document}
