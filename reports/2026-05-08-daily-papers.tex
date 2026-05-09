@@ -1,0 +1,263 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Cola DLM --- Continuous Latent Diffusion\\Language Model}
+\author{Internbot --- Automated Research Review}
+\date{May 8, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Continuous Latent Diffusion Language Model \\
+\textbf{Authors:} Hongcan Guo, Qinyu Zhao, Yian Zhao, Shen Nie, Rui Zhu, Qiushan Guo, Feng Wang, Tao Yang, Hengshuang Zhao, Guoqiang Wei, Yan Zeng (ByteDance Seed, University of Hong Kong, ANU, Peking University, Renmin University) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2605.06548}{2605.06548} \\
+\textbf{Topics:} Diffusion LLM, Continuous Latent Space, Hierarchical Latent-Variable Models, Flow Matching
+
+\subsection{Problem}
+
+Existing alternatives to autoregressive (AR) language models each fail to jointly achieve three goals: generation efficiency (avoiding sequential token-by-token inference), scalable representation learning, and effective global semantic modeling. The paper identifies a fundamental taxonomic distinction among current approaches based on the \emph{role} of the diffusion path:
+
+\begin{itemize}
+    \item \textbf{Discrete diffusion (LLaDA):} Operates in discrete token space via masking/absorption. The diffusion path performs \emph{observation recovery}---iteratively reconstructing masked tokens. Intermediate discrete states are poorly suited for representing global semantic structure, and information loss under heavy masking limits fine-grained control.
+    \item \textbf{Continuous token-space diffusion (Plaid/LangFlow):} Maps tokens into continuous embeddings and applies diffusion. However, the state space remains token-aligned ($h_0 = \mathrm{Embed}(x)$), and the path still performs observation recovery in a continuous but non-compressed space. No explicit hierarchical latent variable is introduced.
+    \item \textbf{Autoregressive models:} Exact token-level likelihood via the chain rule, but constrained to a fixed left-to-right ordering with inherently sequential inference.
+\end{itemize}
+
+Cola DLM introduces a fourth paradigm: diffusion as \emph{prior transport} in a compressed continuous latent space, explicitly decomposing text generation into global semantic organization (latent prior) and local textual realization (conditional decoder).
+
+\subsection{Method}
+
+Cola DLM is a hierarchical latent-variable language model with three components: a Text VAE ($\sim$500M params), a block-causal DiT ($\sim$1.8B params), and a conditional decoder (part of the VAE). Total: $\sim$2.3B parameters.
+
+\paragraph{Hierarchical Formulation.}
+Let $x \in \mathcal{X}$ be a discrete text sequence and $z_0 \in \mathbb{R}^d$ its continuous latent variable. The generative model factorizes as:
+\begin{equation}
+    p(x) = \int p_\theta(x \mid z_0)\, p_\psi(z_0)\, \mathrm{d}z_0
+\end{equation}
+where $p_\theta$ is the conditional decoder and $p_\psi$ is the learned latent prior. The encoder $q_\phi(z_0 \mid x)$ participates \emph{only} in variational inference during training---it is not part of the generative model at test time (except for encoding known prefixes).
+
+\paragraph{Block-Causal DiT Prior.}
+The latent prior $p_\psi(z_0)$ is modeled via a Continuous Normalizing Flow (CNF) learned by flow matching. The latent sequence is partitioned into $B$ blocks of size 16:
+\begin{equation}
+    p_\psi(z_0) = p_\psi(z_0^{(1)}) \prod_{b=2}^{B} p_\psi(z_0^{(b)} \mid z_0^{(<b)})
+\end{equation}
+Within each block, the DiT uses \emph{bidirectional} attention (all tokens attend to all others); across blocks, \emph{causal} dependence is enforced. Generation proceeds by solving the reverse ODE from Gaussian noise $z_1 \sim \mathcal{N}(0, I)$ to data $z_0 = \Phi_{0 \leftarrow 1}^\psi(z_1)$, block by block.
+
+\paragraph{Text VAE.}
+Both encoder and decoder are \emph{strictly causal} (not bidirectional) with 4 layers each, hidden dimension 1536, and default latent dimension $d = 16$. The causal constraint prevents information leakage and enables streaming generation. Stage 1 pretrains the VAE with:
+\begin{equation}
+    \mathcal{L}_{\mathrm{VAE}} = -\mathbb{E}_{q_\phi(z_0 | x)} \log p_\theta(x \mid z_0) + \beta\, \mathrm{KL}(q_\phi(z_0 \mid x) \| p_{\mathrm{base}}(z_0)) + \lambda_{\mathrm{mask}} \mathcal{L}_{\mathrm{mask}}
+\end{equation}
+where $\mathcal{L}_{\mathrm{mask}}$ is a BERT-style masking loss that prevents semantic collapse in the encoder.
+
+\paragraph{Joint Training (Stage 2).}
+The VAE and DiT are trained jointly from the pretrained VAE initialization:
+\begin{equation}
+    \mathcal{L}_{\mathrm{stage2}} = \lambda_{\mathrm{VAE}} \mathcal{L}_{\mathrm{VAE}} + \lambda_{\mathrm{fm}} \mathcal{L}_{\mathrm{FM}} + \lambda_{\mathrm{ref}}\, \mathbb{E}_{p_{\mathrm{data}}(x)} \mathrm{KL}(q_\phi(z_0 \mid x) \| q_{\phi_{\mathrm{ref}}}(z_0 \mid x))
+\end{equation}
+The flow matching loss $\mathcal{L}_{\mathrm{FM}}$ learns block-conditional priors. The reference-encoder KL regularizer (against the pretrained encoder $\phi_{\mathrm{ref}}$) prevents latent drift during joint training. Historical clean blocks use stop-gradient in the DiT's block-causal attention.
+
+\paragraph{ELBO Information Decomposition.}
+The average ELBO decomposes into three analytically distinguishable terms:
+\begin{equation}
+    \mathbb{E}_{p_{\mathrm{data}}} [\mathcal{L}_{\mathrm{ELBO}}] = \underbrace{\mathbb{E}_{q(x,z_0)} [\log p_\theta(x \mid z_0)]}_{\mathrm{reconstruction}} - \underbrace{I_q(X; Z_0)}_{\mathrm{compression}} - \underbrace{\mathrm{KL}(\bar{q}_\phi(z_0) \| p_\psi(z_0))}_{\mathrm{prior\ matching}}
+\end{equation}
+This decomposition is unique to Cola DLM among diffusion LLMs---it enables explicit analysis of how much global information the latent captures versus how much is left to the decoder.
+
+\paragraph{Inference.}
+Three steps: (1) encode known prefix $z^{\mathrm{pre}} \sim q_\phi(z^{\mathrm{pre}} \mid x^{\mathrm{pre}})$, (2) generate latent blocks autoregressively by solving the reverse ODE with classifier-free guidance (CFG $= 7$, 16 denoising steps), (3) decode text $\hat{x} \sim p_\theta(x \mid z^{\mathrm{pre}}, \hat{z}_0^{(1:B)})$. Clean condition repaint keeps known prefix latents fixed throughout denoising.
+
+\subsection{Results}
+
+\paragraph{Scaling Comparison (Matched Conditions).}
+Under strictly controlled conditions ($\sim$2.2--2.3B parameters, same data, tokenizer (OLMo 2, 100K vocab), optimizer, up to $\sim$2000 EFLOPs), Cola DLM is compared against AR and LLaDA baselines across 8 benchmarks (LAMBADA, SQuAD, MMLU, SIQA, Story Cloze, OBQA, RACE, HellaSwag) under a unified few-shot generative evaluation protocol:
+
+\begin{itemize}
+    \item \textbf{Task Average:} Cola DLM shows the strongest overall scaling trend, achieving the best final performance at high compute. AR is competitive at smaller budgets but its scaling curve flattens earlier.
+    \item \textbf{Reasoning-intensive tasks (MMLU, RACE, Story Cloze, OBQA):} Cola DLM achieves the best or near-best performance with particularly visible late-stage gains.
+    \item \textbf{Generative tasks:} On LAMBADA, Cola DLM stays close to AR at high compute. On SQuAD, Cola DLM eventually surpasses AR and approaches LLaDA.
+    \item \textbf{LLaDA:} Shows clear early gains but scaling is less persistent than Cola DLM at high compute.
+\end{itemize}
+
+\paragraph{Key Design Ablations.}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Ablation} & \textbf{Finding} & \textbf{Best Setting} \\
+\midrule
+VAE training strategy & Joint $>$ Fixed $>$ Scratch & Joint DiT $\times 1$ \\
+Latent dimension & Higher $d$ increases capacity & $d = 128 > 64 > 16$ \\
+BERT loss & Essential for semantic smoothness & Enabled \\
+VAE logSNR & Learnable $>$ fixed & Learnable ($\to 4.5$) \\
+Block size & 16 optimal & 16 $> 1 > 64 > 128$ \\
+Noise schedule (loc) & Systematic drift with $d$ & 1.0 for $d = 16$ \\
+Denoising steps & Saturates at 8--16 & 16 \\
+CFG scale & Non-monotonic & $\sim$7 \\
+First-block conditioning & Clean repaint dominant & Clean condition repaint \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Likelihood vs.\ Generation Gap.}
+A central finding: generation quality and likelihood-derived PPL are \emph{structurally misaligned} in Cola DLM. The learnable VAE logSNR ($\sim$4.5) gives the worst token-level PPL ($1.15 \times 10^6$) but generates semantically superior tokens (``on'' for ground-truth ``at'') compared to fixed logSNR settings that achieve better PPL but generate semantically weaker tokens. This confirms that generation depends on whether prior mass reaches semantically valid latent regions, while PPL demands precise local probability calibration.
+
+\paragraph{Latent Compression.}
+Patch size 2 outperforms patch size 1 when prompt lengths are aligned (18.12 vs.\ 17.31 avg) but nearly collapses for misaligned lengths (0.26 vs.\ 14.41), exposing a boundary sensitivity issue.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Controlled scale only:} $\sim$2.3B parameters, $\sim$2000 EFLOPs. Performance at larger scales and longer training is unknown.
+    \item \textbf{Hyperparameter sensitivity:} Many interacting design choices (VAE training strategy, latent dimension, noise schedule, logSNR, block size, CFG) all significantly affect performance.
+    \item \textbf{Compression boundary problem:} Sequence compression with patch size $>1$ collapses when prompt length is not divisible by the patch size.
+    \item \textbf{Likelihood--generation mismatch:} Conventional PPL-based evaluation is misleading for this model class, complicating comparison with AR baselines.
+    \item \textbf{Inference overhead:} Each block requires 8--16 denoising ODE steps plus VAE encoding/decoding. Wall-clock comparisons against AR or discrete diffusion are not reported.
+    \item \textbf{Multimodal extension preliminary:} Text-image unification shown qualitatively only, without competitive benchmarking.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper is core \textbf{Topic 4: Diffusion LLM}, introducing a fundamentally new paradigm for diffusion-based text generation:
+
+\begin{itemize}
+    \item \textbf{LangFlow connection:} LangFlow (Review \#33, \cite{langflow}) demonstrated that continuous diffusion can rival discrete for language modeling. Cola DLM goes further by showing that Plaid/LangFlow-style continuous token-space diffusion is a \emph{limiting case} of the Cola DLM framework---when $\sigma_0^2 \to 0$ and the encoder is nearly invertible, Cola DLM degenerates to token-aligned continuous diffusion. The explicit latent decomposition is the genuinely new ingredient.
+    \item \textbf{Discrete diffusion contrast:} Our reviews of LLaDA2.0-Uni (\#38, \cite{llada2uni}), Omni-Diffusion (\#7, \cite{omnidiff}), and Generalized Discrete Diffusion (\#16, \cite{gendiff}) all operate in the observation-recovery paradigm. Cola DLM's prior-transport paradigm offers a complementary perspective: diffusion models global semantics in latent space while delegating token-level realization to the decoder.
+    \item \textbf{TIDE distillation implications:} TIDE (Review \#43, \cite{tide}) addresses cross-architecture dLLM distillation. Cola DLM's latent space introduces a natural \emph{representation-level} distillation target: instead of matching token-level logits (TIDAL) or chunk-level probabilities (Reverse CALM), one could align latent distributions between teacher and student Cola DLMs.
+    \item \textbf{V-GRPO RL connection:} V-GRPO (Review \#42, \cite{vgrpo}) applied RL to diffusion models using ELBO-based surrogates. Cola DLM's explicit ELBO decomposition (Eq.\ 5) provides an even cleaner target for RL: reward signals could be applied directly in latent space, guiding the prior toward semantically desirable regions.
+    \item \textbf{S2D2 decoding efficiency:} S2D2 (Review \#19, \cite{s2d2}) accelerated dLLM decoding via self-speculation. Cola DLM's block-causal structure offers a different path to efficiency: generating 16 tokens per block with 8--16 denoising steps yields 1.6--2$\times$ sequential depth reduction.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Latent-Space Distillation for Compact Cola DLMs}
+
+\paragraph{Gap.}
+TIDE (Review \#43, \cite{tide}) showed that cross-architecture distillation for dLLMs requires solving three challenges: temporal dynamics, spatial context scarcity, and vocabulary mismatch. All three challenges stem from distilling in \emph{token space}. Cola DLM's continuous latent space eliminates the vocabulary mismatch problem entirely (latent vectors are vocabulary-agnostic) and transforms temporal dynamics into a continuous noise-schedule alignment problem. However, no distillation framework for hierarchical latent-variable language models exists.
+
+\paragraph{Approach.}
+Design a latent-space distillation framework with three components: (1) \emph{Prior alignment}: match the student DiT's learned prior $p_\psi^S(z_0)$ to the teacher's $p_\psi^T(z_0)$ via distribution matching in latent space, using an MMD-based objective (connecting to Discrete MMD Distillation, Review \#15, \cite{discretemmd}). (2) \emph{Decoder distillation}: transfer the teacher decoder's text-realization capability to a smaller student decoder via standard KD with TIDAL-style scheduling. (3) \emph{Latent dimensionality reduction}: the student uses $d_S < d_T$ latent dimensions with a learned projection, compressing the semantic information. Cola DLM's ELBO decomposition (Eq.\ 5) provides a principled metric: the distilled model should match the teacher's mutual information $I_q(X; Z_0)$ at the reduced dimensionality. CoPD's (Review \#44, \cite{copd}) co-evolving branches could be used to train multiple student DiTs specializing in different semantic aspects of the latent space.
+
+\paragraph{Feasibility.}
+The latent space is low-dimensional ($d = 16$ default), making distribution matching tractable. The main challenge is that the VAE and DiT are jointly trained---distilling only the DiT while keeping the student VAE fixed may not capture the co-adaptation. A two-stage distillation (first distill VAE, then jointly fine-tune DiT) mirrors Cola DLM's own training pipeline.
+
+\subsection{Direction 2: Reinforcement Learning in Continuous Latent Space}
+
+\paragraph{Gap.}
+V-GRPO (Review \#42, \cite{vgrpo}) demonstrated RL for discrete diffusion models using ELBO-based surrogates. DARE (Review \#27, \cite{dare}) aligned dLLMs via reward-guided denoising. Both operate in token/observation space, where reward signals must propagate through the entire denoising chain. Cola DLM's explicit latent variable offers a shortcut: reward signals can be applied \emph{directly in latent space}, bypassing the denoising trajectory entirely. The ELBO information decomposition (Eq.\ 5) suggests that RL should target the prior-matching term $\mathrm{KL}(\bar{q}_\phi \| p_\psi)$, steering the prior toward reward-rich latent regions.
+
+\paragraph{Approach.}
+Formulate latent-space RL for Cola DLM: the ``action'' is the latent vector $z_0$ sampled from $p_\psi$, the ``state'' is the prefix encoding $z^{\mathrm{pre}}$, and the reward is computed on decoded text $\hat{x} \sim p_\theta(x \mid z_0)$. Use a GRPO-style objective that compares rewards across multiple $z_0$ samples from the same prefix. The advantage is computed at the \emph{block level}: each latent block $z_0^{(b)}$ receives a reward proportional to the text quality of tokens decoded from that block. This naturally provides turn-level credit assignment (analogous to Odysseus's CNN critic, Review \#45, \cite{odysseus}), but the ``turn'' is a latent block rather than a game step. The block-causal structure ensures that earlier blocks can be optimized independently of later ones. BandPO's (Review \#5, \cite{bandpo}) probability-aware bounds provide stable policy updates in the continuous latent space.
+
+\paragraph{Feasibility.}
+The low-dimensional latent space ($d = 16$) makes GRPO-style sampling tractable (multiple $z_0$ samples are cheap compared to full denoising rollouts). The main challenge is that the reward requires decoding $z_0$ to text, which involves the causal decoder---backpropagating reward gradients through the decoder to the prior requires careful design (e.g., straight-through estimators or REINFORCE-style gradient estimation).
+
+\subsection{Direction 3: Continuous Latent Diffusion for Time Series Foundation Models}
+
+\paragraph{Gap.}
+Time series forecasting (Topic 5, most underserved at 3 reviews) lacks diffusion-based foundation models. Timer-S1 (Review \#4, \cite{timers1}) and LLaTiSA (Review \#39, \cite{llatisa}) use AR architectures adapted for time series, missing the global semantic modeling that Cola DLM provides. Time series data has strong global structure (trends, seasonality, cross-variate correlations) that is naturally suited to continuous latent representations. The hierarchical decomposition---global patterns in latent space, local values via conditional decoding---mirrors the way time series experts decompose signals into trend + seasonality + residuals.
+
+\paragraph{Approach.}
+Adapt Cola DLM for multivariate time series forecasting: (1) Replace the text VAE with a \emph{time series VAE} that maps multivariate windows $x \in \mathbb{R}^{C \times L}$ (channels $\times$ length) into continuous latents $z_0 \in \mathbb{R}^d$. The encoder uses channel-mixing attention (cross-variate) and temporal convolutions. (2) The block-causal DiT models latent priors over forecast horizons, where each block corresponds to a temporal segment. (3) The decoder reconstructs point forecasts and prediction intervals from latents. The noise schedule timeshift finding (optimal loc drifts with latent dimension) is directly applicable: time series with stronger global structure (e.g., macroeconomic data) should use higher $d$ and correspondingly higher loc. QuitoBench (Review \#23, \cite{quitobench}) provides the high-quality evaluation benchmark. The ELBO decomposition enables principled analysis of how much global temporal structure the latent captures.
+
+\paragraph{Feasibility.}
+Cola DLM's architecture is domain-agnostic---the Text VAE can be replaced with any encoder-decoder pair. The main challenges are: (1) time series tokenization is less standardized than text tokenization, requiring careful design of the VAE input representation, and (2) the block-causal structure assumes sequential generation, which aligns with autoregressive forecasting but may need adaptation for bidirectional imputation tasks. Timer-S1's serial scaling strategy could inform the scaling of the DiT component.
+
+\section{Conclusion}
+
+Cola DLM introduces a fundamentally new paradigm for diffusion-based language modeling: using diffusion as \emph{prior transport} in a compressed continuous latent space rather than observation recovery in token or token-aligned space. The hierarchical decomposition---global semantic prior via block-causal flow matching, local textual realization via conditional decoding---provides unique theoretical advantages: an explicit ELBO information decomposition, vocabulary-agnostic latent representations, and natural support for sequence compression. Under matched conditions at $\sim$2.3B scale, Cola DLM demonstrates the strongest overall scaling trend across 8 benchmarks compared to both AR and LLaDA baselines, particularly on reasoning-intensive tasks. The discovery that likelihood and generation quality are structurally misaligned in this model class challenges conventional PPL-based evaluation and motivates generation-oriented metrics. For the diffusion LLM community, Cola DLM establishes that prior transport in latent space is a viable and potentially superior alternative to observation recovery, opening paths toward latent-space distillation, RL, and cross-domain applications including time series forecasting.
+
+\begin{thebibliography}{15}
+
+\bibitem{coladlm}
+Guo, H., Zhao, Q., Zhao, Y., Nie, S., Zhu, R., Guo, Q., Wang, F., Yang, T., Zhao, H., Wei, G., Zeng, Y.
+\newblock Continuous Latent Diffusion Language Model.
+\newblock \emph{arXiv preprint arXiv:2605.06548}, 2026.
+
+\bibitem{langflow}
+Ye, J., et al.
+\newblock LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling.
+\newblock \emph{arXiv preprint arXiv:2604.11748}, 2026.
+
+\bibitem{llada2uni}
+Bie, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{omnidiff}
+Yang, Z., et al.
+\newblock Omni-Diffusion: Unified Multimodal Understanding and Generation with Masked Discrete Diffusion.
+\newblock \emph{arXiv preprint arXiv:2603.06577}, 2026.
+
+\bibitem{gendiff}
+Campbell, A., et al.
+\newblock Generalized Discrete Diffusion from Snapshots.
+\newblock \emph{arXiv preprint arXiv:2603.21342}, 2026.
+
+\bibitem{tide}
+Zhang, G., Wang, W., Tian, Y., Yuan, L.
+\newblock Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.26951}, 2026.
+
+\bibitem{vgrpo}
+Tang, B., et al.
+\newblock V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\bibitem{dare}
+Chen, Y., et al.
+\newblock DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.
+\newblock \emph{arXiv preprint arXiv:2604.04215}, 2026.
+
+\bibitem{s2d2}
+Li, Y., et al.
+\newblock S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.
+\newblock \emph{arXiv preprint arXiv:2603.25702}, 2026.
+
+\bibitem{discretemmd}
+Liu, Y., et al.
+\newblock Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD.
+\newblock \emph{arXiv preprint arXiv:2603.20155}, 2026.
+
+\bibitem{copd}
+Gu, N., Yang, C., Si, Q., et al.
+\newblock Co-Evolving Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2604.27083}, 2026.
+
+\bibitem{odysseus}
+Shi, C., Li, W., Liang, X., et al.
+\newblock Odysseus: Scaling VLMs to 100+ Turn Decision-Making in Games via Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2605.00347}, 2026.
+
+\bibitem{bandpo}
+Zhang, Y., et al.
+\newblock BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM RL.
+\newblock \emph{arXiv preprint arXiv:2603.04918}, 2026.
+
+\bibitem{timers1}
+Liu, M., et al.
+\newblock Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling.
+\newblock \emph{arXiv preprint arXiv:2603.04791}, 2026.
+
+\bibitem{llatisa}
+Zhang, X., et al.
+\newblock LLaTiSA: Towards Difficulty-Stratified Time Series Reasoning from Visual Perception to Semantics.
+\newblock \emph{arXiv preprint arXiv:2604.17295}, 2026.
+
+\bibitem{quitobench}
+Garza, A., et al.
+\newblock QuitoBench: A High-Quality Open Time Series Forecasting Benchmark.
+\newblock \emph{arXiv preprint arXiv:2603.26017}, 2026.
+
+\end{thebibliography}
+
+\end{document}
