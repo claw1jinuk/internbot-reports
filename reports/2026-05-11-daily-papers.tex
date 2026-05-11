@@ -1,0 +1,253 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: SkillOS --- Learning Skill Curation\\for Self-Evolving Agents}
+\author{Internbot --- Automated Research Review}
+\date{May 11, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} SkillOS: Learning Skill Curation for Self-Evolving Agents \\
+\textbf{Authors:} Siru Ouyang, Yanfei Chen, Rujun Han, Zifeng Wang, Jun Yan, Bhavana Dalvi Mishra, Rui Meng, Yizhu Jiao, Kaiwen Zha, Maohao Shen, Chun-Liang Li, Vishy Tirumalashetty, George Lee, Jiawei Han, Tomas Pfister, Chen-Yu Lee (Google Cloud AI Research, UIUC, MIT) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2605.06614}{2605.06614} \\
+\textbf{Topics:} Continual Learning, LLM Agents, Skill Management, Self-Evolving Systems
+
+\subsection{Problem}
+
+LLM-based agents remain \emph{one-off problem solvers} that fail to learn from past interactions. In streaming settings where tasks arrive sequentially, agents repeatedly start from scratch rather than accumulating, refining, and reusing experience. Existing approaches to skill management fall into three categories, each with fundamental limitations:
+
+\begin{itemize}
+    \item \textbf{Manual curation} (e.g., Anthropic's SKILL.md): requires human expertise and cannot scale.
+    \item \textbf{Heuristic/prompting-based methods} (AMem, ALITA): use fixed rules with no downstream performance feedback---curation decisions are disconnected from their actual impact on future tasks.
+    \item \textbf{Short-horizon RL} (SkillRL, D2Skill, ARISE): either focus on teaching agents to \emph{use} skills or optimize within short task streams, offering insufficient signal for complex operations like skill update and deletion.
+\end{itemize}
+
+The core challenge is that skill curation decisions have \emph{indirect and delayed} effects: inserting, updating, or deleting a skill today affects the agent's performance on \emph{future related tasks}, creating a long-horizon credit assignment problem. SkillOS reframes skill management as a long-horizon RL problem, training a dedicated skill curator via GRPO.
+
+\subsection{Method}
+
+SkillOS separates the agent into a \emph{frozen executor} $\pi_L$ and a \emph{trainable curator} $\pi_S$, connected through an external skill repository $\mathcal{S}_t$.
+
+\paragraph{Architecture.}
+\begin{itemize}
+    \item \textbf{Skill Repository (SkillRepo):} A collection of Markdown files following Anthropic's SKILL.md format. Each skill has YAML frontmatter (name, trigger description) and Markdown instructions (workflows, constraints, heuristics). Managed via file I/O operations: \texttt{insert\_skill}, \texttt{update\_skill}, \texttt{delete\_skill}.
+    \item \textbf{Agent Executor $\pi_L$ (frozen):} A frozen LLM (Qwen3-8B at training; Qwen3-8B/32B, Gemini-2.5-Pro, or Gemini-3.1-Flash-Lite at evaluation) that solves tasks conditioned on retrieved skills. BM25 retrieves top-$K{=}5$ skills from $\mathcal{S}_t$ per task. Uses ReAct prompting for agentic tasks and CoT for reasoning.
+    \item \textbf{Skill Curator $\pi_S$ (trainable):} After the executor completes task $x_t$, the curator observes the trajectory $\xi_t$, a self-judged correctness indicator $\mathbf{1}_{\xi_t}$, and retrieved skills $\tilde{\mathcal{S}}_t$. It generates a sequence of structured curation operations $c_t = (u_t^1, \ldots, u_t^{M_t})$ that transform the repository: $\mathcal{S}_{t+1} = \mathrm{ApplyOps}(\mathcal{S}_t, c_t)$. Base model: Qwen3-8B, fine-tuned with GRPO.
+\end{itemize}
+
+\paragraph{Grouped Task Streams.}
+The key training innovation addresses credit assignment for curation decisions. Tasks are partitioned into groups $\mathcal{G}_m = \{x_{m,1}, \ldots, x_{m,|\mathcal{G}_m|}\}$ of related instances using a two-stage pipeline:
+
+\begin{enumerate}
+    \item \textbf{Latent attribute annotation:} Gemini-2.5-Pro annotates each task with tags $Z_i = (T_i, S_i, C_i, R_i, P_i)$ capturing topics, skills, concepts, heuristic strategies, and common pitfalls.
+    \item \textbf{Group assembly:} Seed-and-extend grouping with phrase-level soft-Jaccard similarity (using all-MiniLM-L6-v2 embeddings) and a dependency gate enforcing six conditions: shared foundation, shared reasoning, non-duplication, sufficient relatedness, progression (new concept introduced), and curriculum direction (increasing difficulty).
+\end{enumerate}
+
+Within each group, the SkillRepo starts empty. The curator processes tasks sequentially, and skills curated from earlier tasks are evaluated by their impact on later related tasks.
+
+\paragraph{Composite Reward.}
+\begin{equation}
+    r = r^{\mathrm{task}} + \lambda_f r^{\mathrm{fc}} + \lambda_u r^{\mathrm{cnt}} + \lambda_c r^{\mathrm{comp}}
+\end{equation}
+with $\lambda_f = 1.0$, $\lambda_u = 0.1$, $\lambda_c = 0.05$. The four components are:
+
+\begin{itemize}
+    \item $r^{\mathrm{task}} = \frac{1}{|\mathcal{G}|-1} \sum_{i=2}^{|\mathcal{G}|} \mathbf{1}(\xi_i)$: average success on \emph{remaining} tasks in the group (excluding the first, which uses an empty SkillRepo). This provides executor-grounded downstream performance signal.
+    \item $r^{\mathrm{fc}}$: fraction of generated function calls that are valid and executable.
+    \item $r^{\mathrm{cnt}}$: external judge score (Qwen3-32B) for semantic meaningfulness and likely utility.
+    \item $r^{\mathrm{comp}} = \frac{1}{|\mathcal{G}|} \sum_{i=1}^{|\mathcal{G}|} (1 - |\mathcal{S}_i| / |\chi_i|)$: compression reward encouraging distillation over verbatim copying ($|\mathcal{S}_i|$ is repository token length, $|\chi_i|$ is curator input context length).
+\end{itemize}
+
+\paragraph{GRPO Training.}
+$N = 8$ independent rollouts per group. Each rollout evolves a different repository history. KL regularization is discarded to encourage policy exploration. The advantage $A^n = r^n - \frac{1}{N}\sum_{n'} r^{n'}$ is assigned uniformly to all tokens. Training: 50--100 steps on 16 H100 GPUs with verl framework.
+
+\subsection{Results}
+
+\paragraph{ALFWorld (Multi-Turn Agentic).}
+
+\begin{center}
+\begin{tabular}{llcc}
+\toprule
+\textbf{Executor} & \textbf{Method} & \textbf{Avg SR} & \textbf{Steps} \\
+\midrule
+\multirow{4}{*}{Qwen3-8B} & No Memory & 47.9 & 21.1 \\
+ & ReasoningBank & 55.7 & 20.1 \\
+ & SkillOS-gemini (Gemini curator) & 50.7 & 20.8 \\
+ & \textbf{SkillOS (8B RL curator)} & \textbf{61.2} & \textbf{18.9} \\
+\midrule
+Qwen3-32B & \textbf{SkillOS} & \textbf{68.6} & \textbf{17.3} \\
+Gemini-2.5-Pro & \textbf{SkillOS} & \textbf{80.2} & \textbf{14.8} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+SkillOS achieves +13.3 absolute SR over No Memory with Qwen3-8B (+27.8\% relative). The RL-trained 8B curator \emph{outperforms} Gemini-2.5-Pro used directly as curator (61.2 vs.\ 50.7), demonstrating that targeted RL training of a small model outweighs raw scale for curation.
+
+\paragraph{Reasoning Tasks (Single-Turn).}
+
+\begin{center}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Executor} & \textbf{Method} & \textbf{AIME24} & \textbf{AIME25} & \textbf{GPQA} & \textbf{Avg} \\
+\midrule
+\multirow{2}{*}{Qwen3-8B} & No Memory & 76.0 & 71.1 & 61.8 & 69.6 \\
+ & \textbf{SkillOS} & \textbf{80.0} & \textbf{76.7} & \textbf{64.6} & \textbf{73.8} \\
+\midrule
+Qwen3-32B & \textbf{SkillOS} & \textbf{85.6} & \textbf{81.1} & \textbf{72.4} & \textbf{79.7} \\
+Gemini-2.5-Pro & \textbf{SkillOS} & \textbf{92.2} & \textbf{86.7} & \textbf{86.8} & \textbf{88.6} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+SkillOS improves even single-turn reasoning by curating reusable problem-solving strategies across related problems.
+
+\paragraph{Cross-Executor Generalization.}
+The curator trained only with Qwen3-8B executor improves all tested executors---including Gemini-2.5-Pro (+13.8 absolute SR on ALFWorld over No Memory), demonstrating that curated skills are executor-agnostic.
+
+\paragraph{Cross-Task Transfer.}
+Skills curated from reasoning tasks transfer particularly well to agentic tasks (abstract strategies like decomposition, verification). Skills from specific environments (ALFWorld, WebShop) are more domain-specific and less transferable.
+
+\paragraph{Ablations.}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Configuration} & \textbf{ALFWorld SR} & \textbf{$\Delta$} \\
+\midrule
+SkillOS (full) & 61.2 & --- \\
+w/o content quality reward $r^{\mathrm{cnt}}$ & 58.6 & $-2.6$ \\
+w/o compression reward $r^{\mathrm{comp}}$ & 60.0 & $-1.2$ \\
+w/o grouped task streams & 57.3 & $-3.9$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Grouped task streams are the most critical component ($-3.9$ without). Content quality reward provides important intermediate supervision ($-2.6$ without).
+
+\paragraph{Behavioral Evolution.}
+Early training: insert operations dominate (repository population). As training progresses: update operations increase while insert declines---the curator shifts from expansion to \emph{refinement}. Delete remains rare; the dominant adaptation mode is revision/consolidation. Late-stage skills contain actionable conditional logic (failure handling, fallback plans) rather than generic tips.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Simple retrieval:} BM25 keyword-based retrieval may miss relevant skills. Dense or hybrid retrieval, or learned retrievers jointly optimized with curation, are unexplored.
+    \item \textbf{Flat skill representation:} Single Markdown files lack hierarchical composition (sub-skills) and executable code support from the full Anthropic SKILL.md format.
+    \item \textbf{Frozen executor:} Only the curator is trained; the executor cannot adapt its behavior based on skill quality feedback. Joint curator-executor optimization could improve alignment.
+    \item \textbf{Training compute:} 16 H100 GPUs for 2.5--5 days per domain. Each GRPO rollout requires sequential task execution within groups.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper is core \textbf{Topic 3: Continual Learning for LLM Agents}:
+
+\begin{itemize}
+    \item \textbf{SKILL0 connection:} SKILL0 (Review \#24, \cite{skill0}) learned skills via in-context agentic RL, where skills are internalized within the model's weights. SkillOS takes the complementary approach: skills are \emph{externalized} in a repository managed by a separate curator. This separation enables cross-executor transfer (the same curated skills improve Qwen3-8B, Qwen3-32B, and Gemini-2.5-Pro), which SKILL0's weight-internalized skills cannot achieve.
+    \item \textbf{Trace2Skill parallels:} Trace2Skill (Review \#20, \cite{trace2skill}) distilled trajectory-local lessons into transferable skills but used heuristic extraction. SkillOS provides the principled RL-based management layer that Trace2Skill's skills need---deciding when to insert new skills vs.\ update existing ones vs.\ delete obsolete ones.
+    \item \textbf{Memanto memory taxonomy:} Memanto (Review \#40, \cite{memanto}) defined 13 typed memory categories for long-horizon agents. SkillOS's skill files are a form of \emph{procedural memory}---one of Memanto's 13 types. Integrating SkillOS's RL-trained curation with Memanto's full memory taxonomy (adding episodic, semantic, and spatial memory) could yield more complete self-evolving agents.
+    \item \textbf{MetaClaw evolution:} MetaClaw (Review \#13, \cite{metaclaw}) introduced agents that meta-learn and evolve in the wild. SkillOS provides a more principled approach to the same goal: RL-optimized curation with grouped task streams for credit assignment, versus MetaClaw's heuristic evolution.
+    \item \textbf{Odysseus credit assignment:} Odysseus (Review \#45, \cite{odysseus}) showed that turn-level critics are essential for long-horizon credit assignment. SkillOS faces an analogous challenge at the skill-curation level: which curation decision (insert/update/delete) contributed to improved performance on later tasks? The grouped task stream design and composite reward are SkillOS's solution, though without an explicit critic.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Co-Evolving Curator-Executor via Mutual Distillation}
+
+\paragraph{Gap.}
+SkillOS freezes the executor during curator training, meaning the curator must adapt to the executor's fixed capabilities and failure modes. CoPD (Review \#44, \cite{copd}) demonstrated that co-evolving parallel branches via alternating RLVR and mutual OPD produces unified models that surpass individual specialists. The executor-curator pair in SkillOS is analogous to CoPD's branches---they specialize in different capabilities (task execution vs.\ skill management) and could benefit from bidirectional teaching.
+
+\paragraph{Approach.}
+Design a co-evolving SkillOS framework with alternating phases: Phase I trains the curator via GRPO on grouped task streams (as in SkillOS), producing improved skill repositories. Phase II fine-tunes the executor on tasks augmented with the curator's best skills, using the curator's curation decisions as implicit curriculum guidance. The executor learns not just to follow skills but to provide better trajectories for the curator to learn from. CoPD's behavioral consistency hypothesis applies: the curator and executor achieve higher behavioral overlap over successive cycles, improving mutual adaptation. The mutual OPD signal is the skill quality itself: executors that follow curated skills more faithfully provide cleaner trajectories for the curator to extract better skills from.
+
+\paragraph{Feasibility.}
+Phase I is SkillOS's existing training pipeline. Phase II requires executor fine-tuning (standard SFT or RLHF on successful trajectories), which is well-established. The main challenge is preventing co-evolution from converging to a narrow skill distribution. SkillOS's compression reward ($r^{\mathrm{comp}}$) and diversity inherent in grouped task streams could mitigate this.
+
+\subsection{Direction 2: Typed Hierarchical Skill Repository with Information-Theoretic Retrieval}
+
+\paragraph{Gap.}
+SkillOS uses flat Markdown files with BM25 retrieval. Two limitations follow: (1) skills cannot compose hierarchically (a ``planning'' meta-skill referencing ``search,'' ``verify,'' and ``backtrack'' sub-skills), and (2) BM25 keyword matching misses semantically related skills with different surface forms. Memanto (Review \#40, \cite{memanto}) demonstrated that typed memory categories with information-theoretic retrieval ($k{=}40$, recall-over-precision) dramatically improve agent performance. Combining Memanto's retrieval with SkillOS's RL-trained curation could yield a more powerful skill management system.
+
+\paragraph{Approach.}
+Extend SkillOS's skill repository to a typed hierarchical structure. Each skill has a \emph{type} (procedural, strategic, heuristic, constraint, meta-skill) and can reference child skills. The curator's operation set expands to include \texttt{compose\_skill} (create a meta-skill from existing skills) and \texttt{decompose\_skill} (split a skill into finer primitives). Retrieval switches from BM25 to Memanto's Moorcheh ITS engine with information-theoretic scoring: for each task, retrieve $k{=}20$ skills ranked by mutual information $I(x_t; s)$ rather than keyword overlap. The curator's reward includes a new term for repository \emph{coherence}: skills should have minimal redundancy (low pairwise mutual information) and maximal coverage (high joint coverage of the task distribution). SKILL0's (Review \#24) in-context skill internalization provides the benchmark: if externalized hierarchical skills approach the performance of weight-internalized skills at lower compute cost, the approach is validated.
+
+\paragraph{Feasibility.}
+Hierarchical file I/O is straightforward (directories as meta-skills, files as atomic skills). The ITS retrieval engine is already implemented in Memanto. The main challenge is training the curator to generate compositional operations (compose/decompose) through GRPO, which requires longer rollouts to observe the downstream effect of skill composition.
+
+\subsection{Direction 3: Continual Skill Curation Across Evolving Task Distributions}
+
+\paragraph{Gap.}
+SkillOS trains on a fixed task distribution and evaluates on held-out tasks from the same distribution. In real-world deployment, the task distribution \emph{shifts over time}---new task types emerge, existing ones evolve, and previously common tasks become rare. This is the classic continual learning challenge (Topic 3): the curator must update skills for new distributions without forgetting skills useful for previous ones. Abstraction-based continual learning (Review \#17, \cite{abstraction}) showed that abstract representations resist catastrophic forgetting. SkillOS's skills are already abstractions of task experience---the question is whether they remain useful under distribution shift.
+
+\paragraph{Approach.}
+Design a continual curation protocol where the curator encounters a non-stationary stream of task groups from shifting distributions. Each distribution phase introduces new task types while retaining some old ones. The curator must balance three objectives: (1) \emph{forward transfer}: curate skills for new task types that leverage knowledge from old types, (2) \emph{backward preservation}: avoid deleting or overwriting skills that remain useful for recurring old tasks, (3) \emph{capacity management}: keep the repository size bounded despite growing task diversity. The compression reward $r^{\mathrm{comp}}$ already incentivizes capacity management. Add a \emph{retrospective reward} component: periodically re-evaluate the current repository on a held-out set of old tasks, penalizing the curator if old-task performance degrades after skill updates. The Dynamic MoE token assignment from Review \#21 (\cite{dynamicmoe}) provides inspiration: just as MoE experts drift-aware token assignment prevents catastrophic forgetting in model parameters, a drift-aware skill assignment could route new tasks to new skills while preserving old skill-task associations.
+
+\paragraph{Feasibility.}
+The streaming task formulation is already SkillOS's native setting---extending to non-stationary distributions requires only modifying the task sampling strategy. The retrospective reward requires maintaining a buffer of old tasks for periodic evaluation, which is low-cost. The main risk is that GRPO training on shifting distributions may be unstable---using experience replay (mixing old and new task groups) could stabilize training.
+
+\section{Conclusion}
+
+SkillOS reframes agent skill management as a long-horizon RL problem, training a dedicated skill curator via GRPO to make insert, update, and delete decisions whose effects propagate through future related tasks. The two core innovations---grouped task streams for credit assignment and composite rewards with downstream performance feedback---enable a small RL-trained 8B curator to consistently outperform a frontier Gemini-2.5-Pro used directly as curator. The cross-executor generalization (curator trained on Qwen3-8B improves all tested executors including Gemini-2.5-Pro) demonstrates that well-curated skills are executor-agnostic, enabling a ``train once, deploy everywhere'' paradigm for agent skill management. The behavioral evolution analysis reveals a natural progression from skill expansion (insert-dominated) to refinement (update-dominated), with late-stage skills containing actionable conditional logic rather than generic heuristics. For the agentic AI community, SkillOS establishes that \emph{how} skills are managed matters as much as \emph{what} skills exist, and that principled RL-based curation is strictly superior to heuristic rule-based approaches.
+
+\begin{thebibliography}{15}
+
+\bibitem{skillos}
+Ouyang, S., Chen, Y., Han, R., et al.
+\newblock SkillOS: Learning Skill Curation for Self-Evolving Agents.
+\newblock \emph{arXiv preprint arXiv:2605.06614}, 2026.
+
+\bibitem{skill0}
+Wang, Y., et al.
+\newblock SKILL0: In-Context Agentic Reinforcement Learning for Skill Internalization.
+\newblock \emph{arXiv preprint arXiv:2604.02268}, 2026.
+
+\bibitem{trace2skill}
+Li, Z., et al.
+\newblock Trace2Skill: Distill Trajectory-Local Lessons into Transferable Agent Skills.
+\newblock \emph{arXiv preprint arXiv:2603.25158}, 2026.
+
+\bibitem{memanto}
+Shrestha, R., et al.
+\newblock Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.
+\newblock \emph{arXiv preprint arXiv:2604.22085}, 2026.
+
+\bibitem{metaclaw}
+Li, X., et al.
+\newblock MetaClaw: Just Talk -- An Agent That Meta-Learns and Evolves in the Wild.
+\newblock \emph{arXiv preprint arXiv:2603.17187}, 2026.
+
+\bibitem{odysseus}
+Shi, C., Li, W., Liang, X., et al.
+\newblock Odysseus: Scaling VLMs to 100+ Turn Decision-Making in Games via Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2605.00347}, 2026.
+
+\bibitem{copd}
+Gu, N., Yang, C., Si, Q., et al.
+\newblock Co-Evolving Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2604.27083}, 2026.
+
+\bibitem{abstraction}
+Tack, J., et al.
+\newblock Abstraction as a Memory-Efficient Inductive Bias for Continual Learning.
+\newblock \emph{arXiv preprint arXiv:2603.17198}, 2026.
+
+\bibitem{dynamicmoe}
+Wang, Y., et al.
+\newblock On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large Vision Language Models.
+\newblock \emph{arXiv preprint arXiv:2603.27481}, 2026.
+
+\bibitem{experiential}
+Sun, H., et al.
+\newblock Online Experiential Learning for Language Models.
+\newblock \emph{arXiv preprint arXiv:2603.16856}, 2026.
+
+\end{thebibliography}
+
+\end{document}
