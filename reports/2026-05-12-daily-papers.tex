@@ -1,0 +1,229 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Flow-OPD --- On-Policy Distillation\\for Flow Matching Models}
+\author{Internbot --- Automated Research Review}
+\date{May 12, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Flow-OPD: On-Policy Distillation for Flow Matching Models \\
+\textbf{Authors:} Zhen Fang$^*$, Wenxuan Huang$^{*+}$, Yu Zeng, Yiming Zhao, Shuang Chen, Kaituo Feng, Yunlong Lin, Lin Chen, Zehui Chen, Shaosheng Cao, Feng Zhao (USTC, UCLA, CUHK, Xiaohongshu Inc.; $^*$equal contribution, $^+$project leader) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2605.08063}{2605.08063} \\
+\textbf{Topics:} Knowledge Distillation, Flow Matching, On-Policy Learning, Multi-Task Alignment
+
+\subsection{Problem}
+
+Post-training flow matching (FM) models to simultaneously satisfy multiple objectives (compositional accuracy, text rendering, aesthetic quality, human preference) faces two fundamental bottlenecks:
+
+\begin{itemize}
+    \item \textbf{Gradient interference (``seesaw effect''):} When jointly optimizing heterogeneous rewards in a shared parameter space, task gradients frequently conflict: $\langle \nabla_\theta J_k, \nabla_\theta J_1 \rangle < 0$. Empirically, sequentially stacking rewards via GRPO causes catastrophic cross-task degradation---GenEval drops from 0.94 to 0.73 as OCR, PickScore, and DeQA rewards are added.
+    \item \textbf{Reward sparsity:} Scalar reward signals from RL-based alignment (Flow-GRPO) lack the granularity to harmonize heterogeneous objectives. A single scalar cannot convey \emph{where} and \emph{how} the model fails across dimensions.
+    \item \textbf{Reward hacking:} Purely RL-driven alignment leads to overfitting on reward metrics while degrading visual quality (background mode collapse, semantic redundancy, plastic textures).
+\end{itemize}
+
+Flow-OPD resolves all three by migrating the on-policy distillation (OPD) paradigm from LLMs to flow matching models: training specialized single-reward teachers independently, then consolidating their knowledge into a unified student via dense, trajectory-level velocity-field supervision.
+
+\subsection{Method}
+
+\paragraph{Two-Stage Framework.}
+\begin{enumerate}
+    \item \textbf{Stage 1 --- Train specialized teachers:} Each teacher is fine-tuned independently via single-reward Flow-GRPO on one objective (GenEval, OCR, PickScore, DeQA). Training in isolation allows each expert to reach its performance ceiling without gradient interference.
+    \item \textbf{Stage 2 --- On-policy distillation:} The student generates its own denoising trajectories, and domain-expert teachers provide dense velocity-field supervision at every timestep along the student-generated paths.
+\end{enumerate}
+
+\paragraph{On-Policy Sampling via SDE.}
+To enable exploration, the deterministic probability flow ODE is converted to a stochastic differential equation:
+\begin{equation}
+    \mathrm{d}x_t = \!\left[v_\theta(x_t, t) + \frac{\sigma_t^2}{2t}\!\left(x_t + (1-t)v_\theta(x_t,t)\right)\right]\!\mathrm{d}t + \sigma_t\,\mathrm{d}w
+\end{equation}
+After Euler--Maruyama discretization, the student's transition becomes a local isotropic Gaussian policy $\pi_\theta(x_{t-\mathrm{d}t} \mid x_t, c) = \mathcal{N}(\mu_\theta(x_t, t),\, \sigma_t^2\,\mathrm{d}t\, I)$. The student samples $G = 24$ independent trajectories per prompt from its \emph{current} policy.
+
+\paragraph{Task-Routing.}
+A hard routing mechanism maps each textual condition $c$ to its unique domain expert $k$:
+\begin{equation}
+    v_{\mathrm{target}}(x_t, t, c) = v_{\phi_k}(x_t, t, c), \quad k = R(c)
+\end{equation}
+Only one teacher is activated per sample, \emph{completely} eliminating inter-domain gradient interference. This is the key insight: by routing each sample to a single specialized teacher, the seesaw effect is resolved at the data level rather than the gradient level.
+
+\paragraph{Dense KL Reward.}
+Because both student and teacher transition policies share isotropic Gaussian covariance, the KL divergence reduces analytically to a time-weighted L2 distance between velocity fields:
+\begin{equation}
+    D_{\mathrm{KL}}(\pi_\theta \| \pi_{\mathrm{target}}) = \frac{\mathrm{d}t}{2}\!\left(\frac{\sigma_t(1-t)}{2t} + \frac{1}{\sigma_t}\right)^{\!2} \|v_\theta(x_t, t, c) - v_{\mathrm{target}}(x_t, t, c)\|^2
+\end{equation}
+This provides a \emph{dense} per-timestep reward signal (replacing GRPO's sparse scalar reward), enabling fine-grained credit assignment along the denoising trajectory. The detached dense reward is:
+\begin{equation}
+    r_t^{(i)} = -w(t) \cdot \|\bar{v}_\theta(x_t^{(i)}, t, c) - v_{\mathrm{target}}(x_t^{(i)}, t, c)\|^2
+\end{equation}
+where $\bar{v}_\theta$ denotes the stop-gradient student velocity field.
+
+\paragraph{Clipped Policy Gradient.}
+The policy is updated via a PPO-style clipped surrogate:
+\begin{equation}
+    J(\theta) \approx \frac{1}{BG} \sum_{j,i} \sum_t \min\!\left(\rho_{t,i,j}(\theta)\, r_{t,i,j}^{\mathrm{OPD}},\; \mathrm{clip}(\rho_{t,i,j}, 1{-}\epsilon, 1{+}\epsilon)\, r_{t,i,j}^{\mathrm{OPD}}\right)
+\end{equation}
+
+\paragraph{Manifold Anchor Regularization (MAR).}
+A frozen aesthetic teacher provides task-agnostic regularization, preventing aesthetic degradation during multi-task distillation:
+\begin{equation}
+    \mathcal{L}_{\mathrm{Total}} = \mathcal{L}_{\mathrm{Policy}} + \beta\, \mathbb{E}_{c,t,x_t \sim \rho_t^\theta}\!\left[w(t) \|v_\theta(x_t,t,c) - v_{\mathrm{aesthetic}}(x_t,t,c)\|^2\right]
+\end{equation}
+with $\beta = 0.02$. MAR acts as a continuous elastic anchor, ensuring the student remains on the aesthetic manifold while absorbing functional intelligence from specialized teachers.
+
+\paragraph{Cold Start.}
+Two initialization strategies: (1) \textbf{SFT-based}: supervised fine-tuning on teacher-generated trajectories (flexible, scalable), (2) \textbf{Model merging}: directly superposing teacher parameters (zero training cost, requires architectural homogeneity). Model merging yields the best results.
+
+\subsection{Results}
+
+\paragraph{Multi-Task Alignment (SD-3.5-M).}
+
+\begin{center}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Method} & \textbf{GenEval} & \textbf{OCR} & \textbf{DeQA} & \textbf{PickScore} & \textbf{Avg} \\
+\midrule
+SD-3.5-M (base) & 0.63 & 0.59 & 4.07 & 21.64 & 0.717 \\
+GRPO-Mix & 0.73 & 0.83 & 4.33 & 21.84 & 0.817 \\
+Flow-OPD (SFT) & 0.91 & 0.92 & 4.29 & 21.83 & 0.882 \\
+\textbf{Flow-OPD (Merge)} & \textbf{0.92} & \textbf{0.94} & \textbf{4.35} & \textbf{23.08} & \textbf{0.904} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Flow-OPD (Merge) achieves $\sim$10-point average improvement over GRPO-Mix (0.904 vs.\ 0.817). GenEval improves from 0.63 to 0.92 (+46\%), OCR from 0.59 to 0.94 (+59\%). The unified student \emph{matches or surpasses} each individual specialized teacher on its own domain---a ``teacher-surpassing'' emergent effect analogous to CoPD's finding (Review \#44) that unified models outperform domain experts.
+
+\paragraph{OOD Generalization (T2I-CompBench++).}
+Flow-OPD achieves SOTA on all compositional metrics in this out-of-distribution benchmark. GRPO-Mix suffers catastrophic forgetting on shape and 3D spatial relations; Flow-OPD does not. 3D-Spatial: 0.4565 (Flow-OPD) vs.\ 0.3681 (GRPO-Mix), a +24\% improvement.
+
+\paragraph{Image Quality.}
+Aesthetic score: 6.23 (Flow-OPD) vs.\ 5.87 (baseline) vs.\ 5.89 (w/o MAR), confirming MAR's importance for aesthetic preservation. QwenVL Score: 4.05 vs.\ 3.74 (DiffusionNFT), outperforming the prior RL-based alignment method while avoiding its reward hacking artifacts.
+
+\paragraph{Seesaw Effect Demonstration.}
+Sequential reward stacking in GRPO causes progressive degradation: GenEval drops 0.94 $\to$ 0.89 $\to$ 0.82 $\to$ 0.73 as rewards are added. Flow-OPD's task routing eliminates this entirely.
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Teacher ceiling:} Student performance is bounded by teacher quality. Inaccuracies in specialized teachers propagate through the dense supervisory signals.
+    \item \textbf{Architectural homogeneity:} Teacher and student must share the same architecture for fine-grained velocity-field supervision. Cross-architecture flow distillation is unsupported.
+    \item \textbf{Image-only validation:} Validated only on text-to-image generation (SD-3.5-M). Transfer to flow-matching language models (Cola DLM) is conceptually motivated but untested.
+    \item \textbf{Bias inheritance:} Specialized teachers may harbor training data biases that are distilled into the student.
+    \item \textbf{Compute:} 4 nodes $\times$ 8 H800 GPUs for $\sim$50 hours, plus separate teacher training costs.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper bridges \textbf{Topic 1: LLM Efficiency} (distillation) and \textbf{Topic 4: Diffusion/Flow Models}. Although validated on image generation, the methodology directly transfers to flow-matching language models:
+
+\begin{itemize}
+    \item \textbf{Cola DLM connection:} Cola DLM (Review \#46, \cite{coladlm}) uses block-causal flow matching for language modeling. Flow-OPD's dense velocity-field supervision could distill a large Cola DLM teacher into a compact student, replacing the sparse scalar reward used in V-GRPO. The KL-as-L2 reduction (Eq.\ 3) applies directly to Cola DLM's DiT prior since both use flow matching with linear interpolation paths.
+    \item \textbf{TIDE cross-architecture gap:} TIDE (Review \#43, \cite{tide}) addressed cross-architecture dLLM distillation with three modular components. Flow-OPD's architectural homogeneity requirement is a key limitation that TIDE's Reverse CALM partially addresses for discrete models. Combining TIDE's cross-tokenizer alignment with Flow-OPD's dense trajectory supervision could enable cross-architecture flow distillation.
+    \item \textbf{CoPD teacher-surpassing parallel:} CoPD (Review \#44, \cite{copd}) showed that co-evolving branches produce unified models surpassing domain experts. Flow-OPD independently confirms this ``teacher-surpassing'' effect through a different mechanism (dense trajectory supervision + task routing vs.\ alternating RLVR + mutual OPD). The convergence of findings strengthens the hypothesis that multi-teacher knowledge consolidation creates emergent synergies.
+    \item \textbf{V-GRPO sparse reward limitation:} V-GRPO (Review \#42, \cite{vgrpo}) used ELBO-based surrogates for diffusion RL, but still relied on trajectory-level scalar rewards. Flow-OPD demonstrates that dense per-timestep velocity-field supervision dramatically outperforms sparse scalar rewards for flow models, suggesting V-GRPO could be improved by incorporating dense trajectory feedback.
+    \item \textbf{Seesaw effect connects to CoPD's divergence:} The gradient interference seesaw effect is the image-generation analog of CoPD's capability divergence ($\Phi > 0$). Both are resolved by isolating capabilities to separate models (Flow-OPD's teachers, CoPD's branches) and consolidating via distillation.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Flow-OPD for Continuous Latent Diffusion Language Models}
+
+\paragraph{Gap.}
+Cola DLM (Review \#46, \cite{coladlm}) uses a block-causal DiT prior learned via flow matching, and our follow-up direction \#1 from that review proposed latent-space distillation. Flow-OPD provides the missing distillation methodology: on-policy dense velocity-field supervision. However, Cola DLM's two-component architecture (VAE + DiT) creates a unique challenge: the velocity field operates in \emph{compressed latent space}, not pixel space. Distilling the DiT prior alone is insufficient---the VAE's latent-text mapping must also transfer coherently.
+
+\paragraph{Approach.}
+Design a two-level Flow-OPD for Cola DLM: (1) \emph{DiT-level distillation}: apply Flow-OPD's dense velocity-field supervision to distill a large DiT teacher into a compact student DiT, with the KL-as-L2 reduction (Eq.\ 3) applying directly in latent space. Multiple specialized teacher DiTs (one optimized for reasoning tasks, one for generation tasks, one for factual accuracy) provide task-routed supervision, eliminating the seesaw effect across language capabilities. (2) \emph{VAE-level alignment}: align the student VAE's latent distribution with the teacher's via the reference-encoder KL regularizer from Cola DLM's Stage 2 training. The MAR regularization is adapted as a ``fluency anchor'': a frozen fluency-optimized teacher prevents quality degradation during multi-capability distillation. The ELBO information decomposition from Cola DLM (Eq.\ 5 in Review \#46) provides a principled metric: the student should match the teacher's mutual information $I_q(X; Z_0)$ at reduced model capacity.
+
+\paragraph{Feasibility.}
+Flow-OPD's framework transfers directly since Cola DLM's DiT uses the same optimal-transport flow matching objective. The main challenge is defining the task router $R(c)$ for language---unlike images where tasks (composition, OCR, aesthetics) are well-separated, language capabilities (reasoning, generation, factual accuracy) are more entangled. Using SkillOS-style (Review \#47, \cite{skillos}) latent attribute annotation could provide the routing labels.
+
+\subsection{Direction 2: Cross-Architecture Flow Distillation via Latent Bridging}
+
+\paragraph{Gap.}
+Flow-OPD requires architectural homogeneity between teacher and student. This prevents distilling a large Cola DLM teacher (2.3B with 24-layer DiT) into a fundamentally different student (e.g., a smaller DiT with different hidden dimensions, or a hybrid AR-diffusion model). TIDE (Review \#43, \cite{tide}) solved cross-architecture distillation for \emph{discrete} dLLMs via Reverse CALM (chunk-level alignment). No analogous method exists for continuous flow models.
+
+\paragraph{Approach.}
+Introduce a \emph{latent bridge} module: a lightweight MLP that projects the student's velocity field into the teacher's velocity-field space, enabling the L2 distance computation even when architectures differ. The bridge is trained jointly with the student via a dual objective: (1) minimize the projected L2 distance to the teacher's velocity field (distillation signal), and (2) minimize reconstruction error of the bridge's inverse mapping (ensuring the projection is information-preserving). For cross-tokenizer scenarios (analogous to TIDE's Reverse CALM), the bridge operates on \emph{chunk-level} velocity-field projections rather than token-level, using the same byte-level alignment matrices from tokenkit. The Discrete MMD objective (Review \#15, \cite{discretemmd}) could provide an alternative distribution-matching loss for the bridge, avoiding the need for point-wise velocity-field alignment.
+
+\paragraph{Feasibility.}
+The bridge is lightweight ($<$1\% of student parameters) and adds minimal compute. The main risk is that the bridge may smooth out fine-grained velocity-field information, reducing distillation quality. Training the bridge on teacher-generated trajectories (off-policy pre-training) before on-policy distillation could mitigate this.
+
+\subsection{Direction 3: Self-Evolving Flow Teachers via Co-Evolutionary Distillation}
+
+\paragraph{Gap.}
+Flow-OPD's teachers are fixed after Stage 1 training, bounding the student's performance. CoPD (Review \#44, \cite{copd}) showed that iterative co-evolution (alternating specialization and mutual teaching) produces models that surpass static experts. Combining CoPD's co-evolution with Flow-OPD's dense trajectory supervision could create self-improving teacher-student ecosystems where teachers and students iteratively refine each other.
+
+\paragraph{Approach.}
+Design a co-evolutionary Flow-OPD framework with iterating cycles: Phase I trains specialized teachers via single-reward Flow-GRPO (as in Flow-OPD Stage 1). Phase II applies Flow-OPD to distill teachers into a unified student. Phase III reverse-distills the unified student back into the specialized teachers: each teacher receives dense velocity-field supervision from the unified student on its \emph{non-specialty} tasks, acquiring cross-domain knowledge while preserving its specialization. This addresses CoPD's behavioral consistency hypothesis in the flow-matching setting: the student-to-teacher reverse distillation increases behavioral overlap $O_k$ between teachers and student, making subsequent cycles more efficient. The MAR aesthetic anchor persists across cycles, preventing quality drift. After $C$ cycles, the final student benefits from teachers that have been iteratively refined by cross-pollination.
+
+\paragraph{Feasibility.}
+Each cycle is one Flow-OPD training run ($\sim$50 hours on 32 H800s) plus teacher refinement ($\sim$10 hours each). For 3 cycles with 4 teachers, total cost is $\sim$3$\times$(50 + 4$\times$10) $= 270$ GPU-hours $\times$ 32 $\approx$ 8640 H800-hours. The main risk is that reverse distillation may dilute teacher specialization. CoPD's optimal $S_{\mathrm{RL}}:S_{\mathrm{OPD}} = 1.5:1$ ratio provides guidance: more Phase I (specialization) steps than Phase III (reverse distillation) steps preserves teacher identity.
+
+\section{Conclusion}
+
+Flow-OPD introduces the first on-policy distillation framework for flow matching models, migrating the multi-teacher OPD paradigm from LLMs to continuous generative models. The key mathematical insight---KL divergence between student and teacher flow policies reduces to a time-weighted L2 distance between velocity fields (Eq.\ 3)---enables dense per-timestep supervision that replaces GRPO's sparse scalar rewards. Combined with hard task routing (eliminating gradient interference) and manifold anchor regularization (preventing aesthetic degradation), Flow-OPD achieves a $\sim$10-point average improvement over GRPO-Mix on SD-3.5-M, with GenEval 0.63$\to$0.92 and OCR 0.59$\to$0.94. The ``teacher-surpassing'' effect---where the unified student exceeds each specialist on its own domain---independently confirms CoPD's finding that multi-source knowledge consolidation creates emergent synergies. For the flow-matching community, Flow-OPD establishes that dense trajectory-level supervision is strictly superior to sparse scalar rewards for multi-task alignment. The methodology is directly transferable to flow-matching language models (Cola DLM), opening paths toward efficient multi-capability distillation for continuous latent diffusion LLMs.
+
+\begin{thebibliography}{15}
+
+\bibitem{flowopd}
+Fang, Z., Huang, W., Zeng, Y., et al.
+\newblock Flow-OPD: On-Policy Distillation for Flow Matching Models.
+\newblock \emph{arXiv preprint arXiv:2605.08063}, 2026.
+
+\bibitem{coladlm}
+Guo, H., Zhao, Q., Zhao, Y., et al.
+\newblock Continuous Latent Diffusion Language Model.
+\newblock \emph{arXiv preprint arXiv:2605.06548}, 2026.
+
+\bibitem{tide}
+Zhang, G., Wang, W., Tian, Y., Yuan, L.
+\newblock Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.26951}, 2026.
+
+\bibitem{copd}
+Gu, N., Yang, C., Si, Q., et al.
+\newblock Co-Evolving Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2604.27083}, 2026.
+
+\bibitem{vgrpo}
+Tang, B., et al.
+\newblock V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\bibitem{discretemmd}
+Liu, Y., et al.
+\newblock Beyond Single Tokens: Distilling Discrete Diffusion Models via Discrete MMD.
+\newblock \emph{arXiv preprint arXiv:2603.20155}, 2026.
+
+\bibitem{tessy}
+Yang, C., et al.
+\newblock TESSY: Teacher-Student Cooperation Framework for Reasoning Model Fine-Tuning.
+\newblock \emph{arXiv preprint arXiv:2604.14164}, 2026.
+
+\bibitem{sdrlvr}
+Xu, H., et al.
+\newblock Self-Distilled RLVR.
+\newblock \emph{arXiv preprint arXiv:2604.03128}, 2026.
+
+\bibitem{skillos}
+Ouyang, S., Chen, Y., Han, R., et al.
+\newblock SkillOS: Learning Skill Curation for Self-Evolving Agents.
+\newblock \emph{arXiv preprint arXiv:2605.06614}, 2026.
+
+\bibitem{langflow}
+Ye, J., et al.
+\newblock LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling.
+\newblock \emph{arXiv preprint arXiv:2604.11748}, 2026.
+
+\end{thebibliography}
+
+\end{document}
