@@ -1,0 +1,257 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{booktabs}
+\usepackage{multirow}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Daily Paper Review: Geometry Conflict --- Explaining and Controlling\\Forgetting in LLM Continual Post-Training}
+\author{Internbot --- Automated Research Review}
+\date{May 13, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\textbf{Title:} Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training \\
+\textbf{Authors:} Yuanyi Wang$^*$, Yifan Yang$^*$, Su Lu, Yanggan Gu, Pengkai Wang, Wenjun Wang, Zhaoyi Yan, Congkai Xie, Jianmin Wu, Jialun Cao, Shing-Chi Cheung, Hongxia Yang (PolyU, InfiX.ai, HKUST; $^*$equal contribution) \\
+\textbf{arXiv:} \href{https://arxiv.org/abs/2605.09608}{2605.09608} \\
+\textbf{Topics:} Continual Learning, Catastrophic Forgetting, Model Merging, Geometric Analysis
+
+\subsection{Problem}
+
+Continual post-training---extending a pretrained LLM through sequential task-specific stages---faces catastrophic forgetting: learning a new domain undermines previously acquired knowledge. Existing approaches (sequential fine-tuning, replay, regularization, model merging) share a critical gap: they \textbf{lack a principled account of task compatibility}. None can answer: \emph{when should new updates be strongly integrated, and when should integration be restrained?}
+
+The paper identifies that scalar diagnostics (update norm, gradient cosine similarity) are insufficient because they measure \emph{how far} the model moves but not \emph{whether the movement remains compatible with task-induced geometries}. The central finding: forgetting is a \textbf{state-relative update-integration failure}---it arises when the covariance geometries induced by tasks misalign with the geometry of the evolving model state.
+
+\subsection{Method}
+
+\paragraph{Task Geometry.}
+For layer $l$, let $\Delta_t^{(l)} \in \mathbb{R}^{d_{\mathrm{out}} \times d_{\mathrm{in}}}$ be the task-specific update. The \textbf{task-induced covariance geometry} is:
+\begin{equation}
+    C_t^{(l)} = (\Delta_t^{(l)})^\top \Delta_t^{(l)} + \lambda I
+\end{equation}
+This $d_{\mathrm{in}} \times d_{\mathrm{in}}$ positive semi-definite matrix captures the principal subspaces and spectral energy of the update, going beyond scalar magnitude.
+
+\paragraph{Shared Basis and Projected Geometry.}
+To compare multiple task updates in a common coordinate system, GCWM constructs a shared orthonormal basis from truncated SVDs of active updates: $Q^{(l)} = \mathrm{orth}([V_1^{(l)}, \ldots, V_m^{(l)}])$. Each task's covariance is projected:
+\begin{equation}
+    B_i^{(l)} = (Q^{(l)})^\top C_i^{(l)}\, Q^{(l)}
+\end{equation}
+
+\paragraph{Geometry Conflict.}
+Pairwise compatibility is measured via the \textbf{normalized Bures--Wasserstein discrepancy}:
+\begin{equation}
+    \gamma_{ij}^{(l)} = \frac{d_B^2(B_i^{(l)}, B_j^{(l)})}{\mathrm{tr}(B_i^{(l)}) + \mathrm{tr}(B_j^{(l)}) + \epsilon}, \quad d_B^2(A, B) = \mathrm{tr}(A) + \mathrm{tr}(B) - 2\,\mathrm{tr}\!\left((A^{1/2} B\, A^{1/2})^{1/2}\right)
+\end{equation}
+The Bures--Wasserstein distance is the natural metric on positive semi-definite matrices (equivalently, the 2-Wasserstein distance between centered Gaussians). The normalization makes $\gamma_{ij}^{(l)} \in [0, 1]$ scale-invariant: 0 for identical geometries, 1 for maximally incompatible. The aggregated layer-wise conflict is $g^{(l)} = \sum_{i<j} w_{ij}\, \gamma_{ij}^{(l)}$.
+
+\paragraph{Conflict Gate.}
+The conflict score becomes an actionable control signal via a sigmoid gate:
+\begin{equation}
+    \alpha^{(l)} = \alpha_{\min} + (\alpha_{\max} - \alpha_{\min})\, \sigma(\kappa\,(g^{(l)} - \tau))
+\end{equation}
+with threshold $\tau = 0.12$ and sharpness $\kappa = 10$. Low-conflict layers receive weak geometry-aware correction (closer to plain merge); high-conflict layers receive strong correction.
+
+\paragraph{Wasserstein Barycenter Metric.}
+A shared merging metric is constructed as the Gaussian Wasserstein barycenter:
+\begin{equation}
+    \bar{B}^{(l)} = \arg\min_{B \succeq 0} \sum_{i=1}^{m} \omega_i\, d_B^2(B, B_i^{(l)})
+\end{equation}
+This Fr\'{e}chet mean defines the local metric in which task updates are aligned before merging---the geometry ``closest'' to all active tasks simultaneously.
+
+\paragraph{Whitening--Merge--Recoloring.}
+Updates are transformed into a geometry-neutral space, merged, and transformed back:
+\begin{equation}
+    \tilde{\Delta}_i^{(l)} = \hat{\Delta}_i^{(l)} (\bar{B}^{(l)})^{-1/2}, \quad \Delta_{\mathrm{geo}}^{(l)} = M(\{\tilde{\Delta}_i^{(l)}\}) \cdot (\bar{B}^{(l)})^{1/2} (Q^{(l)})^\top
+\end{equation}
+where $M$ is the base merge operator (weighted WUDI). The final merged update blends geometry-aware and plain branches:
+\begin{equation}
+    \Delta_{\mathrm{merge}}^{(l)} = \alpha^{(l)} \Delta_{\mathrm{geo}}^{(l)} + (1 - \alpha^{(l)}) \Delta_{\mathrm{plain}}^{(l)}
+\end{equation}
+
+\paragraph{Incremental Continual Update.}
+At each step $t$, only the \emph{change} relative to the previous merged state is applied: $\Delta_{\mathrm{inc},t}^{(l)} = \Delta_{\mathrm{merge},t}^{(l)} - \Delta_{\mathrm{merge},t-1}^{(l)}$, with $\theta_t^{(l)} = \theta_{t-1}^{(l)} + \eta_t \Delta_{\mathrm{inc},t}^{(l)}$.
+
+\paragraph{Theoretical Guarantee (Theorem 1).}
+Under local smoothness and projected-geometry adequacy assumptions, the additional loss on a previously acquired task $u$ is bounded by:
+\begin{equation}
+    \mathcal{L}_u(\Theta_{\mathrm{GCWM}}) - \mathcal{L}_u(\Theta_{\mathrm{plain}}) \leq \eta_t \sum_l c_{u,t}^{(l)} g_t^{(l)} + \frac{\eta_t^2}{2} \sum_l d_{u,t}^{(l)} \|\delta_t^{(l)}\|_{\tilde{B}}^2
+\end{equation}
+The bound is controlled by geometry conflict $g_t^{(l)}$ (first-order) and gated merge displacement (second-order).
+
+\subsection{Results}
+
+\paragraph{Geometry Conflict as Forgetting Predictor.}
+Spearman rank correlations between the \textbf{global state-active gap} (geometry conflict between all active updates and the current model state) and retention loss \emph{scale dramatically with model size}:
+
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Scale} & 0.6B & 1.7B & 4B & 8B & 14B \\
+\midrule
+$|\rho_s|$ (global gap) & 0.16 & 0.47 & \textbf{0.67} & \textbf{0.69} & \textbf{0.86} \\
+$|\rho_s|$ (update norm) & 0.31 & 0.47 & 0.37 & 0.55 & 0.55 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At 14B, the global gap achieves $|\rho_s| = 0.86$---far stronger than update norm (0.55), active conflict (0.29), or gradient-based metrics.
+
+\paragraph{Complementary Failure Modes.}
+Geometry conflict and gradient conflict are non-redundant: geometry conflict localizes to MLP projections (v, gate, up, down---90\% of top GC layers), while gradient conflict localizes to attention projections (q, k---85\% of top negative-gradient layers).
+
+\paragraph{Domain-Continual Post-Training (MMLU-Pro, 14 domains).}
+
+\begin{center}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Method} & \textbf{0.6B} & \textbf{1.7B} & \textbf{4B} & \textbf{8B} & \textbf{14B} & \textbf{Avg} \\
+\midrule
+Seq.\ SFT & 24.4 & 36.8 & 51.6 & 55.2 & 60.4 & 45.7 \\
+Best data-free baseline & 26.8 & 41.8 & 58.2 & 62.9 & 66.6 & 51.1 \\
+\textbf{GCWM} & \textbf{27.1} & \textbf{43.5} & \textbf{59.4} & \textbf{63.7} & \textbf{67.8} & \textbf{52.3} \\
+MTL (upper bound) & 27.5 & 44.4 & 61.0 & 65.3 & 68.6 & 53.4 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+GCWM consistently outperforms all data-free baselines (+0.30 to +1.61 pp) and approaches MTL performance. At 14B: GCWM wins 9/14 domains over the best baseline.
+
+\paragraph{Capability-Continual Post-Training (Math + Code).}
+GCWM achieves +1.44 to +1.61 pp over the best data-free baseline at 1.7B--14B scale. At Qwen3-14B: 74.3\% average vs.\ 72.9\% OPCM, approaching FOREVER (75.9\%, which uses replay data).
+
+\paragraph{Ablation.}
+Both the conflict gate ($-4.61$ pp at 8B without it) and the Wasserstein barycenter metric ($-3.73$ pp at 8B without it) are essential, with importance increasing at larger scales. The step coefficient $\eta_t$ is the dominant sensitivity: moderate values (0.1--0.3) are stable, but $\eta_t = 1.0$ catastrophically collapses performance (34.3\% at 8B).
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Explanatory, not causal:} Geometry conflict is an explanatory and control signal, not proven to be the root cause of all forgetting.
+    \item \textbf{Requires task checkpoints:} GCWM needs per-task model checkpoints to compute task vectors. Single sequentially-trained models cannot be directly analyzed.
+    \item \textbf{Weak at small scale:} The geometric signal is noisy at 0.6B ($|\rho_s| = 0.16$). The framework is most informative at 4B+.
+    \item \textbf{Offline compute:} $\sim$40 min/step at 8B, $\sim$76 min/step at 14B for geometry construction (CPU-based, no inference cost).
+    \item \textbf{Data-free only:} When replay data is available, replay-based methods (FOREVER) can still outperform GCWM.
+    \item \textbf{Model family:} Validated only on Qwen3 (0.6B--14B). Generalization to other architectures and multimodal models is untested.
+\end{itemize}
+
+\subsection{Relevance to Our Research}
+
+This paper is core \textbf{Topic 3: Continual Learning for LLM Agents}, providing the geometric foundation for understanding and controlling catastrophic forgetting:
+
+\begin{itemize}
+    \item \textbf{Abstraction CL connection:} Abstraction-based CL (Review \#17, \cite{abstraction}) showed that abstract representations resist forgetting. GCWM's geometry conflict provides the \emph{quantitative explanation}: abstraction works when it reduces the Bures--Wasserstein discrepancy between task covariance geometries, aligning updates in compatible subspaces.
+    \item \textbf{Dynamic MoE parallel:} Dynamic MoE (Review \#21, \cite{dynamicmoe}) used drift-aware token assignment to prevent catastrophic forgetting. GCWM's conflict gate is the \emph{weight-space analog}: instead of routing tokens to different experts, it routes layer updates through different merge branches based on geometric compatibility.
+    \item \textbf{CoPD co-evolution diagnostic:} CoPD (Review \#44, \cite{copd}) showed that mutual OPD between co-evolving branches succeeds when behavioral overlap $O_k$ is high. GCWM's geometry conflict provides the complementary \emph{parameter-space} diagnostic: mutual OPD should be effective when the branches' task-induced covariance geometries are compatible (low $\gamma_{ij}$), and harmful when they conflict.
+    \item \textbf{SkillOS curation signal:} SkillOS (Review \#47, \cite{skillos}) trains a curator to decide when to insert/update/delete skills. GCWM's geometry conflict could serve as an \emph{intrinsic reward signal} for the curator: high conflict between a new skill's update geometry and the existing repository suggests the skill should be inserted as a separate entry rather than merged into existing skills.
+    \item \textbf{Scale-dependent insight for looped transformers:} The iso-depth scaling laws (Review \#41, \cite{isodepth}) showed $\phi = 0.46$ for looped transformers. GCWM's finding that geometry-forgetting correlation scales from 0.16 (0.6B) to 0.86 (14B) suggests that larger models have more structured parameter spaces where geometric analysis is more informative---connecting model scale to continual learning tractability.
+\end{itemize}
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Geometry-Aware Skill Curation for Self-Evolving Agents}
+
+\paragraph{Gap.}
+SkillOS (Review \#47, \cite{skillos}) trains a skill curator via GRPO to manage insert/update/delete operations, but the curator's decisions are evaluated only through downstream task performance---a delayed and noisy signal. GCWM's geometry conflict provides an \emph{immediate} diagnostic that could augment the curator's reward function. When a new skill's parameter update has high geometry conflict with the existing skill repository's accumulated updates, the curator should favor insertion (isolating the new knowledge) over updating (which risks interference). Conversely, low geometry conflict suggests safe merging.
+
+\paragraph{Approach.}
+Extend SkillOS's composite reward with a geometry-compatibility term: $r^{\mathrm{geo}} = 1 - \gamma_{\mathrm{new, repo}}^{(\mathrm{avg})}$, where $\gamma_{\mathrm{new, repo}}$ is the Bures--Wasserstein discrepancy between the new skill's LoRA update geometry and the aggregated repository update geometry. The curator receives this signal immediately after each curation operation, providing a faster credit assignment pathway than waiting for downstream task evaluation. The conflict gate principle extends to skill management: the curator's ``gate'' determines how aggressively to integrate new knowledge. For agents operating at scale (Qwen3-8B+), the geometry signal is highly reliable ($|\rho_s| > 0.69$), making it a trustworthy intrinsic reward.
+
+\paragraph{Feasibility.}
+Computing $\gamma_{\mathrm{new, repo}}$ requires only the SVD of the new skill's LoRA update (typically rank 16--64) and the projected geometry of the repository---both are lightweight (seconds on CPU per GCWM's profiling). The main challenge is defining the ``repository update geometry'' for a collection of Markdown-based skills; this requires maintaining a running LoRA adapter that captures the cumulative effect of all curated skills, updated after each curation operation.
+
+\subsection{Direction 2: Geometry Conflict as Routing Signal for Continual MoE Expansion}
+
+\paragraph{Gap.}
+Dynamic MoE (Review \#21, \cite{dynamicmoe}) routes tokens to experts based on drift-aware assignment to prevent forgetting. However, the routing operates at the \emph{inference level} (which expert processes which token), not the \emph{training level} (which expert absorbs which capability). GCWM's geometry conflict operates at the parameter level, providing complementary information: when a new task's geometry conflicts with existing experts, a \emph{new expert should be spawned} rather than updating existing ones. This connects to the ``Scaling Continual Learning to 300+ Tasks'' paper on today's list, which uses bi-level MoE routing for CL.
+
+\paragraph{Approach.}
+Design a geometry-guided MoE expansion protocol: (1) For each new post-training task, compute the geometry conflict $\gamma_{\mathrm{new},k}$ between the new task and each existing expert $k$. (2) If $\min_k \gamma_{\mathrm{new},k} > \tau_{\mathrm{expand}}$, spawn a new expert initialized from the most compatible existing expert and fine-tune on the new task (expansion). (3) If $\min_k \gamma_{\mathrm{new},k} \leq \tau_{\mathrm{expand}}$, merge the new task into the most compatible expert using GCWM (consolidation). The expansion threshold $\tau_{\mathrm{expand}}$ is calibrated from the conflict gate's learned $\tau = 0.12$. The router is updated to assign the new task's tokens to the spawned or merged expert. This creates a \emph{grow-and-consolidate} continual MoE where the number of experts adapts to the geometric compatibility structure of the task stream.
+
+\paragraph{Feasibility.}
+The geometry computation is offline (CPU-based, $\sim$40 min at 8B). The main challenge is balancing expert count growth against inference efficiency---spawning too many experts increases memory. GCWM's compression through the Wasserstein barycenter provides a natural consolidation mechanism: periodically merge geometrically compatible experts to bound the total expert count.
+
+\subsection{Direction 3: State-Relative Geometry for Diffusion LLM Continual Fine-Tuning}
+
+\paragraph{Gap.}
+Diffusion LLMs (Cola DLM, Review \#46, \cite{coladlm}; LLaDA2.0-Uni, Review \#38, \cite{llada2uni}) are increasingly fine-tuned for new capabilities (RL alignment via V-GRPO, Review \#42; distillation via TIDE, Review \#43). Each fine-tuning stage modifies the model's denoising velocity field, creating the same continual learning challenge as AR models. However, GCWM's task-induced covariance geometry ($C_t = \Delta_t^\top \Delta_t$) is defined on weight updates, which does not account for the \emph{timestep-dependent} nature of diffusion model updates---the same weight change affects denoising differently at different noise levels.
+
+\paragraph{Approach.}
+Extend GCWM's geometry to be \emph{timestep-aware} for diffusion models: define a timestep-weighted task covariance $C_t^{(l)}(\tau) = (\Delta_t^{(l)})^\top W(\tau) \Delta_t^{(l)}$, where $W(\tau)$ is a diagonal weighting matrix derived from the sensitivity of the velocity field to parameter changes at diffusion timestep $\tau$. The aggregated geometry integrates over the noise schedule: $\bar{C}_t^{(l)} = \int_0^1 C_t^{(l)}(\tau)\, p(\tau)\, \mathrm{d}\tau$. TIDAL's dual-axis scheduling from TIDE (Review \#43) provides the timestep weighting: $W(\tau) \propto (1 - \tau) \cdot \lambda_{\mathrm{train}}$, where reliability increases at lower noise levels. The Bures--Wasserstein conflict metric then operates on timestep-weighted geometries, capturing whether two fine-tuning stages conflict at the noise levels that matter most for generation quality. Flow-OPD's (Review \#48, \cite{flowopd}) dense velocity-field supervision provides the sensitivity estimates needed for $W(\tau)$.
+
+\paragraph{Feasibility.}
+The timestep weighting requires computing parameter sensitivity at multiple noise levels, which involves additional forward passes through the frozen model. Amortizing this across a small set of representative noise levels (e.g., $\tau \in \{0.1, 0.3, 0.5, 0.7, 0.9\}$) reduces cost to $5\times$ a single geometry computation. The Bures--Wasserstein machinery transfers directly since the timestep-weighted covariances remain positive semi-definite.
+
+\section{Conclusion}
+
+Geometry Conflict provides a principled geometric framework for understanding and controlling catastrophic forgetting in LLM continual post-training. The central insight---that forgetting is a \emph{state-relative} update-integration failure, quantifiable via the normalized Bures--Wasserstein discrepancy between task-induced covariance geometries---transforms an explanatory observation into an actionable control signal. The state-relative geometry conflict achieves $|\rho_s| = 0.86$ correlation with retention loss at 14B scale, dramatically outperforming scalar diagnostics (update norm: 0.55, gradient cosine: 0.46). The complementary localization of geometry conflict (MLP projections) and gradient conflict (attention Q/K) reveals that forgetting operates through multiple, non-redundant mechanisms. GCWM operationalizes this insight through Wasserstein barycenter-based metric construction and conflict-gated merge blending, achieving consistent improvements over data-free baselines across Qwen3 0.6B--14B. For the continual learning community, this work establishes that the \emph{geometry of task-induced covariances}, not merely the magnitude or direction of updates, determines whether sequential post-training succeeds or fails.
+
+\begin{thebibliography}{15}
+
+\bibitem{gcwm}
+Wang, Y., Yang, Y., Lu, S., et al.
+\newblock Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.
+\newblock \emph{arXiv preprint arXiv:2605.09608}, 2026.
+
+\bibitem{abstraction}
+Tack, J., et al.
+\newblock Abstraction as a Memory-Efficient Inductive Bias for Continual Learning.
+\newblock \emph{arXiv preprint arXiv:2603.17198}, 2026.
+
+\bibitem{dynamicmoe}
+Wang, Y., et al.
+\newblock On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large Vision Language Models.
+\newblock \emph{arXiv preprint arXiv:2603.27481}, 2026.
+
+\bibitem{copd}
+Gu, N., Yang, C., Si, Q., et al.
+\newblock Co-Evolving Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2604.27083}, 2026.
+
+\bibitem{skillos}
+Ouyang, S., Chen, Y., Han, R., et al.
+\newblock SkillOS: Learning Skill Curation for Self-Evolving Agents.
+\newblock \emph{arXiv preprint arXiv:2605.06614}, 2026.
+
+\bibitem{isodepth}
+Schwethelm, K., et al.
+\newblock How Much Is One Recurrence Worth? Iso-Depth Scaling Laws for Looped Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.21106}, 2026.
+
+\bibitem{coladlm}
+Guo, H., Zhao, Q., Zhao, Y., et al.
+\newblock Continuous Latent Diffusion Language Model.
+\newblock \emph{arXiv preprint arXiv:2605.06548}, 2026.
+
+\bibitem{llada2uni}
+Bie, T., et al.
+\newblock LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2604.20796}, 2026.
+
+\bibitem{flowopd}
+Fang, Z., Huang, W., Zeng, Y., et al.
+\newblock Flow-OPD: On-Policy Distillation for Flow Matching Models.
+\newblock \emph{arXiv preprint arXiv:2605.08063}, 2026.
+
+\bibitem{tide}
+Zhang, G., Wang, W., Tian, Y., Yuan, L.
+\newblock Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.26951}, 2026.
+
+\bibitem{vgrpo}
+Tang, B., et al.
+\newblock V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\bibitem{experiential}
+Sun, H., et al.
+\newblock Online Experiential Learning for Language Models.
+\newblock \emph{arXiv preprint arXiv:2603.16856}, 2026.
+
+\end{thebibliography}
+
+\end{document}
