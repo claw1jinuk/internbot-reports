@@ -1,0 +1,124 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage[numbers]{natbib}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: RubricEM --- Meta-RL with Rubric-Guided Policy Decomposition beyond Verifiable Rewards}
+\author{Internbot Paper Review}
+\date{May 14, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Training deep research agents with reinforcement learning remains fundamentally constrained by the assumption of verifiable rewards. While existing RLVR methods (Search-R1, R1-Searcher, Self-Distilled RLVR~\cite{selfdistilledrlvr}) achieve strong performance on tasks with exact-match answers, open-ended deep research---where agents must autonomously plan, search, evaluate evidence, and synthesize long-form reports---lacks ground-truth verification. Li et al.~\cite{rubricem} identify three interlocking limitations: (1) no ground-truth verification for multidimensional, semantic output quality; (2) coarse and delayed credit assignment where a single terminal score is broadcast across long tool-augmented trajectories; and (3) no mechanism for experience reuse across episodes. The closest prior work, DR Tulu, introduced evolving-rubric evaluation for answer-only scoring but still relies on terminal reward broadcast and lacks experience transfer.
+
+\subsection{Proposed Method: RubricEM}
+
+RubricEM (Rubric-guided Expectation-Maximization) unifies three innovations under the thesis that \textbf{rubrics should serve as the shared interface structuring policy execution, judge feedback, and agent memory throughout the entire RL loop}---not merely as final-answer evaluators. The name reflects an EM-inspired perspective: the E-step estimates latent task structure (what matters, where credit belongs, what to remember) through rubrics, while the M-step maximizes the task policy and reflection meta-policy under these rubric-conditioned estimates.
+
+\paragraph{Rubric-Guided Policy Decomposition.}
+A structured reasoning scaffold decomposes trajectories into four explicit stages: \textbf{Plan} (deep analysis, self-generated rubrics with knowledge checklists and analytical criteria, research plan), \textbf{Research} (iterative tool calls with state evaluation against rubrics), \textbf{Review} (rubric review mapping evidence to criteria, writing plan), and \textbf{Answer} (final synthesis with inline citations). Self-generated rubrics at planning time condition every subsequent decision. The authors provide a formal value-of-information argument (Theorem~1): under mild assumptions, when stage-specific optimal actions disagree at the same local context, stage-aware policies strictly dominate flat policies:
+\begin{equation}
+V_{\mathrm{stage}} - V_{\mathrm{flat}} = \mathbb{E}[\Delta_{\mathrm{alias}}(C)] \geq 0,
+\end{equation}
+with strict inequality whenever the stage-aliasing gap $\Delta_{\mathrm{alias}}(c) > 0$, i.e., when the optimal action differs across stages for the same compressed state.
+
+\paragraph{Stage-Structured GRPO (SS-GRPO).}
+Building on GRPO~\cite{grpo}, SS-GRPO replaces terminal reward broadcast with stagewise rubric credit. Given $n$ rollouts per query, each partitioned into $K{=}4$ stages, an LLM judge (Gemini-3-Flash) scores each stage independently via evolving rubrics. A causal stage-dependence matrix $\Lambda = (\lambda_{k,j})$ with $\lambda_{k,j} = 0$ for $j < k$ defines stage-dependent returns:
+\begin{equation}
+G^{\Lambda}_{i,k} = \sum_{j=k}^{K} \lambda_{k,j} \cdot R_{i,j},
+\end{equation}
+where $R_{i,j} \in [0,1]$ is the judge score for stage $j$ of rollout $i$. The specific $\Lambda$ used assigns answer-stage weight 0.8 to all prior stages, reflecting the final output's importance. Returns are normalized \textit{per stage} across the rollout group to compute advantages $A_{i,k}$, and all tokens in stage block $B_{i,k}$ share advantage $A_{i,k}$. The objective applies PPO-style clipping with KL penalty to a reference policy ($\beta = 0.001$). Theorem~4 provides formal conditions under which stagewise credit improves gradient approximation over terminal broadcast: when the recovered intermediate signal exceeds cumulative judge misalignment.
+
+The evolving-rubric judge operates in two phases: (1) adaptive rubric generation by contrasting multiple rollouts, proposing discriminative criteria with anti-hack rules; and (2) independent stagewise scoring on positive (0/1/2) and negative rubrics. A buffer management system maintains persistent and active rubrics with per-stage capacity caps, pruning low-discrimination rubrics based on score variance.
+
+\paragraph{Reflection Meta-Policy Training.}
+A shared-backbone reflection meta-policy is jointly trained to produce rubric-grounded reflections from judged trajectories. After task rollouts are scored, one trajectory per query is sampled, and the shared backbone generates $m{=}8$ reflection candidates. A privileged judge scores each on diagnostic accuracy (weight 0.4), specificity (0.3), and scope/balance (0.3). The highest-scored accepted reflection enters an \textbf{agent rubric bank} supporting two adaptation modes:
+\begin{itemize}[nosep]
+\item \textbf{Within-episode refinement}: retrieves the agent's prior reflection for the same query (exact hash match) on repeated attempts
+\item \textbf{Cross-episode transfer}: retrieves reflections from semantically similar past questions (FAISS index over Qwen3-Embedding-0.6B, top-$k{=}2$)
+\end{itemize}
+A windowed curriculum with $K{=}3$ provides 3-step temporal separation between first and repeated encounters, ensuring the asynchronous reflection pipeline completes before within-episode retrieval. Theorem~5 proves that shared-backbone co-evolution is strictly better than disjoint parameters: if accepted reflections have positive conditional alignment with the task gradient ($\langle g, \mathbb{E}[\Psi | A{=}1]\rangle \geq \mu$), then a task-improving step also improves the reflection objective and vice versa. Training is deferred by one RL step for zero additional wall-clock overhead.
+
+\subsection{Key Results}
+
+RubricEM-8B achieves 55.5 average across four long-form benchmarks (HealthBench, ResearchQA, DeepResearchBench, ResearchRubrics), the highest among all non-proprietary deep research systems:
+
+\begin{itemize}[nosep]
+\item Surpasses DR Tulu-8B-RL (53.6) with \textbf{500 fewer RL steps} (1400 vs 1900): +1.9 points
+\item Surpasses Tongyi DeepResearch-30B-A3B (50.8) despite being ${\sim}$4$\times$ smaller: +4.7 points
+\item Outperforms OpenAI Deep Research on DeepResearchBench (47.8 vs 46.9)
+\item Within 4.4 points of OpenAI Deep Research overall (55.5 vs 59.9)
+\item Surpasses its own SFT teacher Gemini-3.1-Pro + Search (53.9), demonstrating RL goes beyond the teacher
+\end{itemize}
+
+On short-form out-of-domain benchmarks (zero-shot, no short-form training data), RubricEM-8B-RL achieves 73.5 average vs DR Tulu-RL's 49.0 (+24.5 points), with the largest gains on complex tasks: DeepSearchQA (53.0 vs 8.3, 6.4$\times$) and WebWalker (70.0 vs 39.1). Ablations at 600 steps confirm SS-GRPO and meta-policy provide complementary gains; removing either degrades performance. The structured scaffold itself improves both SFT distillation quality and subsequent RL effectiveness.
+
+\subsection{Limitations}
+
+\begin{enumerate}[nosep]
+\item \textbf{Infrastructure sensitivity}: Long-horizon agentic RL with external API calls requires server restarts, introducing uncontrolled staleness in the asynchronous pipeline.
+\item \textbf{Judge quality ceiling}: All scoring uses Gemini Flash; systematic judge biases propagate through credit assignment, reflection quality, and rubric bank simultaneously.
+\item \textbf{Confounded baselines}: Different SFT teachers (Gemini-3.1-Pro vs GPT-5) and search backends between RubricEM and DR Tulu prevent perfect isolation of algorithmic contributions.
+\item \textbf{Fixed stage structure}: The four-stage decomposition is manually designed; learned or adaptive stage structures are not explored.
+\item \textbf{Scale unknown}: All experiments use 8B models only; scaling behavior at 30B+ is untested.
+\item \textbf{Lambda matrix not ablated}: The causal dependence weights appear manually chosen without systematic justification.
+\end{enumerate}
+
+\subsection{Relevance to Research Topics}
+
+RubricEM is directly relevant to \textbf{Topic 2 (Reinforcement Learning: RLHF, RLAIF, reward modeling, policy optimization)} as it extends GRPO with stagewise credit assignment and evolving rubric judges for non-verifiable tasks. It also connects to \textbf{Topic 3 (Continual Learning for Agents)} through its reflection meta-policy and rubric bank, which provide explicit cross-episode memory and experience transfer. The shared-backbone co-evolution of task and reflection policies offers a principled mechanism for agents to learn from experience across tasks---a core desideratum of continual agent learning.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Geometry-Aware Stagewise Credit Assignment}
+
+\paragraph{Gap.} SS-GRPO assigns credit through a fixed causal dependence matrix $\Lambda$ with manually chosen weights. Our recent review of Geometry Conflict~\cite{geometryconflict} revealed that task-induced covariance geometry provides principled signals for understanding parameter-level conflicts, and the normalized Bures-Wasserstein discrepancy scales predictably with model size ($|\rho_s|$ from 0.16 at 0.6B to 0.86 at 14B). The $\Lambda$ weights in SS-GRPO lack similar principled grounding, and no ablation over different configurations is presented.
+
+\paragraph{Approach.} Replace the fixed $\Lambda$ with an \textit{adaptive} credit assignment mechanism that uses parameter-level geometry to determine how much downstream credit should flow to each stage. Specifically, compute the Bures-Wasserstein discrepancy between covariance geometries induced by each stage's gradient updates. When stages exhibit high geometric conflict (as GCWM identifies for MLP layers), reduce cross-stage credit flow; when stages are geometrically aligned, increase it. This creates a data-driven, evolving $\Lambda(t)$ that adapts during training. The geometry-vs-gradient complementarity discovered in GCWM (geometry conflict in MLP, gradient conflict in attention Q/K) could further inform which parameter groups receive stagewise vs terminal credit.
+
+\paragraph{Feasibility.} High. Bures-Wasserstein computation on covariance matrices is tractable for per-layer analysis. The GCWM framework already demonstrates efficient conflict gating with sigmoid thresholds. Integration requires computing stage-specific covariance geometry at periodic intervals (e.g., every 50 RL steps) and updating $\Lambda$ accordingly, adding modest overhead to the existing SS-GRPO pipeline.
+
+\subsection{Direction 2: Distillation of Rubric-Conditioned Policies into Efficient Student Models}
+
+\paragraph{Gap.} RubricEM trains an 8B model with expensive multi-turn rollouts, evolving rubric judges, and reflection meta-policies. Deploying such a system requires the full scaffold and search infrastructure. Our reviews of CoPD~\cite{copd} (co-evolving parallel distillation), Flow-OPD~\cite{flowopd} (on-policy distillation for flow matching), and self-distillation dynamics~\cite{selfdistill} reveal that distillation can transfer capabilities efficiently, but none address distilling \textit{structured multi-stage reasoning} with rubric-conditioned decision-making. The scaffold's four-stage decomposition creates stage-specific behavioral modes that standard sequence-level distillation may fail to capture.
+
+\paragraph{Approach.} Design a stage-aware distillation framework that transfers RubricEM's rubric-conditioned capabilities to smaller models. Drawing from CoPD's co-evolving branches, maintain parallel student branches specialized for each stage (Plan, Research, Review, Answer) and alternately distill from the teacher's stage-specific behaviors and from each other via mutual on-policy distillation. Use Flow-OPD's insight about hard-task routing to selectively route difficult research queries through the full teacher while distilling easier queries end-to-end. The rubric bank provides natural supervision: student models can be evaluated against the teacher's rubric criteria, creating stage-level distillation rewards beyond simple KL divergence.
+
+\paragraph{Feasibility.} Medium-high. CoPD and Flow-OPD demonstrate that on-policy distillation scales well. The main challenge is maintaining the multi-stage structure during distillation without the full search infrastructure. A hybrid approach using cached search results for distillation trajectories (similar to SFT data generation) would reduce infrastructure requirements while preserving stage-specific behavioral supervision.
+
+\subsection{Direction 3: Reflection Meta-Policy as Continual Skill Curation}
+
+\paragraph{Gap.} RubricEM's rubric bank stores reflections indexed by query similarity, but treats all reflections as equivalent textual memories without structured skill organization. Our review of SkillOS~\cite{skillos} demonstrated that RL-trained skill curators with explicit insert/update/delete operations and composite rewards dramatically outperform unstructured memory approaches---an 8B RL curator outperformed Gemini-2.5-Pro as curator. Meanwhile, Memanto~\cite{memanto} showed that typed semantic memory with information-theoretic retrieval enables principled memory management for long-horizon agents. RubricEM's rubric bank lacks these structured curation mechanisms: old reflections are simply overwritten when a query reappears, without evaluating whether the old reflection contained unique insights worth preserving.
+
+\paragraph{Approach.} Integrate SkillOS-style RL-trained curation into RubricEM's reflection meta-policy. Instead of simple overwrite semantics, train the shared backbone to make explicit insert/update/delete decisions over the rubric bank using GRPO with a composite reward combining: (1) downstream task improvement when the reflection is retrieved, (2) reflection quality scores from the judge, (3) bank compression (penalizing redundancy via Memanto's information-theoretic criterion), and (4) cross-episode transfer success rate. The windowed curriculum already provides natural temporal structure for credit assignment to curation decisions. Additionally, adopt Memanto's typed memory framework to categorize reflections by type (strategic insights, search heuristics, synthesis patterns, domain knowledge), enabling more targeted retrieval than pure embedding similarity.
+
+\paragraph{Feasibility.} Medium. The RL infrastructure for curation training exists in both SkillOS and RubricEM. The main challenge is defining credit assignment for curation decisions, since the benefit of a bank operation may not manifest until many episodes later. SkillOS's grouped task streams and composite reward provide a proven template. Starting with a simplified version---binary keep/discard decisions with immediate next-episode transfer success as reward---would establish feasibility before scaling to full insert/update/delete operations.
+
+\section{Conclusion}
+
+RubricEM represents a significant advance in RL for language agents by demonstrating that rubrics can serve as a unifying interface across the entire training loop---from policy execution scaffolding through stagewise credit assignment to cross-episode reflection memory. The three-pillar approach (structured scaffold, SS-GRPO, reflection meta-policy) achieves state-of-the-art results among open 8B models while using 500 fewer RL steps than the prior best, and the formal theoretical framework (Theorems 1--5) provides principled justification for each design choice. The work opens rich avenues for combining geometric credit assignment, stage-aware distillation, and structured skill curation to further improve long-horizon agent training beyond verifiable rewards.
+
+\begin{thebibliography}{99}
+\bibitem{rubricem} Li, G., Dalvi Mishra, B., Wang, Z., Yan, J., Chen, Y., Li, C.-L., Le, L.T., Han, R., Lee, G., Tong, H., Lee, C.-Y., Pfister, T. ``RubricEM: Meta-RL with Rubric-guided Policy Decomposition beyond Verifiable Rewards.'' \textit{arXiv preprint arXiv:2605.10899}, 2026.
+\bibitem{grpo} Shao, Z., Wang, P., Zhu, Q., Xu, R., Song, J., Zhang, M., Li, Y., Wu, Y., Guo, D. ``DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.'' \textit{arXiv preprint arXiv:2402.03300}, 2024.
+\bibitem{selfdistilledrlvr} Yuan, W., Pang, R.Y., Cho, K., Sukhbaatar, S., Xu, J., Weston, J. ``Self-Distilled RLVR.'' \textit{arXiv preprint arXiv:2604.03128}, 2026.
+\bibitem{geometryconflict} Authors. ``Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.'' \textit{arXiv preprint arXiv:2605.09608}, 2026.
+\bibitem{copd} Authors. ``Co-Evolving Policy Distillation.'' \textit{arXiv preprint arXiv:2604.27083}, 2026.
+\bibitem{flowopd} Authors. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \textit{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{selfdistill} Gu, Y., et al. ``Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs?'' \textit{arXiv preprint arXiv:2603.24472}, 2026.
+\bibitem{skillos} Authors. ``SkillOS: Learning Skill Curation for Self-Evolving Agents.'' \textit{arXiv preprint arXiv:2605.06614}, 2026.
+\bibitem{memanto} Authors. ``Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.'' \textit{arXiv preprint arXiv:2604.22085}, 2026.
+\end{thebibliography}
+
+\end{document}
