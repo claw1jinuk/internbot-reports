@@ -1,0 +1,111 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage[numbers]{natbib}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Orthrus --- Memory-Efficient Parallel Token Generation via Dual-View Diffusion}
+\author{Internbot Paper Review}
+\date{May 15, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Autoregressive (AR) LLMs factorize the joint probability as $p_{\mathrm{AR}}(\mathbf{x}) = \prod_{i=1}^{N} p_\theta(x_i \mid x_{<i})$, mandating sequential token-by-token sampling that creates a memory-bandwidth-bound bottleneck during generation. Nguyen et al.~\cite{orthrus} identify a core tension: diffusion language models (Dream, LLaDA, SDAR~\cite{sdar}) bypass sequential decoding through parallel denoising but rely on a conditional independence assumption $p_{\mathrm{DLM}}(\mathbf{y}^0 \mid c) \approx \prod_{k} p_\phi(y_k^0 \mid c, \mathbf{y}^t)$ that violates strict causal dependency, causing distributional drift that compounds during long-horizon generation. AR-to-diffusion adaptation methods (SDAR requires 50B tokens of continued pre-training; Fast-dLLM-v2 suffers an 11-point accuracy drop on MATH-500) fundamentally alter the base model's weights. Meanwhile, speculative decoding (EAGLE-3, DFlash) maintains separate drafter/verifier KV caches with linearly growing memory overhead. No prior method resolves the parallelism--fidelity tension without sacrificing one side.
+
+\subsection{Proposed Method: Orthrus}
+
+Orthrus exploits a key insight: the AR bottleneck is \textit{strictly confined to the generation phase}---its self-attention mechanism is already optimal for context construction during prefilling. Rather than replacing or modifying the AR model, Orthrus \textbf{decouples the two functions} into a dual-view architecture within a single transformer:
+
+\paragraph{AR View (Frozen).} The complete pretrained AR backbone processes prompts to construct high-fidelity KV representations $(K_{\mathrm{AR}}, V_{\mathrm{AR}})$, identical to standard prefilling.
+
+\paragraph{Diffusion View (Trainable, Lightweight).} Each transformer layer is augmented with trainable diffusion attention projections $(W_{Q_{\mathrm{diff}}}, W_{K_{\mathrm{diff}}}, W_{V_{\mathrm{diff}}})$, initialized from their frozen AR counterparts. These comprise only ${\sim}$16\% of total parameters. To generate $K$ tokens in parallel, the system constructs an extended block: the first AR-decoded anchor token concatenated with $K{-}1$ \texttt{<mask>} embeddings, processed simultaneously through:
+\begin{equation}
+O_{\mathrm{diff}} = \mathrm{Softmax}\!\left(\frac{Q_{\mathrm{diff}} [K_{\mathrm{AR}} \| K_{\mathrm{diff}}]^\top}{\sqrt{d_{\mathrm{head}}}}\right) [V_{\mathrm{AR}} \| V_{\mathrm{diff}}],
+\end{equation}
+where $[\cdot \| \cdot]$ denotes concatenation along the sequence axis. The diffusion view \textit{reuses} $(K_{\mathrm{AR}}, V_{\mathrm{AR}})$ in-place, introducing \textbf{zero additional historical KV cache memory}. A structured block attention mask enforces causal access to AR context while enabling bidirectional attention within the masked block.
+
+\paragraph{Training.} The AR backbone is completely frozen. Random anchor positions are sampled from training sequences, and contiguous blocks of length $K{=}32$ are constructed by retaining the anchor and masking remaining positions. The loss minimizes forward KL divergence between the AR teacher's full predictive distribution and the diffusion view's parallel predictions over all masked positions:
+\begin{equation}
+\mathcal{L}_{\mathrm{Orthrus}} = \mathbb{E}_{\mathbf{x}, \{a_b\}} \left[\sum_{b=1}^{B} \sum_{k=1}^{K} D_{\mathrm{KL}}\!\left(p_{\mathrm{AR}}(\cdot \mid x_{\leq a_b+k-1}) \;\|\; p_{\mathrm{diff}}(\cdot \mid x_{<a_b}, \tilde{y}_b)\right)\right].
+\end{equation}
+Soft KL distillation outperforms hard cross-entropy training: while accuracy remains identical (guaranteed by consensus), tokens per forward pass (TPF) increases from 5.86 to 6.35 because the diffusion head internalizes the AR model's causal trajectory rather than overfitting to surface syntax.
+
+\paragraph{Inference: Intra-Model Consensus.} Each generation cycle performs exactly two forward passes: (1) the diffusion view projects $K$ candidate tokens in a single pass, then (2) the frozen AR head verifies all candidates simultaneously. For greedy decoding, a candidate $\hat{y}_k$ is retained iff $\hat{y}_k = \arg\max_v p_{\mathrm{AR}}(v \mid x_{\leq t}, \hat{y}_{1:k-1})$. For diverse sampling ($T > 0$), exact rejection sampling guarantees \textbf{strictly lossless generation}---the output distribution is mathematically identical to what the base AR model would produce. If divergence occurs at index $j$, the system commits the verified prefix, draws a correction token from $p_{\mathrm{AR}}$, and begins the next cycle.
+
+\subsection{Key Results}
+
+\paragraph{Speedup and Throughput.} On Qwen3-8B (greedy), Orthrus achieves average TPF = 5.39 across math and code benchmarks, translating to \textbf{5.36$\times$ average speedup} with peak \textbf{7.83$\times$} on Pseudo2code. At $T{=}1$ (diverse sampling), average TPF = 4.43 / speedup = 5.02$\times$. Performance scales with model size: average TPF goes from 3.89 (1.7B) to 5.04 (4B) to 5.39 (8B).
+
+\paragraph{Quality: Lossless by Construction.} On Qwen3-8B, Orthrus achieves identical accuracy to the base model: GSM8K 96.0, MATH-500 86.2, AIME24 28.3, AIME25 23.3, HumanEval 95.1, MBPP 93.4. In contrast, SDAR-Qwen3-8B drops to 78.6 on MATH-500 ($-$7.6), and Dream-7B scores 39.6 ($-$46.6).
+
+\paragraph{vs.\ Speculative Decoding.} On MATH-500, Orthrus achieves 11.7 average acceptance length, surpassing DFlash (7.9, $+$48\%) and EAGLE-3 (3.5, $+$234\%). Crucially, speculative decoding requires separate drafter KV caches with linearly growing memory, while Orthrus adds only a \textbf{constant ${\sim}$4.5 MiB} regardless of sequence length ($<$1\% GPU memory overhead).
+
+\paragraph{Training Efficiency.} Only 16\% of parameters are trainable (${\sim}$0.7B for the 8B model). Training on 600K examples (${\sim}$0.96B tokens) completes in $<$24 hours on a single 8$\times$H200 node---\textbf{50--600$\times$ more data-efficient} than Dream (580B tokens) or SDAR (50B tokens).
+
+\paragraph{Key Ablations.} Block size $K$: increasing from 4 to 32 raises TPF from ${\sim}$1.75 to 6.35 at constant forward-pass latency. Multi-step denoising (2 steps) halves TPF to 3.53, confirming single-step projection is strictly optimal when consensus guarantees correctness.
+
+\subsection{Limitations}
+
+\begin{enumerate}[nosep]
+\item \textbf{Performance upper-bounded by base model}: Orthrus is purely an inference accelerator; it inherits all biases, knowledge gaps, and hallucination tendencies of the frozen AR model.
+\item \textbf{Two forward passes per cycle minimum}: In worst-case (all tokens rejected), Orthrus is 2$\times$ slower than standard AR decoding.
+\item \textbf{Limited evaluation scope}: Only math reasoning and code generation benchmarks are reported; open-ended generation, summarization, and long-context tasks are untested.
+\item \textbf{Short training context}: All training uses max length $L{=}2048$; diffusion head quality at 32K+ contexts is unknown.
+\item \textbf{No batch inference evaluation}: Production-scale batched inference, where memory bandwidth is less dominant, may reduce the relative advantage.
+\end{enumerate}
+
+\subsection{Relevance to Research Topics}
+
+Orthrus is directly relevant to \textbf{Topic 1 (LLM Efficiency: inference optimization)} as it achieves 5--8$\times$ speedup through parallel generation with $<$1\% memory overhead. It is equally relevant to \textbf{Topic 4 (Diffusion LLM)} as it introduces a novel paradigm for applying diffusion-style training to language generation---using masked diffusion not for standalone generation quality but as a mechanism to teach parallel projection within an AR framework. This ``diffusion as drafter'' approach reframes the relationship between AR and diffusion LLMs from competing paradigms to complementary components, where diffusion handles speed and AR handles quality.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Orthrus for Discrete Diffusion LLM Acceleration}
+
+\paragraph{Gap.} Orthrus accelerates frozen AR models, but standalone diffusion LLMs (Dream, LLaDA, MDLM) also suffer from inference inefficiency: they require many denoising steps for high-quality generation. Our reviews of DMax~\cite{dmax} (aggressive parallel decoding for dLLMs) and S2D2~\cite{s2d2} (training-free self-speculation for diffusion LLMs) address this from different angles---DMax maximizes tokens per step through aggressive acceptance, while S2D2 uses early-exit self-speculation. However, neither achieves the lossless guarantee of Orthrus's consensus mechanism. A dual-view approach adapted for diffusion LLMs could combine DMax-style parallelism with Orthrus-style architectural verification.
+
+\paragraph{Approach.} Design a ``DiffOrthrus'' architecture where a frozen diffusion LLM (e.g., Dream or LLaDA) serves as the verifier, and a lightweight trainable projection head---analogous to Orthrus's diffusion view but operating in the diffusion model's denoising trajectory space---proposes aggressive multi-token updates that the base diffusion model verifies. The projection head would be trained to predict the outcome of multiple denoising steps in a single forward pass, distilled from the base model's multi-step trajectory. DMax's aggressive parallel decoding strategy could define the acceptance criterion, while Orthrus's shared-cache architecture eliminates the memory overhead of maintaining separate draft and verify states. The key technical challenge is defining a consensus mechanism for diffusion models analogous to AR's greedy/rejection sampling verification---potentially using the denoising score function as the acceptance oracle.
+
+\paragraph{Feasibility.} Medium-high. Orthrus demonstrates that single-step projection from multi-step processes is learnable with $<$1B tokens. The main challenge is that diffusion LLMs lack the clean sequential verification structure of AR models; defining ``correctness'' for partial denoising is less straightforward than comparing against $\arg\max p_{\mathrm{AR}}$.
+
+\subsection{Direction 2: Adaptive Block Size via Uncertainty-Guided Projection}
+
+\paragraph{Gap.} Orthrus uses a fixed block size $K{=}32$ regardless of generation context. The ablation shows TPF scales with $K$, but acceptance rates vary dramatically across tasks (TPF 7.51 on Pseudo2code vs.\ 3.94 on HumanEval) and presumably within sequences. High-entropy generation regions (creative transitions, novel reasoning steps) likely have lower acceptance rates, wasting computation on tokens that will be rejected. This mirrors the challenge addressed by Cola DLM's~\cite{coladlm} block-causal architecture, which processes variable-length latent blocks, and relates to Flow-OPD's~\cite{flowopd} hard-task routing that selectively allocates compute to difficult generations.
+
+\paragraph{Approach.} Augment the diffusion head with an uncertainty estimator that predicts the expected acceptance length before committing to a full $K$-token projection. Train a lightweight prediction module (e.g., a single-layer MLP on the diffusion head's hidden states at the anchor position) to estimate $\mathbb{E}[\mathrm{acceptance\ length}]$ for the upcoming block. At inference time, dynamically set $K_{\mathrm{eff}} \in \{4, 8, 16, 32\}$ based on predicted acceptance: use small blocks in high-entropy regions (minimizing wasted verification compute) and large blocks in low-entropy regions (maximizing parallelism). The training signal comes directly from the consensus mechanism---actual acceptance lengths from training rollouts provide ground-truth supervision. This creates an ``adaptive Orthrus'' that allocates projection bandwidth proportionally to predictability.
+
+\paragraph{Feasibility.} High. The acceptance length statistics are naturally available during training. The additional MLP adds negligible parameters and latency. The main design question is whether the discrete $K$ values require separate trained diffusion heads or whether a single head trained at $K{=}32$ can be used with truncated blocks at inference time.
+
+\subsection{Direction 3: Dual-View Distillation for Continual Post-Training}
+
+\paragraph{Gap.} Orthrus's dual-view architecture---frozen backbone with lightweight trainable projections sharing the same KV cache---bears structural resemblance to parameter-efficient fine-tuning (LoRA, adapters) but is designed purely for inference acceleration. Our review of Geometry Conflict~\cite{geometryconflict} showed that continual post-training suffers from catastrophic forgetting quantifiable via Bures-Wasserstein discrepancy between task-induced covariance geometries, with the key finding that geometry conflict localizes to MLP layers while gradient conflict localizes to attention Q/K. Orthrus's diffusion projections are precisely attention-level adaptations that leave MLP layers untouched, suggesting a natural connection: could a dual-view architecture simultaneously accelerate inference \textit{and} enable continual learning by absorbing new knowledge into diffusion projections while the frozen backbone preserves existing capabilities?
+
+\paragraph{Approach.} Extend Orthrus's dual-view framework for continual post-training: when learning a new task/domain, train the diffusion attention projections on the new data while keeping the AR backbone frozen. The consensus mechanism naturally arbitrates between the frozen model's existing knowledge and the adapted projections' new knowledge: on inputs where the new projections agree with the frozen model, generation proceeds at full speed; on inputs where they diverge (indicating the new task), the system defaults to the frozen model's correction plus a single adapted token, preventing catastrophic forgetting by construction. GCWM's conflict gate ($\tau{=}0.12$) could be adapted to modulate how aggressively the diffusion projections override the frozen backbone based on the Bures-Wasserstein discrepancy between the projection's covariance geometry and the frozen model's. This creates a ``Continual Orthrus'' that accumulates knowledge across tasks in the diffusion projections while maintaining lossless access to the base model's original capabilities.
+
+\paragraph{Feasibility.} Medium. The architectural foundation exists: Orthrus already demonstrates that attention-level projections can capture rich distributional information while sharing the KV cache. The key challenge is whether 16\% trainable parameters provide sufficient capacity for continual knowledge absorption across many tasks, and whether the consensus mechanism's strict verification is too conservative for tasks requiring genuinely new behaviors not present in the frozen model.
+
+\section{Conclusion}
+
+Orthrus introduces an elegant resolution to the parallelism--fidelity tension in language generation by decoupling context construction (frozen AR view) from parallel token projection (trainable diffusion view) within a single transformer sharing one KV cache. The approach achieves 5--8$\times$ speedup with lossless quality guarantees, $<$1\% memory overhead, and remarkable training efficiency ($<$1B tokens, $<$24 hours). By reframing diffusion not as a competing generation paradigm but as a complementary projection mechanism verified by autoregressive consensus, Orthrus opens new directions for combining the strengths of both paradigms---from accelerating standalone diffusion LLMs and adaptive compute allocation to leveraging the dual-view architecture for continual learning with built-in forgetting prevention.
+
+\begin{thebibliography}{99}
+\bibitem{orthrus} Nguyen, C.V., Hegde, C., Pham, V.C., Rossi, R.A., Dernoncourt, F., Nguyen, T.H. ``Orthrus: Memory-Efficient Parallel Token Generation via Dual-View Diffusion.'' \textit{arXiv preprint arXiv:2605.12825}, 2026.
+\bibitem{sdar} Authors. ``SDAR: Synergistic Diffusion-Autoregression.'' 2026.
+\bibitem{dmax} Authors. ``DMax: Aggressive Parallel Decoding for dLLMs.'' \textit{arXiv preprint arXiv:2604.08302}, 2026.
+\bibitem{s2d2} Authors. ``S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.'' \textit{arXiv preprint arXiv:2603.25702}, 2026.
+\bibitem{coladlm} Authors. ``Continuous Latent Diffusion Language Model.'' \textit{arXiv preprint arXiv:2605.06548}, 2026.
+\bibitem{flowopd} Authors. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \textit{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{geometryconflict} Authors. ``Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.'' \textit{arXiv preprint arXiv:2605.09608}, 2026.
+\end{thebibliography}
+
+\end{document}
