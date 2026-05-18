@@ -1,0 +1,132 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage[numbers]{natbib}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Nexus --- An Agentic Framework for Time Series Forecasting}
+\author{Internbot Paper Review}
+\date{May 18, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Current time series forecasting faces a fundamental dilemma between \textbf{numerical precision} and \textbf{contextual awareness}. Time series foundation models (TSFMs) such as TimesFM~\cite{timesfm}, Chronos, and MOIRAI excel at capturing seasonalities and long-range dependencies but operate in a ``multimodal vacuum''---they cannot process unstructured textual signals (news, policy changes, earnings surprises) that drive real-world regime shifts. Conversely, LLM-based approaches can parse qualitative context but lack intrinsic mechanisms for temporal dependencies; forcing LLMs to autoregressively predict continuous values frequently yields inferior performance to TSFMs~\cite{tanetal}. Das et al.~\cite{nexus} further identify that existing agentic forecasting systems (Synapse, TimeCopilot, AlphaCast) primarily automate numerical workflows rather than treating textual evidence as central to prediction.
+
+\subsection{Proposed Method: Nexus}
+
+Nexus is a \textbf{multi-agent, inference-time framework} that decomposes forecasting into complementary temporal resolutions without any gradient-based training. Given a univariate time series $X_{1:\tau} = (x_1, \ldots, x_\tau)$ paired with timestamped textual context $E_{1:\tau} = (e_1, \ldots, e_\tau)$, the objective is:
+\begin{equation}
+F(X_{1:\tau}, E_{1:\tau}) \rightarrow (\hat{X}_{\tau+1:\tau+T},\; R),
+\end{equation}
+where $R$ represents natural language reasoning traces explaining the predicted values. The framework operates in three stages with five specialized agents:
+
+\paragraph{Stage 1: Contextualization.}
+A \textbf{Historical Context Agent} $A_{\mathrm{ctx}}$ transforms raw multimodal input into a structured chronological timeline $H_{1:\tau}$, where each element $h_t$ explicitly links the numerical value $x_t$ with a concise summary of key driving factors extracted from $e_t$. This prevents cognitive overload in downstream agents by filtering noise and establishing cause-and-effect relationships.
+
+\paragraph{Stage 2: Dual-Resolution Outlook Generation.}
+Two agents operate in parallel on $H_{1:\tau}$:
+\begin{itemize}[nosep]
+\item \textbf{Macro-Reasoning Agent} $A_{\mathrm{macro}}$: Takes a top-down approach, analyzing the structured timeline to map out the broad trajectory for the entire horizon $T$. Focuses on regime identification, fundamental shifts, and overall direction. Outputs coarse-level predictions $X^{\mathrm{macro}}_{\tau+1:\tau+T}$ with narrative reasoning $R^{\mathrm{macro}}$.
+\item \textbf{Micro-Reasoning Agent} $A_{\mathrm{micro}}$: Takes a bottom-up, step-by-step approach. For every future timestep $t \in [\tau{+}1, \tau{+}T]$, evaluates immediate catalysts, short-term shifts, and localized volatility. Outputs per-step predictions with movement labels (Up/Down/Stable) and key drivers.
+\end{itemize}
+
+\paragraph{Stage 3: Synthesis and Calibration.}
+A \textbf{Forecast Synthesizer} $A_{\mathrm{syn}}$ dynamically merges macro and micro perspectives, conditioned on learned guidelines $G$ from calibration. A \textbf{Calibration Agent} implements forward-simulation backtesting: historical data is divided into $n{=}6$ sequential splits; the pipeline generates baseline predictions across training folds, analyzes errors, produces critique rules $G_i$, and intersects them:
+\begin{equation}
+G = \bigcap_{i=1}^{n-1} G_i,
+\end{equation}
+subject to a validation gate requiring $\geq$5\% improvement on a held-out fold. This intersection mechanism prevents overfitting to temporary anomalies.
+
+\paragraph{Key Design Properties.} Nexus is entirely inference-time (no fine-tuning), tool-free (no external statistical packages---the ``tools'' are other LLM calls with specialized prompts), and produces joint numerical forecasts with interpretable reasoning traces. Temperature is set to 0.1 for near-deterministic outputs.
+
+\subsection{Key Results}
+
+\paragraph{Multimodal Contextual Forecasting.} With Gemini-3.1-Pro, Nexus achieves 14.7\% MAPE reduction and 15.3\% RMSE reduction on Zillow (housing) vs.\ CoT baseline. With Claude-4.5-Sonnet, improvements are dramatic: \textbf{86.6\% MAPE reduction} on Zillow (0.2968$\rightarrow$0.0398) because the monolithic CoT baseline catastrophically fails under Claude's long-context limitations, while Nexus's decomposition avoids this failure mode.
+
+\paragraph{Numerical-Only (No Text Context).} The most striking finding: Nexus with Claude-4.5-Sonnet \textbf{outperforms TimesFM-2.5} (a dedicated TSFM) even without textual context---MAPE 0.0330 vs.\ 0.0387 on Zillow ($-$14.7\%), RMSE 48.69 vs.\ 55.84 ($-$12.8\%). With Gemini, Nexus matches TimesFM-2.5 (MAPE 0.0378 vs.\ 0.0387, $-$2.3\%). This challenges the assumption that LLMs fundamentally cannot match dedicated TSFMs---they can when reasoning is properly decomposed.
+
+\paragraph{Reasoning Quality.} Cross-model judging shows Nexus wins overall preference 63.5--97.1\% of the time, with the strongest advantages in analytical depth and event relevance.
+
+\paragraph{Ablations.} All components contribute additively: removing macro reasoning, micro reasoning, or calibration each degrades performance, with the full framework achieving best results across all metrics.
+
+\subsection{Limitations}
+
+\begin{enumerate}[nosep]
+\item \textbf{Narrow evaluation}: Only 2 domains (Zillow housing, 7 stock tickers), weekly frequency, univariate only. No multivariate, high-frequency, or long-horizon evaluation.
+\item \textbf{Prohibitive cost}: Each prediction requires multiple frontier LLM API calls; calibration adds $6\times$ overhead. Single-run evaluations without statistical significance testing.
+\item \textbf{Data leakage risk}: Despite post-cutoff evaluation dates, LLMs may have seen indirect patterns during pre-training.
+\item \textbf{No probabilistic forecasting}: Point predictions only---no uncertainty quantification or prediction intervals.
+\item \textbf{Frontier model dependence}: Requires state-of-the-art LLMs (Gemini-3.1-Pro, Claude-4.5-Sonnet); no experiments with smaller open-source models.
+\item \textbf{Limited baselines}: Only TimesFM-2.5 and CoT; missing comparisons with Chronos, MOIRAI, Time-LLM, and other LLM-based methods.
+\end{enumerate}
+
+\subsection{Relevance to Research Topics}
+
+Nexus is directly relevant to \textbf{Topic 5 (Time Series Forecasting: foundation models for time series)} as it demonstrates that multi-agent LLM decomposition can match or surpass dedicated TSFMs like TimesFM-2.5, even in purely numerical settings. It also connects to \textbf{Topic 3 (Continual Learning for LLM Agents)} through its agentic architecture with calibration-based self-improvement---the calibration loop implements a form of experience-driven adaptation where the system learns from its own forecasting errors across backtesting folds, analogous to the reflection meta-policies in RubricEM~\cite{rubricem} and the skill curation in SkillOS~\cite{skillos}.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Continual Calibration with Persistent Agentic Memory}
+
+\paragraph{Gap.} Nexus's calibration produces static guidelines $G$ from backtesting that remain fixed during deployment. In real-world forecasting, data distributions shift continuously (concept drift), and guidelines that worked for one regime may become stale. Our reviews of SkillOS~\cite{skillos} (RL-trained insert/update/delete operations) and Memanto~\cite{memanto} (typed semantic memory with information-theoretic retrieval) demonstrated that structured, evolving memory dramatically outperforms static knowledge stores. Nexus lacks any mechanism for online guideline evolution or knowledge retirement.
+
+\paragraph{Approach.} Integrate a continual calibration mechanism inspired by SkillOS's skill curation: maintain a \textbf{temporal guideline bank} where each entry stores a calibration rule paired with its temporal validity window and performance impact. As new forecasting results arrive (ground truth becomes available), an RL-trained curator decides whether to insert new guidelines, update existing ones (when the underlying regime persists but details change), or delete stale ones (when a regime shift invalidates old rules). Use Memanto's information-theoretic criterion to prevent guideline redundancy: new guidelines are accepted only if they provide sufficient mutual information with the target beyond what existing guidelines already capture. The intersection mechanism $G = \bigcap G_i$ would be replaced by a weighted aggregation where weights decay based on temporal distance and estimated regime relevance.
+
+\paragraph{Feasibility.} High. The calibration infrastructure already exists in Nexus; extending it to be online requires (1) storing guidelines with metadata (creation time, domain, performance delta), (2) a lightweight curator that evaluates new vs.\ existing guidelines, and (3) periodic re-evaluation triggered by prediction error spikes indicating regime change. SkillOS demonstrates this can work with composite rewards combining task outcome and compression.
+
+\subsection{Direction 2: Macro-Micro Decomposition Meets Time Series Foundation Models}
+
+\paragraph{Gap.} Nexus relies entirely on LLM reasoning for numerical predictions, forgoing the statistical precision of TSFMs that capture autocorrelation, seasonality, and distributional properties from massive numerical corpora. Conversely, TSFMs like TimesFM-2.5 cannot incorporate textual context. No existing system combines the structured reasoning decomposition (macro/micro) with TSFM numerical backbones. Our review of Timer-S1~\cite{timers1} highlighted that billion-scale time series models achieve strong zero-shot performance through serial scaling across resolution and horizon, but lack any contextual reasoning capability.
+
+\paragraph{Approach.} Design a hybrid framework where Nexus's macro-reasoning agent produces \textit{qualitative regime labels and adjustment factors} rather than raw numerical predictions, while a TSFM handles the numerical backbone:
+\begin{enumerate}[nosep]
+\item TSFM generates a base statistical forecast $\hat{X}^{\mathrm{base}}$ capturing autocorrelation and seasonality.
+\item Macro agent analyzes textual context to predict regime shifts and generates multiplicative/additive adjustment factors $\alpha_t, \beta_t$ for each horizon step.
+\item Micro agent provides per-step correction signals based on immediate catalysts.
+\item Synthesizer produces $\hat{X}_t = \alpha_t \cdot \hat{X}^{\mathrm{base}}_t + \beta_t$, with reasoning explaining deviations from the statistical baseline.
+\end{enumerate}
+This separates what each paradigm does best: TSFMs for statistical pattern recognition, LLMs for contextual regime-shift reasoning. The adjustment factors create an interpretable interface between the two systems.
+
+\paragraph{Feasibility.} High. TimesFM-2.5 is publicly available for API calls. The adjustment-factor formulation is simple and interpretable. The main challenge is calibrating the scale of LLM-proposed adjustments---the calibration agent's backtesting loop naturally provides the supervision signal for learning appropriate adjustment magnitudes.
+
+\subsection{Direction 3: From Univariate Decomposition to Multivariate Cross-Series Reasoning}
+
+\paragraph{Gap.} Nexus handles each time series independently, ignoring cross-series dependencies (e.g., housing prices across cities are correlated through migration, interest rates, and regional economic linkages; stocks within the same sector co-move). Our review of QuitoBench~\cite{quitobench} emphasized that multivariate forecasting with complex inter-variable dependencies remains a key challenge, particularly for foundation models that struggle with high-dimensional cross-correlations. The macro/micro reasoning decomposition could naturally extend to capture inter-series causal relationships that purely numerical models learn implicitly.
+
+\paragraph{Approach.} Extend Nexus's three-stage framework to multivariate forecasting:
+\begin{itemize}[nosep]
+\item \textbf{Cross-Series Context Agent}: In addition to per-series contextualization, construct a relational graph summarizing known causal/correlational relationships between series (e.g., ``NVDA and MSFT co-move due to AI sector exposure''; ``SF and Seattle housing correlated through tech employment'').
+\item \textbf{Macro Agent with Cross-Series View}: Reason about system-level regime shifts that affect multiple series simultaneously (Fed rate decisions, sector rotations, regional policy changes).
+\item \textbf{Micro Agent with Spillover Detection}: For each series at each timestep, consider whether events affecting correlated series create spillover effects.
+\item \textbf{Coherent Synthesizer}: Ensure forecasts across related series maintain logical consistency (e.g., if one city's housing rises due to migration, the source city should see reduced pressure).
+\end{itemize}
+This leverages LLMs' strength in causal and relational reasoning---something TSFMs handle only through implicit cross-attention over numerical patterns.
+
+\paragraph{Feasibility.} Medium. The main challenges are (1) context window limitations when incorporating multiple series' histories and textual contexts simultaneously, (2) defining consistency constraints across series without over-constraining, and (3) computational cost scaling linearly with the number of series. Starting with small clusters of 3--5 highly correlated series would establish feasibility before scaling.
+
+\section{Conclusion}
+
+Nexus demonstrates that LLMs possess stronger intrinsic forecasting ability than previously recognized, contingent on proper decomposition of reasoning into macro and micro temporal resolutions. The finding that structured multi-agent orchestration can outperform TimesFM-2.5 even without textual context challenges the prevailing assumption that dedicated TSFMs are strictly superior for numerical time series. However, the framework's reliance on frontier models, narrow evaluation scope, and prohibitive computational cost limit its current practical applicability. The most promising extensions involve combining Nexus's contextual reasoning with TSFM numerical precision, extending to multivariate settings where causal inter-series reasoning could provide LLMs' clearest advantage, and implementing continual calibration with structured memory for online adaptation.
+
+\begin{thebibliography}{99}
+\bibitem{nexus} Das, S.S.S., Goyal, P., Parmar, M., Peng, N., Tirumalashetty, V., Li, C.-L., Zhang, R., Yoon, J., Pfister, T. ``Nexus: An Agentic Framework for Time Series Forecasting.'' \textit{arXiv preprint arXiv:2605.14389}, 2026.
+\bibitem{timesfm} Das, A., Kong, W., Leber, A., et al. ``A Decoder-Only Foundation Model for Time-Series Forecasting.'' \textit{ICML}, 2024.
+\bibitem{tanetal} Tan, M.H., et al. ``Are Language Models Actually Useful for Time Series Forecasting?'' \textit{NeurIPS}, 2024.
+\bibitem{rubricem} Li, G., et al. ``RubricEM: Meta-RL with Rubric-guided Policy Decomposition beyond Verifiable Rewards.'' \textit{arXiv preprint arXiv:2605.10899}, 2026.
+\bibitem{skillos} Authors. ``SkillOS: Learning Skill Curation for Self-Evolving Agents.'' \textit{arXiv preprint arXiv:2605.06614}, 2026.
+\bibitem{memanto} Authors. ``Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.'' \textit{arXiv preprint arXiv:2604.22085}, 2026.
+\bibitem{timers1} Authors. ``Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling.'' \textit{arXiv preprint arXiv:2603.04791}, 2026.
+\bibitem{quitobench} Authors. ``QuitoBench: A High-Quality Open Time Series Forecasting Benchmark.'' \textit{arXiv preprint arXiv:2603.26017}, 2026.
+\end{thebibliography}
+
+\end{document}
