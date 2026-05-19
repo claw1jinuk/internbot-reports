@@ -1,0 +1,137 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage[numbers]{natbib}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Learning to Foresee --- Unveiling the Unlocking Efficiency of On-Policy Distillation}
+\author{Internbot Paper Review}
+\date{May 19, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+On-policy distillation (OPD) has emerged as a dominant post-training paradigm for LLMs, achieving performance comparable to reinforcement learning (RL) while requiring substantially less training time. However, existing explanations for OPD's efficiency are purely macroscopic---attributing the advantage to ``denser and more stable supervision'' at the token level. Cai et al.~\cite{foresee} argue this explanation is superficial and fails to capture \textbf{parameter-level update dynamics} that actually explain the efficiency. They present a multi-scale empirical and theoretical analysis revealing two structural ``foresight'' properties of OPD, and propose EffOPD, a plug-and-play accelerator achieving ${\sim}$3$\times$ speedup.
+
+\subsection{Core Analysis: Two Foresight Properties}
+
+\paragraph{Property 1: Functional Redundancy Avoidance.}
+Through sliding-window intervention analysis---injecting local OPD or RL updates into consecutive 17-layer blocks while fixing all other parameters to the base model---the authors demonstrate that both methods exhibit an inverted U-shaped sensitivity pattern: middle-layer MLPs carry the primary reasoning-related updates, while bottom/top layers and embeddings contribute minimally. The critical difference: RL introduces substantially larger parameter changes in these low-sensitivity peripheral regions, inflating the update norm without proportional performance gains. OPD suppresses updates in low-utility modules and concentrates them on reasoning-critical intermediate layers. Embedding cosine similarity quantifies this: OPD maintains higher similarity to base model embeddings across all scales (e.g., 0.9752 vs.\ 0.9421 for Qwen3-8B-DAPO).
+
+\paragraph{Property 2: Early Low-Rank Lock-in.}
+SVD analysis of update matrices reveals OPD exhibits dramatically stronger low-rank concentration than RL. Defining the top-1\% subspace norm ratio $R_{\mathrm{Top\text{-}1\%}} = \|{\Delta W_k}\|_F / \|{\Delta W}\|_F$ where $k = \lceil r/100 \rceil$:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+& 1.5B RL & 1.5B OPD & 8B RL & 8B OPD \\
+\midrule
+$R_{\mathrm{Top\text{-}1\%}}$ & 78.1\% & 92.3\% & 88.5\% & 94.7\% \\
+Effective Rank & 964 & 778 & 2754 & 2341 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Moreover, OPD's dominant subspaces align with the \textit{final} update subspace very early in training (0--30\%), with cosine similarity reaching up to 0.9 in intermediate layers. A checkpoint at only \textbf{10\% of training progress}, when given module-wise magnitude scaling to match the final norm (optimal $\beta \in [0.8, 1.2]$), recovers approximately \textbf{80\% of final reasoning performance}. This proves that subsequent OPD training primarily accumulates magnitude along stable directions rather than adjusting directions.
+
+\subsection{Theoretical Foundation}
+
+The authors provide a local geometric theory explaining why both properties emerge. Starting from a first-order linearization of logits $z_\theta(c) \approx z_0(c) + J_c \Delta\theta$ and a second-order Taylor expansion of the reverse KL, the OPD loss becomes a quadratic:
+\begin{equation}
+\mathcal{L}_{\mathrm{OPD}}(\Delta\theta) \approx \tfrac{1}{2}\Delta\theta^\top A\,\Delta\theta - b^\top\Delta\theta + \mathrm{const},
+\end{equation}
+where $A = \mathbb{E}_c[J_c^\top F_c J_c]$ is the curvature matrix (Fisher-weighted Gram) and $b = \mathbb{E}_c[J_c^\top F_c\, r_c]$ is the driving term, with $r_c = z^*(c) - z_0(c)$ being the teacher-student logit residual and $F_c$ the Fisher information matrix. The spectral decomposition of gradient descent dynamics yields:
+\begin{equation}
+\Delta\theta_s = \sum_{i:\lambda_i > 0} \frac{1 - (1-\eta\lambda_i)^s}{\lambda_i}\,\beta_i\, u_i,
+\end{equation}
+where $\{(\lambda_i, u_i)\}$ are eigen-pairs of $A$ and $\beta_i = \langle b, u_i\rangle$. Directions with high curvature saturate early; if $b$ concentrates in the top-$k$ eigenspace ($\|P_{U_k^\perp} b\| \leq \epsilon\|b\|$ with $\epsilon \ll 1$), the effective update is confined to a low-dimensional subspace throughout training---explaining Property~2.
+
+The key insight for why $b$ is low-rank in practice: the teacher residual $r_c$ is typically sparse, concentrated on a few functionally important token positions (reasoning steps, answer tokens). The Fisher matrix $F_c$ reweights these, and $J_c^\top F_c\, r_c$ projects this concentrated signal into parameter space. For module-wise suppression (Property~1): if $b_m \approx 0$ for module $m$ (weakly coupled with the teacher residual), then $\Delta\theta_m^* \approx 0$.
+
+The RL gradient has higher variance because it involves $e_{y_t} - p_0(c_t)$ (a random vector with full vocabulary support) weighted by scalar advantages $A_t$, leading to $\mathrm{Tr}(\Sigma_{\mathrm{RL}}) > \mathrm{Tr}(\Sigma_{\mathrm{OPD}})$.
+
+\subsection{EffOPD: Acceleration Method}
+
+Exploiting early directional lock-in, EffOPD extrapolates along stable update directions:
+\begin{enumerate}[nosep]
+\item \textbf{Trigger:} At exponentially spaced checkpoints $t = 2^n$ ($n = 0, 1, 2, \ldots$)
+\item \textbf{Direction:} $\Delta_n = W_{2^n} - W_{2^{n-1}}$
+\item \textbf{Candidates:} $\tilde{W}_{n,k} = W_{2^n} + 2k\,\Delta_n$ for $k = 1, \ldots, 5$
+\item \textbf{Validation:} Sequential acceptance on 50 randomly sampled examples with early stopping
+\item \textbf{Fallback:} If $k{=}1$ fails, degenerate to vanilla OPD
+\end{enumerate}
+EffOPD converges in ${\sim}$10 steps vs.\ 30--40 for vanilla OPD (\textbf{$>$3$\times$ speedup}) on mathematical reasoning across model scales from 1.5B to 32B. Unlike prior accelerators (AlphaOPD, ExOPD) that use fixed extrapolation, EffOPD adapts via validation feedback, and sometimes reaches a \textit{higher} performance ceiling by avoiding over-optimization from prolonged training.
+
+\subsection{Key Results}
+
+Experiments span Qwen2.5/Qwen3 families (1.5B--32B) on 7 benchmarks (AIME24/25/26, MINERVA, GPQA, Codeforces, Taco). Key findings:
+\begin{itemize}[nosep]
+\item Both properties hold consistently across all model scales, training algorithms (PPO, GRPO, DAPO), and datasets
+\item Top-k\% experiment: retaining only 10\% of singular components recovers $>$95\% of full-model performance for both OPD and RL, but OPD consistently outperforms RL at every rank level
+\item RL's bottom-50\% tail subspace norm is 1.6--2.5$\times$ that of OPD's, yet yields limited performance gain
+\item EffOPD achieves better performance under the same wall-clock budget despite validation overhead
+\item Ablations show robustness to learning rate choice and validation set difficulty
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}[nosep]
+\item \textbf{Task generality}: Properties validated only on math and code reasoning; applicability to multi-turn agents, creative writing, and safety alignment is unexplored.
+\item \textbf{Local theory}: The linearization-based analysis is valid near initialization and does not capture global non-convex dynamics as $\|\Delta\theta\|$ grows.
+\item \textbf{No statistical significance}: Single-run evaluations without error bars or formal hypothesis testing.
+\item \textbf{Single-teacher assumption}: Multi-teacher or ensemble distillation dynamics could disrupt the low-rank driving term.
+\item \textbf{Teacher quality dependency}: The foresight mechanism may degrade with misaligned or weak teachers.
+\end{enumerate}
+
+\subsection{Relevance to Research Topics}
+
+This paper is directly relevant to \textbf{Topic 1 (LLM Efficiency: distillation, inference optimization)} as it provides the first parameter-dynamics explanation for why on-policy distillation is efficient and leverages this understanding for 3$\times$ training acceleration. It also connects to \textbf{Topic 2 (Reinforcement Learning)} through its systematic comparison of RL vs.\ OPD update dynamics across PPO, GRPO, and DAPO, revealing that RL's dispersed updates and delayed directional alignment explain its lower training efficiency despite theoretical equivalence with OPD.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Foresight-Guided Distillation for Diffusion Language Models}
+
+\paragraph{Gap.} The foresight properties (functional redundancy avoidance and early low-rank lock-in) are established for autoregressive OPD but have not been examined in diffusion model distillation. Our review of Flow-OPD~\cite{flowopd} showed that on-policy distillation for flow matching models converts KL divergence to time-weighted $L_2$ between velocity fields, and our review of TIDE~\cite{tide} demonstrated cross-architecture distillation from AR to diffusion LLMs. Neither investigates whether the distilled diffusion model's parameter updates exhibit the same concentrated, early-stabilizing geometry. If diffusion distillation shares these properties, the EffOPD acceleration strategy could directly transfer, dramatically reducing the cost of training diffusion LLMs from AR teachers.
+
+\paragraph{Approach.} Replicate the multi-scale analysis (SVD spectrum, sliding-window intervention, directional alignment tracking) on Flow-OPD and TIDE training runs to determine whether the foresight properties hold. The key theoretical question is whether the driving term $b = \mathbb{E}_c[J_c^\top F_c\, r_c]$ remains low-rank when $r_c$ represents a velocity field residual rather than a logit residual. If confirmed, apply EffOPD's extrapolation strategy with exponentially spaced checkpoints and lightweight validation on diffusion-specific metrics (e.g., FID or generation quality on a small held-out set). If the properties differ---for instance, if continuous-space diffusion induces higher effective rank in updates---design a modified extrapolation that operates on the principal subspace only, avoiding amplification of tail noise.
+
+\paragraph{Feasibility.} High. The analysis tools (SVD, intervention, cosine similarity tracking) are model-agnostic. The main requirement is access to intermediate checkpoints during diffusion distillation training, which is standard practice.
+
+\subsection{Direction 2: Geometry-Aware Module Allocation via Bures-Wasserstein Conflict Detection}
+
+\paragraph{Gap.} Property~1 reveals that OPD naturally suppresses updates in low-utility modules, but this suppression is implicit---it emerges from the optimization dynamics rather than being explicitly controlled. Our review of Geometry Conflict~\cite{geometryconflict} showed that Bures-Wasserstein discrepancy between task-induced covariance geometries provides a principled quantitative signal for parameter-level conflicts, with the key finding that geometry conflict localizes to MLP layers (90\% of top conflict layers) while gradient conflict localizes to attention Q/K (85\%). The current paper's finding that MLPs are the primary reasoning carriers in OPD aligns perfectly, but neither work exploits this for \textit{active} module-level allocation during OPD training.
+
+\paragraph{Approach.} Design an ``Adaptive OPD'' that uses Bures-Wasserstein geometry to actively allocate update budget across modules during distillation. Periodically (e.g., every 50 steps), compute the task-induced covariance geometry for each module and the Bures-Wasserstein discrepancy between the current student and the teacher. Modules with high discrepancy and high functional sensitivity (from the intervention analysis) receive full learning rate; modules with low discrepancy or low sensitivity receive attenuated learning rate or are frozen. This transforms the implicit redundancy avoidance into an explicit, geometry-guided curriculum over model parameters. The conflict gate from GCWM ($\tau{=}0.12$) provides a ready-made thresholding mechanism: modules below the conflict threshold are frozen, concentrating all gradient compute on the modules that matter most.
+
+\paragraph{Feasibility.} Medium-high. The per-module covariance computation adds overhead but is tractable at periodic intervals. The main challenge is defining ``teacher geometry'' for the Bures-Wasserstein comparison: one could use the teacher's gradient covariance on the student's on-policy samples as the target geometry, creating a dynamic reference that co-evolves with training.
+
+\subsection{Direction 3: Extrapolation-Aware Co-Evolving Policy Distillation}
+
+\paragraph{Gap.} CoPD~\cite{copd} introduced co-evolving parallel branches with alternating RLVR and mutual OPD, achieving strong multi-capability post-training. However, CoPD's training cost scales with the number of branches and alternation cycles. The current paper's finding that OPD locks onto effective directions within 10\% of training suggests that CoPD's OPD phases could be dramatically shortened. Furthermore, CoPD's behavioral consistency hypothesis (top-$k$ overlap $r{=}0.89$) implies that the co-evolving branches share similar update subspaces, which could enable cross-branch extrapolation where one branch's early trajectory informs another's.
+
+\paragraph{Approach.} Integrate EffOPD's extrapolation into CoPD's alternation schedule: after each RLVR phase develops new capabilities in a branch, the subsequent mutual OPD phase uses EffOPD to rapidly distill those capabilities to sibling branches. Since Property~2 guarantees early directional lock-in, each OPD phase needs only ${\sim}$10 steps rather than 30--40. Additionally, exploit cross-branch structural similarity: if branches $A$ and $B$ share $>$90\% top-$k$ subspace overlap (as CoPD's behavioral consistency suggests), extrapolate branch $B$'s OPD trajectory using branch $A$'s already-computed update direction as a warm start, further reducing the per-branch OPD cost. For $K{>}2$ branches in CoPD's hub-and-spoke topology, the hub branch's update direction could serve as a shared extrapolation prior for all spokes.
+
+\paragraph{Feasibility.} High. Both EffOPD and CoPD have public implementations. The integration requires replacing vanilla OPD phases with EffOPD and adding cross-branch subspace comparison (a single SVD per branch per phase). The 3$\times$ per-phase speedup translates directly to overall CoPD training cost reduction, and the cross-branch warm-starting could provide additional gains.
+
+\section{Conclusion}
+
+This paper provides the first parameter-dynamics explanation for on-policy distillation's efficiency, revealing that OPD's advantage stems not merely from denser supervision but from two structural ``foresight'' properties: functional redundancy avoidance (concentrating updates on reasoning-critical middle-layer MLPs while suppressing peripheral modules) and early low-rank lock-in (stabilizing dominant update subspaces within 0--30\% of training, with 10\% checkpoints recovering ${\sim}$80\% of final performance after magnitude scaling). The local geometric theory traces both properties to the low-rank structure of the teacher-student residual driving term. The practical consequence---EffOPD achieving 3$\times$ speedup via adaptive extrapolation---demonstrates that understanding optimization geometry can directly translate to training efficiency. The findings open rich avenues for transferring foresight analysis to diffusion distillation, combining geometry-aware module allocation with Bures-Wasserstein conflict detection, and accelerating co-evolving multi-branch distillation.
+
+\begin{thebibliography}{99}
+\bibitem{foresee} Cai, Y., Cao, D., Lin, L., Luo, C., Xu, X., Yang, K., Liu, W., Yang, S., Zhao, T., Sun, G., Liu, G., Fang, J. ``Learning to Foresee: Unveiling the Unlocking Efficiency of On-Policy Distillation.'' \textit{arXiv preprint arXiv:2605.11739}, 2026.
+\bibitem{flowopd} Authors. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \textit{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{tide} Authors. ``Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.'' \textit{arXiv preprint arXiv:2604.26951}, 2026.
+\bibitem{geometryconflict} Authors. ``Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.'' \textit{arXiv preprint arXiv:2605.09608}, 2026.
+\bibitem{copd} Authors. ``Co-Evolving Policy Distillation.'' \textit{arXiv preprint arXiv:2604.27083}, 2026.
+\end{thebibliography}
+
+\end{document}
