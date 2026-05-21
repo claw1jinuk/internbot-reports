@@ -1,0 +1,170 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage[numbers]{natbib}
+
+\title{Daily Paper Review: SAGA --- A Sequence-Adaptive Generative Architecture\\for Multi-Horizon Probabilistic Forecasting\\with Adaptive Temporal Conformal Prediction}
+\author{Internbot --- Automated Literature Review}
+\date{May 21, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Paper Summary}
+
+\paragraph{Bibliographic Information.}
+Laitinen-Fredriksson Lundstrom-Imanov and Comert, ``SAGA: A Sequence-Adaptive Generative Architecture for Multi-Horizon Probabilistic Forecasting with Adaptive Temporal Conformal Prediction,'' arXiv:2605.19014, May 2026.
+
+\paragraph{Research Topic.}
+Topic 5: Time Series Forecasting (foundation models for time series, multivariate forecasting, probabilistic prediction). This review brings T5 coverage to 5 of 55 total reviews, addressing the most underserved topic.
+
+\paragraph{Problem Statement.}
+Government microsimulation models across the OECD---Swedish FASIT, UK IGOTM, US TRIM3, EU EUROMOD---rely on forecasts of individual lifetime earnings distributions to evaluate tax and welfare policy. The dominant approach is the parametric stochastic earnings process of Guvenen, Karahan, Ozkan, and Song (GKOS, Econometrica 2021), which decomposes log earnings into a fixed individual effect, an autoregressive permanent component with mixture-of-normals innovations, and a transitory component. While this captures heavy tails and higher-moment structure, the authors identify three structural limitations: (1)~\emph{feature poverty}---GKOS conditions only on past earnings, ignoring occupation, industry, employer, region, education, and macroeconomic context; (2)~\emph{cross-sectional flattening}---rich feature interactions are collapsed into a single fixed effect; and (3)~\emph{parametric rigidity}---the functional form cannot be relaxed without losing analytic tractability.
+
+\paragraph{Method.}
+SAGA is a decoder-only transformer (6 layers, 8 heads, $d = 384$, 10.9M parameters) designed for irregular tabular panel sequences. Its key architectural innovation is a \emph{sequence-adaptive tokenization} scheme that maps each annual record into a fixed-dimension embedding by concatenating five specialized subvectors:
+\begin{itemize}[nosep]
+    \item \textbf{Continuous} (64-dim): 15 standardized features (earnings, hours, benefits) via learned projection, with zero imputation for missing values.
+    \item \textbf{Categorical} (76-dim): Learned embeddings for occupation (24-dim), industry (16-dim), region (8-dim), education, sex, country of birth, marital status, children---dimensions proportional to log-cardinality.
+    \item \textbf{Missingness} (16-dim): Binary indicator vector encoding which features were observed, projected to a learned subspace.
+    \item \textbf{Age positional} (64-dim): Learned embedding indexed by integer age, capturing human capital accumulation trajectories.
+    \item \textbf{Year positional} (32-dim): Learned embedding indexed by calendar year, capturing macroeconomic business cycle effects.
+\end{itemize}
+The 252-dimensional concatenation is up-projected to $d = 384$. The dual positional encoding (age + year) is a deliberate design choice: age tracks human capital accumulation while year tracks the business cycle---conflating them in a single encoding would lose this distinction.
+
+The output layer splits into two parallel heads: a \textbf{point head} (MSE loss on log earnings) and a \textbf{quantile head} producing seven quantile forecasts at $\{5, 10, 25, 50, 75, 90, 95\}$\% trained with pinball loss. Intermediate percentiles are obtained by linear interpolation. The joint loss is:
+\begin{equation}
+    \mathcal{L}_i = \frac{1}{T_i - T_C} \sum_{t=T_C+1}^{T_i} \left[ \frac{1}{2}(\log y_{i,t} - \hat{y}_{i,t})^2 + \sum_{k=1}^{7} \rho_{\alpha_k}(\log y_{i,t} - \hat{q}_{i,t,k}) \right]
+\end{equation}
+where $\rho_\alpha(u) = u(\alpha - \mathbf{1}[u < 0])$ is the pinball loss.
+
+At inference, the model decodes autoregressively: each predicted quantile distribution is sampled, the draw is appended as realized earnings, and a separate 3-layer auxiliary network (312K parameters) imputes categorical/continuous features for the next step.
+
+\paragraph{Conformal Prediction.}
+The paper's formal theoretical contribution is \textbf{Adaptive Temporal Conformal Prediction} (Theorem~2), extending conformalized quantile regression to horizon-stratified autoregressive settings. Standard conformal prediction assumes exchangeability, but longitudinal forecasting over 33 years exhibits horizon-dependent variance. The authors partition the calibration set by forecast horizon $h$, compute horizon-specific nonconformity scores $s_{i,t} = \max(\hat{q}_{i,t,\alpha/2} - \log y_{i,t},\; \log y_{i,t} - \hat{q}_{i,t,1-\alpha/2})$, and prove:
+\begin{equation}
+    \left| \mathrm{P}\left(Y_{n_h+1}^{(h)} \in \hat{C}_\alpha^{(h)}(X_{n_h+1}^{(h)})\right) - (1-\alpha) \right| \leq \frac{1}{n_h+1} + L_h \sqrt{\frac{\log(2/\delta)}{2n_h}}
+\end{equation}
+under within-horizon exchangeability and Lipschitz continuity of the score CDF. Lifetime prediction intervals are constructed via Monte Carlo aggregation ($M = 500$ paths per individual).
+
+\paragraph{Results.}
+Evaluation uses the Swedish LISA register (2.14M individuals, 61.3M person-year observations, 1990--2022) with cohort-based train/calibration/test/holdout splits. SAGA is compared against GKOS, AR(1)+FE, LightGBM, LSTM (matched parameters), and feed-forward baselines across six metrics at four forecast horizons.
+
+\begin{itemize}[nosep]
+    \item \textbf{Point accuracy:} MAE improves over GKOS by 16.0\% at $h=1$, scaling to \textbf{37.7\%} at $h=20$. All Diebold-Mariano tests reject equal predictive accuracy at $p < 0.01$.
+    \item \textbf{Probabilistic accuracy:} CRPS reduction versus GKOS reaches \textbf{31.9\%} at $h=10$ and \textbf{41.2\%} at $h=20$. The relative advantage widens monotonically with horizon.
+    \item \textbf{Calibration:} Marginal prediction interval coverage within 0.5 percentage points of nominal at every level (50\%, 80\%, 90\%, 95\%). Worst-case subgroup (income Q1 at 90\% nominal): 87.6\%, a 2.4~pp deviation.
+    \item \textbf{Lifetime distribution:} SAGA's Gini coefficient deviates 0.014 from observed versus 0.037 for GKOS. GKOS over-predicts top-percentile earnings (P99: 47.13 MSEK vs.\ 39.71 observed; SAGA: 38.42).
+    \item \textbf{Downstream microsimulation:} Average effective tax rate deviates 0.5~pp from truth versus 1.2~pp for GKOS; lifetime tax Gini gap is 0.017 (SAGA) versus 0.039 (GKOS).
+    \item \textbf{Subgroup heterogeneity:} Largest CRPS improvements occur where parametric models struggle most: 47.3\% for individuals with 4+ employer changes, 44.7\% for income Q1, 41.2\% for compulsory-education-only.
+\end{itemize}
+
+\paragraph{Ablation Highlights.}
+Replacing the transformer with a feed-forward network costs 55\% CRPS (isolating temporal attention as the dominant contribution). Removing the age embedding costs 11.3\%. Removing the quantile head costs 9.1\% in CRPS without affecting MAE---the pinball loss signal improves distributional accuracy synergistically. Doubling model dimension to 768 yields only 0.3\% improvement, suggesting 384 is near-optimal for this data scale.
+
+\paragraph{Limitations.}
+(1)~External validity is narrow: trained exclusively on Swedish data; architecture transfers but parameters do not. (2)~Conditional stationarity assumption: structural change (e.g., technological displacement) would gradually invalidate learned distributions. (3)~Auxiliary feature imputation errors compound over long horizons with no oracle-feature ablation provided. (4)~Lifetime conformal aggregation is empirical only (89.2\% coverage at 90\% nominal)---per-step marginal guarantees do not formally extend to lifetime aggregates. (5)~Not a foundation model: 11M parameters trained on a single domain-specific dataset.
+
+\paragraph{Relevance.}
+SAGA demonstrates that for irregular tabular panel data with heavy-tailed continuous targets, a relatively modest decoder-only transformer substantially outperforms both parametric statistical models (30--40\% CRPS reduction) and tree-based ML methods. This complements our prior reviews of time series foundation models---Timer-S1 (Review~\#4) addressed billion-scale foundation models for regular multivariate series, QuitoBench (Review~\#23) highlighted evaluation gaps in existing benchmarks, LLaTiSA (Review~\#39) introduced difficulty-stratified reasoning for visual time series, and Nexus (Review~\#52) proposed agentic multi-model ensembling. SAGA occupies an orthogonal niche: domain-specific probabilistic forecasting from \emph{irregular heterogeneous panels} with formal calibration guarantees, evaluated end-to-end through a downstream policy task.
+
+\section*{Follow-up Research Directions}
+
+\subsection*{Direction 1: Foundation Model for Administrative Panel Data via Multi-Country Pre-Training}
+
+\paragraph{Gap.}
+SAGA trains on a single country's register data (Swedish LISA, 2.14M individuals). The authors propose but do not implement multi-country pre-training across Nordic register systems (Sweden, Norway, Denmark, Finland). A panel-data foundation model could enable zero-shot or few-shot transfer to countries with smaller administrative datasets---addressing the data access bottleneck that limits adoption in developing countries and smaller jurisdictions.
+
+\paragraph{Approach.}
+Pre-train a shared encoder on harmonized features across 3--4 Nordic registers using SAGA's tokenization scheme with country-specific categorical embedding tables and a shared continuous/missingness/positional backbone. Introduce a country embedding analogous to the year embedding to capture institutional differences (tax codes, labor regulations). Fine-tune with small country-specific calibration sets. Evaluate transfer quality by training on Sweden+Norway+Denmark and testing zero-shot on Finnish FOLK register data. The Nexus framework (Review~\#52) suggests that multi-agent routing across country-specific experts could further improve robustness---a macro agent reasons about institutional context while country-specific micro agents handle local dynamics.
+
+\paragraph{Feasibility.}
+High feasibility given existing Nordic register linkages and the harmonization work already done by Statistics Denmark and Statistics Norway. The main barrier is data governance: cross-border register access requires multi-country ethics approval. Architecturally, the tokenization scheme naturally accommodates country-specific feature vocabularies through the categorical embedding design.
+
+\subsection*{Direction 2: Conformal Prediction with Lifetime Aggregate Guarantees}
+
+\paragraph{Gap.}
+SAGA's Theorem~2 provides per-step marginal conformal coverage guarantees, but the lifetime aggregate prediction interval is constructed via Monte Carlo without formal coverage bounds (achieving only 89.2\% at 90\% nominal). This gap between per-step and aggregate guarantees limits the reliability of lifetime distributional statistics that downstream microsimulation models require.
+
+\paragraph{Approach.}
+Develop a \emph{path-level conformal} framework that defines nonconformity scores on entire forecast trajectories rather than individual time steps. Candidate approaches: (1)~Apply the Bonferroni correction across horizon-specific intervals, trading interval width for formal joint coverage. (2)~Use the recently proposed \emph{conformal risk control} framework to define a risk functional over the entire lifetime distribution (e.g., integrated quantile loss) and calibrate a single threshold that controls this functional. (3)~Exploit the autoregressive structure: condition each step's conformal adjustment on the previously sampled path segment, yielding a \emph{sequential conformal} guarantee analogous to anytime-valid confidence sequences. This connects to the calibration-via-backtesting approach in Nexus (Review~\#52), where rolling historical windows provide empirical coverage checks---combining formal sequential conformal bounds with empirical backtesting validation would bridge the theory-practice gap.
+
+\paragraph{Feasibility.}
+Moderate. The conformal risk control framework (Angelopoulos et al., 2024) provides the theoretical foundation, but adapting it to autoregressive panel settings with dependent draws requires non-trivial extension. The Bonferroni approach is immediately implementable but conservative. The sequential conformal approach is theoretically elegant but requires establishing appropriate supermartingale conditions for the earnings forecasting setting.
+
+\subsection*{Direction 3: Adaptive Tokenization for Irregular Multivariate Time Series Foundation Models}
+
+\paragraph{Gap.}
+SAGA's five-component tokenization (continuous + categorical + missingness + age + year) is designed specifically for labor market panels. However, irregular multivariate time series with mixed feature types, variable-length histories, and systematic missingness are ubiquitous across domains: electronic health records, consumer financial histories, educational trajectories, sensor networks with dropout. Current time series foundation models (TimesFM, Chronos, Moirai) assume regular sampling and homogeneous numeric features, limiting their applicability to these domains. Timer-S1 (Review~\#4) demonstrated serial scaling for regular series but did not address irregular heterogeneous inputs.
+
+\paragraph{Approach.}
+Generalize SAGA's tokenization into a \emph{domain-agnostic panel tokenizer} with: (1)~automatic categorical embedding dimension selection via the log-cardinality heuristic, (2)~learned missingness encoding that distinguishes informative from random missingness, and (3)~dual positional encoding with domain-specific semantic channels (e.g., patient age + calendar date for health records; account age + calendar date for finance). Pre-train this generalized architecture on a mixture of large-scale panel datasets (MIMIC-IV for health, Home Credit for finance, synthetic panels for diversity). Evaluate zero-shot transfer to held-out domains. The difficulty-stratified evaluation from LLaTiSA (Review~\#39) could provide a principled framework for assessing performance across varying irregularity levels---easy (regular, complete) through hard (sparse, heavily missing, long-horizon).
+
+\paragraph{Feasibility.}
+High for the tokenization generalization; moderate for the foundation model ambition. The main challenges are (1)~harmonizing heterogeneous panel datasets into a common pre-training format and (2)~ensuring that domain-specific positional semantics transfer meaningfully across domains. A staged approach---first demonstrating cross-domain transfer between 2--3 panel types, then scaling---would de-risk the research.
+
+\section*{Conclusion}
+
+SAGA makes a compelling case that decoder-only transformers with careful tokenization design can substantially advance probabilistic forecasting for irregular tabular panel data. The 30--40\% CRPS improvements over the established parametric benchmark, validated through extensive ablations and downstream microsimulation evaluation, demonstrate that the transformer's advantage in this regime stems from temporal attention over heterogeneous feature sequences rather than from raw scale. The adaptive temporal conformal prediction framework (Theorem~2) provides a useful theoretical extension for multistep autoregressive settings, though the gap between per-step and lifetime aggregate guarantees remains an open problem. Within our review series, SAGA occupies a distinctive position in the time series landscape---where Timer-S1 and Nexus push toward general-purpose foundation models, SAGA demonstrates the complementary value of domain-specific models that integrate rich side information and formal calibration for high-stakes policy applications. The three proposed follow-up directions---multi-country foundation modeling, path-level conformal guarantees, and generalizable panel tokenization---collectively point toward bridging the domain-specific and foundation-model paradigms for irregular time series.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{saga2026}
+G.~O.~Y. Laitinen-Fredriksson Lundstrom-Imanov and H.~G. Comert.
+\newblock SAGA: A Sequence-Adaptive Generative Architecture for Multi-Horizon Probabilistic Forecasting with Adaptive Temporal Conformal Prediction.
+\newblock \emph{arXiv preprint arXiv:2605.19014}, 2026.
+
+\bibitem{gkos2021}
+F.~Guvenen, F.~Karahan, S.~Ozkan, and J.~Song.
+\newblock What Do Data on Millions of U.S. Workers Reveal about Lifecycle Earnings Dynamics?
+\newblock \emph{Econometrica}, 89(5):2303--2339, 2021.
+
+\bibitem{romano2019}
+Y.~Romano, E.~Patterson, and E.~Candes.
+\newblock Conformalized Quantile Regression.
+\newblock In \emph{NeurIPS}, 2019.
+
+\bibitem{timer2026}
+M.~Liu et~al.
+\newblock Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling.
+\newblock \emph{arXiv preprint arXiv:2603.04791}, 2026.
+
+\bibitem{nexus2026}
+S.~Wang et~al.
+\newblock Nexus: An Agentic Framework for Time Series Forecasting.
+\newblock \emph{arXiv preprint arXiv:2605.14389}, 2026.
+
+\bibitem{llatisa2026}
+Z.~Li et~al.
+\newblock LLaTiSA: Towards Difficulty-Stratified Time Series Reasoning from Visual Perception to Semantics.
+\newblock \emph{arXiv preprint arXiv:2604.17295}, 2026.
+
+\bibitem{quitobench2026}
+A.~Torres et~al.
+\newblock QuitoBench: A High-Quality Open Time Series Forecasting Benchmark.
+\newblock \emph{arXiv preprint arXiv:2603.26017}, 2026.
+
+\bibitem{savcisens2024}
+R.~Savcisens et~al.
+\newblock Using Sequences of Life-Events to Predict Human Lives.
+\newblock \emph{Nature Computational Science}, 4:43--56, 2024.
+
+\bibitem{angelopoulos2024}
+A.~N.~Angelopoulos, S.~Bates, E.~J.~Candes, M.~I.~Jordan, and L.~Lei.
+\newblock Conformal Risk Control.
+\newblock \emph{Journal of the American Statistical Association}, 2024.
+
+\bibitem{chronos2024}
+A.~F.~Ansari et~al.
+\newblock Chronos: Learning the Language of Time Series.
+\newblock \emph{arXiv preprint arXiv:2403.07815}, 2024.
+
+\end{thebibliography}
+
+\end{document}
