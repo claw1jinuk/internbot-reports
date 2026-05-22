@@ -1,0 +1,181 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage[numbers]{natbib}
+
+\title{Daily Paper Review: Toto 2.0 --- Time Series Forecasting\\Enters the Scaling Era}
+\author{Internbot --- Automated Literature Review}
+\date{May 22, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Paper Summary}
+
+\paragraph{Bibliographic Information.}
+Khwaja, Lettieri, Woo, Belouadah, Cenac, Jarry, Paquin, Zhao, Zhukova, Abou-Amal, Liu, Talwalkar, and Asker, ``Toto 2.0: Time Series Forecasting Enters the Scaling Era,'' arXiv:2605.20119, May 2026. Datadog AI Research \& Carnegie Mellon University.
+
+\paragraph{Research Topic.}
+Topic 5: Time Series Forecasting (foundation models for time series, multivariate forecasting). This review brings T5 coverage to 6 of 56 total reviews. With 437 upvotes on HuggingFace, this is the highest-impact time series paper in recent weeks.
+
+\paragraph{Problem Statement.}
+While NLP and vision foundation models exhibit predictable performance improvements with increased scale following Kaplan et al.'s scaling laws, time series foundation models (TSFMs) have conspicuously failed to replicate this behavior. Competing model families---Chronos, TimesFM, Moirai---scale unevenly, with larger versions sometimes underperforming smaller ones. This paper asks a deliberately simple question: \emph{Can TSFMs improve reliably from scaling?} The authors argue that demonstrating reliable scaling would transform TSFMs from research artifacts into engineering tools where practitioners can predictably trade inference cost against forecast quality.
+
+\paragraph{Architecture.}
+Toto 2.0 is a decoder-only patched transformer with alternating \textbf{time-axis attention} (causal) and \textbf{variate-axis attention} (bidirectional across input channels). Building on the Toto~1.0 backbone, four critical changes enable scaling from 4M to 2.5B parameters:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Contiguous Patch Masking (CPM):} Adapted from TiRex (designed for xLSTM), CPM replaces autoregressive decoding with single-pass parallel forecasting. Random contiguous spans of patches are masked during training ($c_{\mathrm{max}} = 16$, $p_{\mathrm{max}} = 0.4$), and the model predicts all masked patches simultaneously. At inference, the forecast horizon constitutes the masked set, decoded in one forward pass. For transformers this requires only 1 call versus $|M|$ calls for SSM-based architectures. For horizons beyond $\sim$768 steps, block decoding with KV-cache reuse extends stability.
+
+    \item \textbf{Quantile Output Head:} Replaces Toto~1.0's Student-$t$ Mixture Model (SMM), which becomes numerically unstable at large scale when predictions approach zero. The new head predicts 9 quantile levels at $\tau \in \{0.1, 0.2, \ldots, 0.9\}$ trained with pinball loss $\rho_\tau(u) = u(\tau - \mathbf{1}[u < 0])$. Quantiles are sorted at inference to prevent crossing.
+
+    \item \textbf{NorMuon Optimizer:} A variant of Muon that adds per-neuron row normalization. The key insight is that pinball loss gradients are \emph{sign-valued}---they take only 3 values regardless of error magnitude---which cripples AdamW's per-parameter variance-based step-size adaptation. NorMuon reinstates a $\beta_2$ variance mechanism at the per-neuron level while using Polar Express (quintic iteration) for orthogonalization. Applied to all matrix-shaped parameters; AdamW handles input/output projections, biases, and norms.
+
+    \item \textbf{u-$\mu$P (Maximal Update Parametrization):} First application of $\mu$P to time series forecasting. Hyperparameters (learning rate, initialization scale) are tuned at a 10M proxy and transfer directly to all target sizes (4M--2.5B), making the optimal learning rate width-independent. Implemented via the \texttt{dd\_unit\_scaling} library with torch.compile and FSDP2 compatibility.
+\end{enumerate}
+
+Additional design choices include patch size 32 (halved from 64 for finer granularity), arcsinh input normalization (linear near zero, logarithmic for large values), residual MLP patch projections with SiLU activations, and PerDimScale for $\mu$P-compatible attention scaling.
+
+\paragraph{Data and Pre-Training.}
+Uniquely among leading TSFMs, Toto 2.0 uses \textbf{no public time series data during pretraining}:
+\begin{itemize}[nosep]
+    \item \textbf{Synthetic (TempoPFN):} 57.5\% --- rich non-stationary trends, changepoints, long-range dependencies generated via a Prior-Fitted Networks framework.
+    \item \textbf{Datadog observability (10s, 60s, 5+ min intervals):} 42.5\% --- CPU, memory, latency, error rate metrics at varying granularities.
+\end{itemize}
+Larger models (313M, 1B, 2.5B) train on 5.04 trillion data points; smaller models on 3.40 trillion. A hyperparameter sweep found that public time series data provides no pretraining benefit at proxy scale but helps during finetuning---a striking finding that implies the observability+synthetic mixture produces stronger cross-domain representations than public datasets.
+
+\paragraph{Model Family.}
+Five sizes spanning three orders of magnitude: 4M, 22M, 313M, 1B, and 2.5B parameters. All share identical architecture ratios and hyperparameters transferred via u-$\mu$P from the 10M proxy.
+
+\paragraph{Results.}
+Evaluation spans three benchmarks: BOOM (observability, production monitoring), GIFT-Eval (23 datasets across energy/retail/weather/finance, 97 tasks), and TIME (50 fresh datasets, 98 tasks, contamination-resistant). Baselines include Toto~1.0, Chronos-2, TimesFM~2.5, Moirai-2, PatchTST-FM r1, TiRex, and FlowState.
+
+\begin{itemize}[nosep]
+    \item \textbf{BOOM (CRPS Rank):} 2.5B achieves 3.88, with monotonic improvement across all sizes: 7.17 (4M) $\to$ 5.53 (22M) $\to$ 4.26 (313M) $\to$ 3.96 (1B) $\to$ 3.88 (2.5B). All five Toto~2.0 sizes outrank every other foundation model. Toto~1.0 (151M) scores 6.94; Chronos-2 scores 7.39.
+    \item \textbf{GIFT-Eval (CRPS Rank):} 2.5B achieves 20.3, leading all foundation models. 313M (21.4) already beats PatchTST-FM r1 (23.1) and Chronos-2 (23.5). The Toto~2.0 FnF ensemble ranks \textbf{1st on every metric} on the full leaderboard, receiving 39\% meta-learner weight (highest of any model family).
+    \item \textbf{TIME (CRPS Rank):} 2.5B achieves 3.43, leading Chronos-2 (4.03) and PatchTST-FM r1 (5.04). Monotonic improvement except one minor inversion where 313M edges out 1B on MASE rank.
+    \item \textbf{Parameter efficiency:} The 22M model matches Toto~1.0 (151M) quality---a 7$\times$ compression. The 4M model competes with Chronos-2 (120M) at $\sim$30$\times$ compression, enabling edge deployment.
+\end{itemize}
+
+\paragraph{Scaling Behavior.}
+The central empirical claim: a single training recipe produces \emph{monotonic} forecast-quality improvements from 4M to 2.5B parameters across all three benchmarks. This is unprecedented among TSFMs---competing families show inversions where larger models underperform smaller ones. The authors attribute reliable scaling to the combination of u-$\mu$P (width-independent hyperparameters), quantile heads (numerically stable at scale), NorMuon (appropriate gradient handling for pinball loss), and sufficient data (5T+ points). However, the paper does \emph{not} fit a formal power-law equation---scaling is demonstrated empirically rather than characterized as a compute-optimal law in the Chinchilla sense.
+
+\paragraph{Design Search Insights.}
+Round~1 (architecture): PerDimScale outperforms QK-Norm for attention normalization; variate-axis attention layers are best placed last in the stack; larger CPM spans ($c_{\mathrm{max}}=16$) outperform TiRex's default ($c_{\mathrm{max}}=5$). Round~2 (data): the optimizer found no benefit from including public time series data in pretraining; optimal split is 42.5\% observability / 57.5\% synthetic.
+
+\paragraph{Limitations.}
+(1)~Long-horizon structural collapse: even the 2.5B model loses coherent structure at 8,192 steps where a properly-fitted seasonal model would extrapolate cleanly. (2)~No formal scaling law: performance-vs-compute relationships are demonstrated empirically without deriving a functional form or compute-optimal recipe. (3)~Ad hoc data curation: the finding that public data hurts pretraining was discovered empirically rather than through principled selection methods. (4)~Single-pass horizon limit at $\sim$768 steps before block decoding is needed. (5)~Benchmarks measure forecast accuracy (CRPS/MASE) but not downstream operational value (anomaly detection F1, alerting precision). (6)~One minor scaling inversion (313M edges 1B on TIME MASE rank) breaks strict monotonicity.
+
+\paragraph{Relevance.}
+Toto~2.0 directly addresses a core question for the time series foundation model field: whether scaling laws---the engine driving progress in NLP and vision---apply to time series. This connects to our prior T5 reviews: Timer-S1 (Review~\#4) demonstrated billion-scale serial scaling but with a Mixture-of-Experts architecture; QuitoBench (Review~\#23) highlighted evaluation gaps that TIME and GIFT-Eval now partially address; Nexus (Review~\#52) showed agentic multi-model ensembling could outperform individual foundation models; and SAGA (Review~\#55) demonstrated the value of domain-specific architectures with formal calibration for irregular panels. Toto~2.0 contributes the missing piece: \emph{a dense transformer family with reliable, monotonic scaling across three orders of magnitude}, establishing that the scaling paradigm transfers from language to time series when the right combination of parametrization ($\mu$P), optimization (NorMuon), and output design (quantile heads) is in place.
+
+\section*{Follow-up Research Directions}
+
+\subsection*{Direction 1: Chinchilla-Style Compute-Optimal Scaling Laws for Time Series}
+
+\paragraph{Gap.}
+Toto~2.0 demonstrates that scaling works but does not characterize \emph{how} it works quantitatively. There is no power-law relationship $L = aC^b$ relating compute budget to forecast loss, no data-vs-parameters tradeoff analysis, and no compute-optimal recipe analogous to Chinchilla's findings for language models. Without this, practitioners cannot answer: ``Given a fixed compute budget, should I train a larger model on less data or a smaller model on more data?''
+
+\paragraph{Approach.}
+Train a dense grid of models (e.g., 20+ configurations spanning 1M--5B parameters and 100B--10T data points) using Toto~2.0's recipe with u-$\mu$P transfer. Fit power-law relationships for $L(N, D)$ where $N$ is parameters and $D$ is data tokens, following Hoffmann et al.'s methodology. Critical extensions for time series: (1)~stratify the analysis by forecast horizon, since long-horizon loss may scale differently than short-horizon; (2)~decompose by domain (observability vs.\ energy vs.\ finance) to test whether scaling exponents are domain-universal or domain-specific; (3)~incorporate the synthetic/real data ratio as a third axis, since Toto~2.0's finding that synthetic data dominates pretraining suggests fundamentally different data scaling dynamics than language models. Timer-S1's serial scaling approach (Review~\#4) provides a natural comparison point---do MoE architectures follow different scaling curves than dense transformers for time series?
+
+\paragraph{Feasibility.}
+High. The u-$\mu$P infrastructure enables efficient hyperparameter transfer across the grid, and the TempoPFN synthetic generator provides unlimited data. The main cost is compute for the training grid ($\sim$50--100 runs), but proxy-scale experiments can guide the grid design. This would be a landmark contribution for the field, analogous to Chinchilla's impact on language model training.
+
+\subsection*{Direction 2: Principled Data Curation via Influence Functions for Time Series Pretraining}
+
+\paragraph{Gap.}
+Toto~2.0's most surprising finding is that public time series data \emph{hurts} pretraining quality despite helping finetuning---discovered entirely by empirical grid search without theoretical explanation. More broadly, the field lacks principled methods for selecting pretraining data mixtures. Understanding \emph{why} observability+synthetic generalizes better than observability+public would enable deliberate data curation rather than expensive empirical sweeps.
+
+\paragraph{Approach.}
+Apply training data attribution methods---influence functions, datamodel representations, or TRAK~\cite{park2023trak}---to quantify each data source's contribution to downstream benchmark performance. Specifically: (1)~compute per-source influence scores at proxy scale using u-$\mu$P, testing whether the scores predict optimal mixture composition at target scale; (2)~characterize what properties of synthetic TempoPFN data make it beneficial (hypothesis: diversity of non-stationary patterns exceeds what any single real domain provides); (3)~test whether \emph{domain-matched} public data helps (e.g., public energy data for energy benchmarks) even when aggregate public data hurts. This connects to SAGA's finding (Review~\#55) that domain-specific training on a single massive dataset can outperform broader pretraining---influence analysis could reveal whether the advantage is domain coverage, distributional diversity, or absence of distribution conflicts between heterogeneous public sources.
+
+\paragraph{Feasibility.}
+Moderate. Influence functions at the scale of 5T data points are computationally prohibitive, but proxy-scale analysis (10M model, subsampled data) with u-$\mu$P transfer could yield actionable insights. TRAK's random-projection approximation scales better than classical influence functions. The key risk is that data attribution at proxy scale may not transfer to target scale---validating this transfer is itself a contribution.
+
+\subsection*{Direction 3: Hybrid Foundation-Classical Models for Long-Horizon Coherence}
+
+\paragraph{Gap.}
+Toto~2.0 acknowledges that even the 2.5B model loses structural coherence at 8,192 steps, where classical seasonal models maintain clean extrapolation and appropriate prediction interval growth. This reflects a fundamental tension: foundation models excel at capturing complex cross-domain patterns but lack the inductive biases (periodicity, trend decomposition, interval calibration) that make classical models reliable for long-horizon extrapolation. Neither paradigm alone is sufficient for production forecasting systems that require both flexibility and long-horizon stability.
+
+\paragraph{Approach.}
+Design a hybrid architecture with three components: (1)~a Toto~2.0-style foundation backbone handling short-to-medium horizons (up to $\sim$768 steps) via single-pass CPM decoding; (2)~a classical structural component (state-space seasonal model or Fourier decomposition) providing long-horizon trend/seasonality extrapolation with calibrated prediction intervals; (3)~a learned gating mechanism that smoothly transitions from foundation to classical dominance as horizon increases. The gating network would be trained to minimize a horizon-weighted CRPS objective that penalizes interval miscalibration more heavily at long horizons. This connects to Nexus's agentic ensembling approach (Review~\#52) but replaces the LLM-based meta-reasoner with a lightweight learned gate, and to SAGA's conformal calibration framework (Review~\#55) for ensuring the hybrid's prediction intervals maintain formal coverage guarantees across the transition boundary. The adaptive temporal conformal prediction from SAGA could be applied to the hybrid's output, providing horizon-stratified coverage that naturally adapts as the dominant component shifts.
+
+\paragraph{Feasibility.}
+High for the architecture; moderate for the calibration guarantees. The foundation and classical components already exist---the research contribution is the gating mechanism and its interaction with conformal calibration. A staged approach would first demonstrate improved long-horizon CRPS on GIFT-Eval's longest-horizon tasks, then extend to formal coverage analysis.
+
+\section*{Conclusion}
+
+Toto~2.0 delivers the first convincing demonstration that time series foundation models can scale reliably, with a single training recipe producing monotonic improvements from 4M to 2.5B parameters across three diverse benchmarks. The enabling innovations---u-$\mu$P for hyperparameter transfer, NorMuon for sign-valued gradient optimization, quantile heads for numerical stability, and contiguous patch masking for efficient parallel decoding---collectively solve the technical obstacles that prevented prior TSFMs from exhibiting scaling behavior. The finding that synthetic+observability data outperforms public data in pretraining challenges assumptions about data curation for foundation models. Within our review series, Toto~2.0 completes a compelling arc for Topic~5: Timer-S1 established that billion-scale time series models are feasible, Nexus and SAGA showed that agentic ensembling and domain-specific calibration provide complementary advantages, and now Toto~2.0 demonstrates that the scaling paradigm itself transfers from language to time series. The three proposed follow-up directions---formal compute-optimal scaling laws, principled data curation via influence analysis, and hybrid foundation-classical models for long-horizon coherence---address the paper's most important open questions and would further bridge the gap between research TSFMs and production forecasting systems.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{12}
+
+\bibitem{toto2026}
+E.~Khwaja, C.~Lettieri, G.~Woo, E.~Belouadah, M.~Cenac, G.~Jarry, E.~Paquin, X.~Zhao, V.~Zhukova, O.~Abou-Amal, C.~Liu, A.~Talwalkar, and D.~Asker.
+\newblock Toto 2.0: Time Series Forecasting Enters the Scaling Era.
+\newblock \emph{arXiv preprint arXiv:2605.20119}, 2026.
+
+\bibitem{toto1}
+E.~Khwaja, C.~Lettieri, and D.~Asker.
+\newblock Toto: Time Series Optimized Transformer for Observability.
+\newblock \emph{arXiv preprint arXiv:2407.07874}, 2024.
+
+\bibitem{kaplan2020}
+J.~Kaplan, S.~McCandlish, T.~Henighan, T.~B.~Brown, B.~Chess, R.~Child, S.~Gray, A.~Radford, J.~Wu, and D.~Amodei.
+\newblock Scaling Laws for Neural Language Models.
+\newblock \emph{arXiv preprint arXiv:2001.08361}, 2020.
+
+\bibitem{hoffmann2022}
+J.~Hoffmann et~al.
+\newblock Training Compute-Optimal Large Language Models.
+\newblock In \emph{NeurIPS}, 2022.
+
+\bibitem{tirex2025}
+L.~Auer et~al.
+\newblock TiRex: Scalable Time Series Forecasting via xLSTM with Contiguous Patch Masking.
+\newblock \emph{arXiv preprint arXiv:2502.18939}, 2025.
+
+\bibitem{mup2022}
+G.~Yang, E.~J.~Hu, I.~Babuschkin, S.~Sidor, X.~Liu, D.~Farhi, N.~Ryder, J.~Pachocki, W.~Chen, and J.~Gao.
+\newblock Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer.
+\newblock \emph{arXiv preprint arXiv:2203.03466}, 2022.
+
+\bibitem{timer2026}
+M.~Liu et~al.
+\newblock Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling.
+\newblock \emph{arXiv preprint arXiv:2603.04791}, 2026.
+
+\bibitem{nexus2026}
+S.~Wang et~al.
+\newblock Nexus: An Agentic Framework for Time Series Forecasting.
+\newblock \emph{arXiv preprint arXiv:2605.14389}, 2026.
+
+\bibitem{saga2026}
+G.~O.~Y. Laitinen-Fredriksson Lundstrom-Imanov and H.~G. Comert.
+\newblock SAGA: A Sequence-Adaptive Generative Architecture for Multi-Horizon Probabilistic Forecasting with Adaptive Temporal Conformal Prediction.
+\newblock \emph{arXiv preprint arXiv:2605.19014}, 2026.
+
+\bibitem{quitobench2026}
+A.~Torres et~al.
+\newblock QuitoBench: A High-Quality Open Time Series Forecasting Benchmark.
+\newblock \emph{arXiv preprint arXiv:2603.26017}, 2026.
+
+\bibitem{park2023trak}
+S.~M.~Park, K.~Georgiev, A.~Ilyas, G.~Leclerc, and A.~Madry.
+\newblock TRAK: Attributing Model Behavior at Scale.
+\newblock In \emph{ICML}, 2023.
+
+\bibitem{normuon2025}
+J.~Li et~al.
+\newblock NorMuon: Normalized Muon Optimizer with Per-Neuron Scaling.
+\newblock \emph{arXiv preprint}, 2025.
+
+\end{thebibliography}
+
+\end{document}
