@@ -1,0 +1,190 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage[numbers]{natbib}
+
+\title{Daily Paper Review: DelTA --- Discriminative Token Credit Assignment\\for Reinforcement Learning from Verifiable Rewards}
+\author{Internbot --- Automated Literature Review}
+\date{May 23, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Paper Summary}
+
+\paragraph{Bibliographic Information.}
+Zhang, Wu, and Lin, ``DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards,'' arXiv:2605.21467, May 2026. Renmin University of China \& Ant International.
+
+\paragraph{Research Topic.}
+Topic 2: Reinforcement Learning (RLHF, RLAIF, reward modeling, policy optimization). This review brings T2 coverage to 14 of 57 total reviews. Credit assignment is a fundamental bottleneck in RLVR that connects to our prior reviews of FIPO (Review~\#22), KnowRL (Review~\#32), and RubricEM (Review~\#50).
+
+\paragraph{Problem Statement.}
+RLVR provides a single scalar reward per response (e.g., answer correctness), but policy updates operate at the token level. Standard methods (GRPO, DAPO) assign \emph{uniform} advantage to all tokens within a response---every token in a correct response gets the same positive signal regardless of its actual contribution. The authors identify a deeper structural issue: the RLVR update implicitly constructs a \textbf{linear discriminator} over token-gradient vectors by computing advantage-weighted centroids of positive and negative responses. However, these centroids are \emph{within-side summaries} (least-squares averages) used for a \emph{between-side discrimination} task. Since positive and negative responses share substantial common structure (formatting, entities, common reasoning steps), these shared high-frequency patterns dominate both centroids, diluting the sparse yet discriminative directions that actually distinguish high-reward from low-reward reasoning.
+
+\paragraph{Method.}
+DelTA introduces a three-step discriminative reweighting procedure applied per rollout batch:
+
+\textbf{Step 1 --- Initialize centroids} from standard advantage-weighted means:
+\begin{equation}
+    \mu_+^{(0)} = \bar{\mu}_+, \quad \mu_-^{(0)} = \bar{\mu}_-
+\end{equation}
+
+\textbf{Step 2 --- Iterative refinement} ($K=1$ iteration). For each token with gradient-proxy vector $v_{i,t}$, compute a discriminative score via entropy-regularized assignment:
+\begin{equation}
+    \alpha_{i,t} = \sigma\!\left(\frac{\|v_{i,t} - \mu_-\|^2 - \|v_{i,t} - \mu_+\|^2}{\gamma_+}\right) \quad \text{for } \hat{A}_i > 0
+\end{equation}
+where $\gamma_+$ is an adaptive temperature computed from the empirical standard deviation of distance margins. The closed-form solution maximizes $\alpha \cdot (\text{distance margin}) + \gamma \cdot h(\alpha)$ where $h(\alpha)$ is binary entropy regularization. Centroids are then updated as score-weighted within-side averages, emphasizing discriminative tokens.
+
+\textbf{Step 3 --- Map to bounded coefficients} and construct the reweighted surrogate:
+\begin{equation}
+    \lambda_{i,t} = \lambda_{\min} + (\lambda_{\max} - \lambda_{\min}) \cdot \alpha^*_{i,t}, \quad [\lambda_{\min}, \lambda_{\max}] = [0.8, 1.2]
+\end{equation}
+\begin{equation}
+    J_{\mathrm{DelTA}}(\theta) = \mathbb{E}\left[\frac{1}{\sum \lambda_{i,t}} \sum_{i,t} \lambda_{i,t} \cdot \min\!\left(r_{i,t} \hat{A}_i,\; \mathrm{clip}(r_{i,t}) \hat{A}_i\right)\right]
+\end{equation}
+
+\textbf{Token gradient proxy.} Full-parameter gradients are infeasible at LLM scale. The default proxy uses the last-layer LM-head gradient: $v_{i,t} = (1 - p_t(y_t)) \cdot h_t$, where $h_t$ is the final hidden state and $p_t(y_t)$ is the token probability. An alternative top-$K$ hidden-gradient proxy slightly outperforms this default.
+
+Key design choices: coefficients are stop-gradient (computed once per batch), self-normalized (preserving gradient scale), and bounded to prevent extreme reweighting. No external models, value functions, or process reward signals are required---credit assignment derives entirely from the discriminative geometry of the policy's own gradient space.
+
+\paragraph{Theoretical Framework.}
+The paper provides an elegant unification of existing RLVR methods under a centroid-estimation framework. A first-order Taylor expansion shows that the DAPO update $\Delta\theta \propto M_+ \bar{\mu}_+ - M_- \bar{\mu}_-$ acts as an implicit linear discriminator: a token's probability increases when its gradient vector aligns more with the positive centroid than the negative one. Different methods correspond to different effective token weights $\rho_{i,t}$ in centroid estimation:
+\begin{itemize}[nosep]
+    \item GRPO: $\rho_{i,t} = 1/|o_i|$ (response-length normalization)
+    \item DAPO: $\rho_{i,t} = 1$ (uniform)
+    \item DAPO w/ Forking Tokens: $\rho_{i,t} = \mathbf{1}[H_{i,t} \geq \tau]$ (entropy mask)
+    \item FIPO: $\rho_{i,t} = f_{i,t}$ (future-KL influence)
+    \item DelTA: $\rho_{i,t} = \lambda_{i,t}$ (discriminative score)
+\end{itemize}
+
+\paragraph{Results.}
+Experiments use Qwen3-8B-Base and Qwen3-14B-Base trained on DeepMath-103K with DAPO as the base algorithm, evaluated on 7 competition-math benchmarks (AIME24/25/26, HMMT25-Feb/Nov, HMMT26-Feb, Brumo25).
+
+\begin{itemize}[nosep]
+    \item \textbf{Qwen3-8B:} DelTA achieves 28.40 avg vs.\ SAPO 25.14, DAPO+FT 24.80, FIPO 23.89, DAPO 22.95. \textbf{+3.26 over strongest baseline} across all 7 benchmarks.
+    \item \textbf{Qwen3-14B:} DelTA achieves 39.91 avg vs.\ FIPO 37.29, DAPO+FT 36.77, SAPO 35.94, DAPO 35.09. \textbf{+2.62 over strongest baseline.}
+    \item \textbf{Architecture transfer (Olmo3-7B):} +3.79 over DAPO (22.80 vs.\ 19.01).
+    \item \textbf{Code generation:} +1.8 weighted average on HumanEval+/MBPP+/LCB.
+    \item \textbf{Out-of-domain (GPQA-Diamond, MMLU-Pro):} +3.51 (8B) and +1.63 (14B) without any domain-specific training.
+    \item \textbf{Overhead:} Only $\sim$10.2\% additional wall-clock time per step (3 extra forward passes for $K=1$).
+\end{itemize}
+
+\paragraph{Ablation Highlights.}
+\begin{itemize}[nosep]
+    \item \textbf{Bottom-50\% tokens by $\lambda$ cause training collapse}: Low-$\lambda$ tokens actively harm the update direction, not merely lacking signal.
+    \item \textbf{Top-50\% tokens outperform full-token DAPO}: Using only half the tokens (selected by DelTA scores) beats using all tokens with uniform weighting.
+    \item \textbf{Within-side only (no opposite-side comparison) performs worse than baseline DAPO}: The between-group contrast is essential---tokens close to their own centroid may simply correspond to shared patterns.
+    \item \textbf{Random coefficients collapse} to 18.34 vs.\ 23.27, confirming discriminative structure is the source of gains.
+    \item \textbf{Removing refinement} ($K=0$): largest single ablation drop ($-3.30$).
+    \item \textbf{$K > 1$ degrades performance}: batch-level geometry is too noisy for iterative convergence.
+\end{itemize}
+
+\paragraph{Training Dynamics.}
+DelTA maintains longer responses with lower entropy throughout training, while DAPO shifts toward shorter responses with rising entropy (a known degradation pattern). DelTA's reward curve continues climbing where DAPO plateaus, suggesting more stable learning of extended reasoning chains.
+
+\paragraph{Limitations.}
+(1)~Layer-restricted gradient proxy (last-layer only); the top-$K$ proxy already shows +1.02 improvement, suggesting richer proxies could help further. (2)~Validated primarily on math reasoning with binary rewards; multi-level or continuous reward settings are untested. (3)~$K > 1$ iterations degrade performance without clear explanation. (4)~Significance assessed via repeated evaluation (16 runs) rather than repeated training with different seeds due to cost. (5)~No experiments beyond 14B scale.
+
+\paragraph{Relevance.}
+DelTA provides a principled solution to the credit assignment problem that has limited RLVR training efficiency across our prior T2 reviews. FIPO (Review~\#22) addressed token importance via future-KL influence but required forward-looking computation; DelTA achieves superior performance using only the current batch's discriminative geometry. KnowRL (Review~\#32) added external knowledge signals to guide credit; DelTA shows that the policy's own gradient space already contains sufficient discriminative structure. RubricEM (Review~\#50) decomposed credit via rubric-guided subtask attribution; DelTA's centroid-discrimination framework offers a complementary, architecture-free approach. The unification of GRPO/DAPO/FT/FIPO under the centroid-estimation lens is particularly valuable---it transforms credit assignment from scattered heuristics into a coherent estimation problem where different methods correspond to different weighting schemes.
+
+\section*{Follow-up Research Directions}
+
+\subsection*{Direction 1: Multi-Layer Discriminative Credit with Hierarchical Proxies}
+
+\paragraph{Gap.}
+DelTA uses a last-layer LM-head gradient proxy, which captures token-level prediction dynamics but discards the richer representational structure in earlier layers. The ablation showing that the top-$K$ hidden-gradient proxy already improves by +1.02 suggests substantial untapped potential. Different layers may capture different aspects of credit: early layers encode syntactic structure, middle layers capture reasoning patterns, and late layers handle output selection. A single-layer proxy conflates these into one discriminative signal.
+
+\paragraph{Approach.}
+Construct a \emph{hierarchical discriminative proxy} that computes distance margins at multiple transformer layers (e.g., layers $\{L/4, L/2, 3L/4, L\}$) and combines them via a learned or fixed weighting scheme. Specifically: (1)~extract hidden states at each selected layer, compute layer-specific centroids and discriminative scores, then aggregate via a softmax-weighted combination where weights are proportional to the layer's centroid separation (measured by $\|\mu_+^{(\ell)} - \mu_-^{(\ell)}\|$). Layers where positive and negative tokens are more separable contribute more to the final $\lambda_{i,t}$. (2)~Alternatively, apply the refinement iteration across layers hierarchically: use early-layer scores to pre-filter tokens, then refine with deeper-layer proxies only for the surviving set. This connects to RubricEM's hierarchical decomposition (Review~\#50)---multi-layer credit could naturally correspond to multi-granularity reasoning subtasks (early layers: structural validity; late layers: computational correctness).
+
+\paragraph{Feasibility.}
+High. Hidden states at multiple layers are already computed during the forward pass; the additional cost is computing centroids and distances at $\sim$4 layers instead of 1, which is negligible relative to the forward pass itself. The main research question is whether layer-specific discriminative signals are complementary or redundant.
+
+\subsection*{Direction 2: Continuous-Reward DelTA via Soft Advantage Margins}
+
+\paragraph{Gap.}
+All DelTA experiments use binary rewards (correct/incorrect). Many practically important RLVR settings involve \emph{continuous} or \emph{multi-level} rewards: partial credit for partially correct solutions, style/safety scores, reward model outputs with fine-grained confidence. The binary positive/negative partition fundamental to DelTA's centroid construction does not directly extend to continuous advantage landscapes where there is no clean two-class separation.
+
+\paragraph{Approach.}
+Generalize DelTA's two-centroid discriminator to a \emph{regression-aware} formulation. Instead of partitioning responses into positive/negative classes: (1)~Construct a weighted least-squares regression hyperplane in token-gradient space that predicts per-response advantage from token-gradient vectors, then define $\lambda_{i,t}$ as the absolute residual-weighted leverage of each token (tokens with high leverage on the regression surface get high credit). (2)~Alternatively, apply a soft multi-class extension: bin advantages into $K$ quantile groups, compute $K$ centroids, and score tokens by their margin between the nearest same-bin centroid and nearest different-bin centroid (a generalization of the two-class distance margin). This connects to FIPO's continuous future-KL weighting (Review~\#22)---the multi-class extension could be viewed as discretizing FIPO's continuous signal while maintaining DelTA's purely geometric, critic-free character. It also relates to Self-Distilled RLVR (Review~\#25), where distillation targets provide continuous quality signals.
+
+\paragraph{Feasibility.}
+Moderate. The regression formulation is straightforward mathematically but may lose the clean closed-form entropy-regularized solution. The quantile-binned approach preserves the closed form within each bin pair but requires choosing the number of bins and handling boundary cases. Empirical validation requires settings with naturally continuous rewards (e.g., reward model scores from RLHF, or partial-credit math evaluation).
+
+\subsection*{Direction 3: Cross-Batch Discriminative Memory for Stable Long-Horizon Credit}
+
+\paragraph{Gap.}
+DelTA computes discriminative coefficients \emph{per batch}, using only the current rollout's positive/negative responses to estimate centroids. This creates two issues: (1)~the $K > 1$ failure suggests batch-level geometry is too noisy for iterative refinement---centroids estimated from a single batch ($\sim$128 prompts $\times$ 16 responses) may be unreliable; (2)~discriminative structure may evolve slowly across training, meaning earlier batches contain valuable complementary information about which tokens are genuinely discriminative versus batch-specific artifacts.
+
+\paragraph{Approach.}
+Maintain an \emph{exponential moving average (EMA)} of centroids $\tilde{\mu}_+, \tilde{\mu}_-$ across training batches, using the EMA centroids as a stable reference for computing distance margins while still using the current batch's token-gradient vectors for scoring. Specifically: $\tilde{\mu}_+^{(t)} = \beta \tilde{\mu}_+^{(t-1)} + (1-\beta) \mu_+^{(t)}$ with $\beta \in [0.9, 0.99]$. Current-batch tokens are then scored against these stabilized centroids, reducing the noise that causes $K > 1$ failure. Additionally, maintain a \emph{replay buffer of high-$\lambda$ exemplar gradients} from recent batches as a ``positive discriminative memory''---these anchor the positive centroid toward genuinely discriminative directions even when the current batch happens to lack clear discriminative structure. This connects to Memanto's typed semantic memory (Review~\#40) and the experience replay paradigm in continual RL---the discriminative memory provides temporal consistency analogous to how Memanto's information-theoretic retrieval provides semantic consistency for long-horizon agents.
+
+\paragraph{Feasibility.}
+High for the EMA approach (trivial implementation, negligible memory). Moderate for the replay buffer (requires storing token-gradient proxies, which at $d = 384$ per token are compact, but the buffer management policy needs tuning). The EMA approach could immediately be tested as a drop-in replacement for per-batch centroids, likely enabling $K > 1$ refinement that currently fails.
+
+\section*{Conclusion}
+
+DelTA provides a principled, theoretically grounded solution to the token-level credit assignment problem in RLVR. By recasting the policy-gradient update as an implicit linear discriminator and identifying that standard centroid construction dilutes discriminative signal with shared patterns, the method achieves consistent +2.6--3.8 point improvements over the strongest baselines across model scales, architectures, and domains---all with only 10\% computational overhead and no external reward models. The unification of GRPO, DAPO, Forking Tokens, and FIPO under the centroid-estimation framework is a significant conceptual contribution that transforms credit assignment from scattered heuristics into a coherent geometric estimation problem. Within our review series, DelTA complements FIPO's forward-looking influence (Review~\#22) with a batch-level geometric alternative, supersedes entropy-based token selection (Forking Tokens), and provides the critic-free credit mechanism that RubricEM's rubric-guided decomposition (Review~\#50) could leverage for finer-grained subtask attribution. The three proposed follow-up directions---multi-layer hierarchical proxies, continuous-reward extension, and cross-batch discriminative memory---address the method's key limitations while preserving its elegant simplicity.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{delta2026}
+K.~Zhang, W.~Wu, and Y.~Lin.
+\newblock DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.
+\newblock \emph{arXiv preprint arXiv:2605.21467}, 2026.
+
+\bibitem{dapo2025}
+A.~Yu et~al.
+\newblock DAPO: An Open-Source LLM Reinforcement Learning System.
+\newblock \emph{arXiv preprint arXiv:2503.14476}, 2025.
+
+\bibitem{grpo2024}
+Z.~Shao et~al.
+\newblock DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.
+\newblock \emph{arXiv preprint arXiv:2402.03300}, 2024.
+
+\bibitem{fipo2026}
+Y.~Ma et~al.
+\newblock FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2603.19835}, 2026.
+
+\bibitem{rubricem2026}
+K.~Chen et~al.
+\newblock RubricEM: Meta-RL with Rubric-guided Policy Decomposition beyond Verifiable Rewards.
+\newblock \emph{arXiv preprint arXiv:2605.10899}, 2026.
+
+\bibitem{knowrl2026}
+J.~Li et~al.
+\newblock KnowRL: Boosting LLM Reasoning via RL with Minimal-Sufficient Knowledge Guidance.
+\newblock \emph{arXiv preprint arXiv:2604.12627}, 2026.
+
+\bibitem{forking2025}
+Z.~Wang et~al.
+\newblock Forking Tokens: Training-Free Identification of Pivotal Tokens in RLVR.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem{sapo2025}
+Y.~Gao et~al.
+\newblock SAPO: Soft Adaptive Policy Optimization for LLM RL.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem{deepmath2025}
+Z.~He et~al.
+\newblock DeepMath-103K: A Large-Scale, Challenging, Decontaminated, and Verifiable Mathematical Dataset.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem{mup2022}
+G.~Yang et~al.
+\newblock Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer.
+\newblock \emph{arXiv preprint arXiv:2203.03466}, 2022.
+
+\end{thebibliography}
+
+\end{document}
