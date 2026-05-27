@@ -1,0 +1,178 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage[numbers]{natbib}
+
+\title{Daily Paper Review: DVAO --- Dynamic Variance-Adaptive Advantage\\Optimization for Multi-Reward Reinforcement Learning}
+\author{Internbot --- Automated Literature Review}
+\date{May 27, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Paper Summary}
+
+\paragraph{Bibliographic Information.}
+Jiang, Song, Quan, Hao, Liu, and Zhang, ``DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning,'' arXiv:2605.25604, May 2026. Alibaba Cloud Computing.
+
+\paragraph{Research Topic.}
+Topic 2: Reinforcement Learning (RLHF, RLAIF, reward modeling, policy optimization). This review brings T2 coverage to 15 of 59 total reviews. DVAO extends GRPO to multi-objective settings, connecting to our prior reviews of BandPO (Review~\#5), FIPO (Review~\#22), DelTA (Review~\#57), and RubricEM (Review~\#50).
+
+\paragraph{Problem Statement.}
+Real-world LLM deployments require optimizing multiple objectives simultaneously (accuracy + length constraints, accuracy + format compliance). Standard approaches for combining multiple rewards in GRPO have fundamental flaws:
+\begin{itemize}[nosep]
+    \item \textbf{Reward Combination (RC):} Linearly combines raw rewards into a single scalar before computing the GRPO advantage. This generates advantages with excessively large squared magnitudes (formally proven to always $\geq$ the AC alternative), causing erratic gradients and training instability.
+    \item \textbf{Advantage Combination (AC):} Independently normalizes each reward, then combines with static weights. This completely isolates objectives during normalization, failing to capture cross-objective correlations and decomposing into a simple weighted sum of per-objective GRPO gradients.
+\end{itemize}
+Neither bounds advantage magnitudes while capturing cross-objective interactions adaptively.
+
+\paragraph{Method.}
+DVAO replaces fixed combination weights with \textbf{dynamic variance-adaptive weights} computed per query:
+\begin{equation}
+    \tilde{w}_k^{(i)} = \frac{w_k \cdot \sigma_k^{(i)}}{\sum_l w_l \cdot \sigma_l^{(i)}}
+\end{equation}
+where $\sigma_k^{(i)} = \mathrm{std}(\{r_k^{(i,j)}\}_{j=1}^G)$ is the within-group standard deviation of reward $k$ for query $x_i$, and $w_k$ are base preference weights (equal by default). The DVAO advantage is:
+\begin{equation}
+    A_{\mathrm{DVAO}}^{(i,j)} = \sum_k \tilde{w}_k^{(i)} \cdot A_k^{(i,j)} = \frac{\sum_k w_k \cdot \sigma_k^{(i)} \cdot A_k^{(i,j)}}{\sum_l w_l \cdot \sigma_l^{(i)}}
+\end{equation}
+
+The key insight: \textbf{within-group reward variance serves as a proxy for learning signal strength}. High-variance objectives (where rollouts differentiate well) are up-weighted---they provide strong learning signal. Low-variance objectives (near-convergence or uninformative) are automatically down-weighted. This is fully data-driven, changing per query and per training step without manual tuning.
+
+\paragraph{Theoretical Contributions.}
+Three formal propositions establish DVAO's properties:
+
+\textbf{Proposition 1:} RC produces larger mean squared advantage magnitudes than AC:
+\begin{equation}
+    \frac{1}{G}\sum_j (A_{\mathrm{RC}}^{(i,j)})^2 \geq \frac{1}{G}\sum_j (A_{\mathrm{AC}}^{(i,j)})^2
+\end{equation}
+with equality only when all reward pairs are perfectly correlated ($\rho_{kl} = 1$).
+
+\textbf{Proposition 2 (Pointwise Bound):} $|A_{\mathrm{DVAO}}^{(i,j)}| \leq |A_{\mathrm{RC}}^{(i,j)}|$ for all $j$. DVAO advantages are always bounded by RC's (proved via Cauchy-Schwarz).
+
+\textbf{Proposition 3 (Cross-Objective Regularization):} The sensitivity of DVAO's advantage to a reward perturbation is:
+\begin{equation}
+    \frac{\partial A_{\mathrm{DVAO}}^{(i,j)}}{\partial r_k^{(i,j)}} = \frac{\tilde{w}_k^{(i)}}{\sigma_k^{(i)}} \left(1 - \frac{1}{G} - \frac{1}{G} A_{\mathrm{DVAO}}^{(i,j)} \cdot A_k^{(i,j)}\right)
+\end{equation}
+Unlike AC (where sensitivity depends only on the isolated objective's advantage squared), DVAO's sensitivity depends on the \emph{cross-term} $A_{\mathrm{DVAO}} \cdot A_k$---the gradient of any single objective is modulated by the model's overall multi-objective performance. This provides implicit cross-objective regularization that prevents greedy over-optimization of easy objectives.
+
+\paragraph{Results.}
+Experiments span mathematical reasoning (Qwen3-4B/8B-Base, DAPO-MATH-17K, evaluated on AIME24/25, MATH500, OlympiadBench, AMC23) and tool-use (Qwen2.5-3B/7B-Instruct, BFCL-v4). Baselines: GRPO (single-reward), RC, AC, and GDPO.
+
+\begin{itemize}[nosep]
+    \item \textbf{Math (Qwen3-4B):} DVAO achieves 42.19\% avg accuracy + 99.91\% length compliance vs.\ GRPO 39.91\%/77.84\%, RC 38.99\%/96.39\%, AC 38.75\%/96.23\%. \textbf{Best on both objectives simultaneously.}
+    \item \textbf{Math (Qwen3-8B):} DVAO 47.49\%/99.92\% vs.\ GRPO 52.57\%/63.47\%, RC 46.26\%/98.71\%. GRPO trades compliance for accuracy; DVAO achieves high accuracy \emph{with} near-perfect compliance.
+    \item \textbf{Tool-use (3B):} DVAO 56.66\% accuracy + 76.65\% format vs.\ AC 53.47\%/64.69\%, GDPO 52.73\%/65.88\%. \textbf{+3.19\% accuracy, +10.77\% format} over best baseline.
+    \item \textbf{Tool-use (7B):} DVAO 63.00\%/79.21\% vs.\ GDPO 60.13\%/68.12\%, RC 58.38\%/76.42\%. \textbf{+2.87\% accuracy, +2.79\% format} over strongest competitor.
+    \item \textbf{GDPO failure:} Catastrophic accuracy collapse on math (13--15\%) while achieving near-perfect compliance---objective isolation without adaptive weighting allows the easy objective to dominate.
+    \item \textbf{Pareto frontier:} DVAO dominates the upper-right region across the entire weight spectrum $w_1 \in \{0.1, 0.3, 0.5, 0.7, 0.9\}$, confirming gains are not due to a lucky single weight choice.
+\end{itemize}
+
+\paragraph{Training Dynamics.}
+DVAO achieves the highest mean accuracy reward at every training stage while driving the fastest variance collapse on the auxiliary objective. Once the length/format objective is largely solved (low variance), DVAO automatically down-weights it and focuses learning on accuracy---exactly the desired adaptive behavior. This explains why DVAO uniquely achieves the best of both worlds (high primary + near-perfect auxiliary) while baselines trade off between objectives.
+
+\paragraph{Limitations.}
+(1)~Variance estimation may become noisy with very small group sizes ($G \leq 4$); proposed mitigation via historical EMA. (2)~All experiments test only 2 objectives simultaneously; optimization dynamics with $n > 2$ rewards remain unexplored. (3)~DVAO amplifies signals based on variance, so a poorly calibrated reward with artificially high noise variance would be inadvertently up-weighted. (4)~Binary reward functions only ({0,1}); behavior with continuous reward models is untested.
+
+\paragraph{Relevance.}
+DVAO addresses a critical gap in the RLVR landscape: all our prior T2 reviews (BandPO, FIPO, DelTA, RubricEM) focused on \emph{single-reward} optimization---improving how a single scalar signal is processed, decomposed, or attributed. Real deployments, however, face multi-objective challenges (safety + helpfulness, accuracy + efficiency, correctness + format). DVAO provides the first principled extension of GRPO to multiple rewards with formal guarantees. The cross-objective regularization (Proposition~3) is particularly significant: it shows that properly combining objectives can be \emph{better} than optimizing each alone, because the cross-term prevents the mode collapse observed in GDPO and single-reward GRPO (which ignores auxiliary constraints). This complements DelTA's within-reward credit assignment (Review~\#57)---DelTA determines \emph{which tokens} matter for a single reward; DVAO determines \emph{which rewards} matter at each training step. Together they could provide fine-grained multi-objective credit assignment.
+
+\section*{Follow-up Research Directions}
+
+\subsection*{Direction 1: DVAO + DelTA for Multi-Objective Token-Level Credit Assignment}
+
+\paragraph{Gap.}
+DVAO operates at the reward-weighting level (determining which objectives are informative per query), while DelTA operates at the token level (determining which tokens are discriminative within a single reward). These are orthogonal and composable, but no method currently provides \emph{both} multi-objective adaptive weighting and token-level discriminative credit simultaneously. Combining them would yield a fully adaptive system: per-query the reward weights adapt based on variance, and per-token the contribution adapts based on discriminative geometry.
+
+\paragraph{Approach.}
+Formulate a joint objective: (1)~Compute DVAO's variance-adaptive weights $\tilde{w}_k^{(i)}$ to form the multi-objective advantage $A_{\mathrm{DVAO}}^{(i,j)}$. (2)~Apply DelTA's discriminative scoring using this combined advantage as the positive/negative signal: compute token-gradient centroids from responses with high vs.\ low multi-objective advantage, then score tokens by their distance margin between positive and negative centroids. (3)~The final token weight is $\lambda_{i,t} \cdot \tilde{w}_k^{(i)}$---a product of reward-level and token-level adaptive weights. A key challenge is whether DelTA's centroid geometry, which was developed for binary (correct/incorrect) rewards, transfers cleanly to the continuous multi-objective advantage that DVAO produces. The multi-class extension proposed in DelTA's follow-up (Direction~2, Review~\#57) could provide the bridge: bin the DVAO advantage into quantiles and compute discriminative scores within each bin.
+
+\paragraph{Feasibility.}
+High. Both components are independently validated and impose minimal overhead (DVAO adds zero parameters; DelTA adds $\sim$10\% forward passes). The main implementation question is the ordering: should DVAO weights be computed before or after DelTA's centroid construction? Computing DVAO first (forming the combined advantage) then applying DelTA to discriminate tokens based on the combined signal is the natural composition.
+
+\subsection*{Direction 2: Scaling to $N > 2$ Objectives with Hierarchical Variance Grouping}
+
+\paragraph{Gap.}
+DVAO's theory holds for arbitrary $n$ rewards, but all experiments use only 2 objectives. Production LLM alignment requires simultaneously optimizing 5+ objectives: helpfulness, harmlessness, honesty, conciseness, format compliance, tool-use correctness, and stylistic preferences. With many objectives, variance-based weighting may become unstable: if one objective has inherently higher variance (e.g., style is always more variable than format compliance), it would persistently dominate regardless of learning signal quality.
+
+\paragraph{Approach.}
+Introduce \textbf{hierarchical variance grouping}: (1)~Cluster objectives into semantically related groups (e.g., ``correctness group'': accuracy + tool-use; ``constraint group'': length + format; ``preference group'': style + tone). (2)~Apply DVAO's variance-adaptive weighting \emph{within} each group (capturing intra-group dynamics). (3)~Apply a \emph{between-group} weighting using the aggregate group variance (preventing one group from dominating). This two-level hierarchy prevents the instability that would arise from flat $n$-way variance competition. Additionally, draw on RubricEM's rubric-guided decomposition (Review~\#50): use the 11-category attribution taxonomy to define natural objective groups, where each rubric category corresponds to a reward signal and SkillsVote-style governance (Review~\#54) determines which groups are active for a given training phase.
+
+\paragraph{Feasibility.}
+Moderate. The hierarchical extension is straightforward mathematically (nested variance normalization), but empirical validation requires a training setup with 5+ simultaneous reward signals, which is non-trivial to construct with reliable verifiers. A staged approach: first demonstrate 3-objective (accuracy + length + format) outperforms 2-objective subsets, then scale to 5+.
+
+\subsection*{Direction 3: Variance-Adaptive Scheduling with Curriculum Learning}
+
+\paragraph{Gap.}
+DVAO's variance-adaptive mechanism is reactive: it responds to the current batch's reward variance. But the optimal \emph{trajectory} of objective emphasis may not follow the variance-reactive path. For example, it may be beneficial to initially over-weight format compliance (even when its variance is low, because the model needs to learn the format before it can meaningfully improve accuracy with proper output structure), then shift to accuracy once format is internalized. DVAO's reactive mechanism cannot express such curriculum-level preferences.
+
+\paragraph{Approach.}
+Augment DVAO with a \emph{learned curriculum scheduler} that modulates the base weights $w_k$ over training: (1)~Parameterize $w_k(t) = w_k^{(0)} \cdot \exp(\phi_k(t))$ where $\phi_k(t)$ is a learnable phase function indexed by training step. (2)~The curriculum is optimized via a meta-objective on a held-out validation set (analogous to SkillOpt's validation gate, Review~\#58): accept the curriculum update only if it improves multi-objective validation performance. (3)~DVAO's variance mechanism continues to operate within each step, but the base weights now follow a learned trajectory. This creates a two-timescale system: fast (per-query variance adaptation) and slow (curriculum-level weight evolution). The connection to BandPO (Review~\#5) is relevant: BandPO's probability-aware bounds adaptively control the trust region size; similarly, the curriculum scheduler adaptively controls the objective emphasis trajectory. The analogy to Toto~2.0's cosine learning rate schedule (Review~\#56) also applies---the ``textual learning rate'' concept from SkillOpt could inform the curriculum schedule shape.
+
+\paragraph{Feasibility.}
+Moderate. The meta-learning of curriculum schedules requires a validation set and additional optimization loops, increasing training cost. However, the validation gate pattern is well-established (SkillOpt achieves it with modest overhead), and the base weights $w_k(t)$ are just $K$ scalar functions---far cheaper to meta-learn than full model parameters. A simplified version using a fixed cosine schedule on $w_k$ (emphasizing auxiliary early, accuracy later) could be tested as a non-learned baseline.
+
+\section*{Conclusion}
+
+DVAO provides an elegant solution to the multi-reward challenge in RLVR: by reweighting advantages proportionally to within-group reward variance, it simultaneously bounds advantage magnitudes (Proposition~2), captures cross-objective interactions (Proposition~3), and adapts dynamically without manual tuning. The method achieves the best of both worlds---highest primary accuracy with near-perfect auxiliary compliance---where baselines invariably trade off between objectives. Within our review series, DVAO fills a critical gap: while DelTA (Review~\#57) solved token-level credit assignment within a single reward and FIPO (Review~\#22) addressed temporal credit via future-KL, DVAO solves the orthogonal problem of \emph{reward-level} credit assignment across multiple objectives. The catastrophic failure of GDPO and the cross-objective regularization theorem together demonstrate that naive multi-reward extension of GRPO is fundamentally insufficient---proper variance-adaptive combination is not merely an optimization trick but a theoretical necessity for stable multi-objective training. The three proposed follow-up directions---DVAO+DelTA composition, hierarchical scaling to $n > 2$ objectives, and curriculum scheduling---collectively point toward production-ready multi-objective RLVR systems.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{dvao2026}
+G.~Jiang, J.~Song, G.~Quan, C.~Hao, G.~Liu, and Y.~Zhang.
+\newblock DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2605.25604}, 2026.
+
+\bibitem{grpo2024}
+Z.~Shao et~al.
+\newblock DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.
+\newblock \emph{arXiv preprint arXiv:2402.03300}, 2024.
+
+\bibitem{dapo2025}
+A.~Yu et~al.
+\newblock DAPO: An Open-Source LLM Reinforcement Learning System.
+\newblock \emph{arXiv preprint arXiv:2503.14476}, 2025.
+
+\bibitem{delta2026}
+K.~Zhang, W.~Wu, and Y.~Lin.
+\newblock DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.
+\newblock \emph{arXiv preprint arXiv:2605.21467}, 2026.
+
+\bibitem{fipo2026}
+Y.~Ma et~al.
+\newblock FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2603.19835}, 2026.
+
+\bibitem{bandpo2026}
+J.~Li et~al.
+\newblock BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2603.04918}, 2026.
+
+\bibitem{rubricem2026}
+K.~Chen et~al.
+\newblock RubricEM: Meta-RL with Rubric-guided Policy Decomposition beyond Verifiable Rewards.
+\newblock \emph{arXiv preprint arXiv:2605.10899}, 2026.
+
+\bibitem{gdpo2026}
+Z.~Liu et~al.
+\newblock GDPO: Group Reward-Decoupled Normalization Policy Optimization.
+\newblock \emph{arXiv preprint}, 2026.
+
+\bibitem{skillopt2026}
+Y.~Yang et~al.
+\newblock SkillOpt: Executive Strategy for Self-Evolving Agent Skills.
+\newblock \emph{arXiv preprint arXiv:2605.23904}, 2026.
+
+\bibitem{toto2026}
+E.~Khwaja et~al.
+\newblock Toto 2.0: Time Series Forecasting Enters the Scaling Era.
+\newblock \emph{arXiv preprint arXiv:2605.20119}, 2026.
+
+\end{thebibliography}
+
+\end{document}
