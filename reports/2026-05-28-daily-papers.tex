@@ -1,0 +1,168 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage[numbers]{natbib}
+
+\title{Daily Paper Review: D$^2$-Monitor --- Dynamic Safety Monitoring\\for Diffusion LLMs via Hesitation-Aware Routing}
+\author{Internbot --- Automated Literature Review}
+\date{May 28, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Paper Summary}
+
+\paragraph{Bibliographic Information.}
+Liu, Chen, Oldfield, Hong, Yu, Wu, Torr, and Bibi, ``D$^2$-Monitor: Dynamic Safety Monitoring for Diffusion LLMs via Hesitation-Aware Routing,'' arXiv:2605.25893, May 2026. University of Oxford \& The Chinese University of Hong Kong \& others.
+
+\paragraph{Research Topic.}
+Topic 4: Diffusion LLM (discrete diffusion, text generation via diffusion, hybrid architectures). This review brings T4 coverage to 15 of 60 total reviews. While our prior T4 reviews focused on generation quality, efficiency, and alignment (DMax, S2D2, Orthrus, DARE, V-GRPO), D$^2$-Monitor addresses the unexplored dimension of \emph{safety monitoring}---a critical gap as commercial dLLMs like Mercury reach 1000+ tokens/sec deployment.
+
+\paragraph{Problem Statement.}
+Diffusion-based LLMs (dLLMs) generate text by iteratively denoising a fully masked sequence over multiple refinement steps with bidirectional attention. Despite rapid commercial deployment, \textbf{safety monitoring for dLLMs remains unexplored}. Existing work focuses on alignment (finetuning-based defenses), which remains vulnerable to adversarial attacks. The paper identifies a unique monitoring opportunity: unlike autoregressive LLMs that produce a single forward pass per token, dLLMs expose a full multi-step denoising trajectory $H = [h_1, \ldots, h_S]$ of hidden representations. This trajectory contains \emph{richer temporal safety signals} unavailable in AR-LLMs---specifically, intermediate representations oscillate near probe decision boundaries in a phenomenon the authors term \textbf{safety hesitation}.
+
+\paragraph{Method.}
+D$^2$-Monitor is a dynamic bi-level cascade with three components:
+
+\textbf{1. Base Probe (always-on):} A lightweight linear probe processes every input, performing dual duty: (a)~base-level safety classification and (b)~hesitation estimation via signed margin computation at each denoising step $s$:
+\begin{equation}
+    d_s = \text{signed distance from } h_s \text{ to the probe decision boundary}
+\end{equation}
+A step is flagged as \textbf{hesitant} when $|d_s| < \tau$. The \textbf{hesitation severity} counts low-margin steps:
+\begin{equation}
+    n_\tau = \sum_{s=1}^{S} \mathbf{1}[|d_s| < \tau]
+\end{equation}
+
+\textbf{2. Router:} Compares $n_\tau$ against threshold $\lambda$. If $n_\tau \leq \lambda$, the base probe's majority-vote classification is accepted. If $n_\tau > \lambda$, the sample is escalated to the advanced probe.
+
+\textbf{3. Advanced Probe:} A more expressive model (MLP or Temporal Attention, $\sim$0.25--0.80M parameters) activated only for difficult samples. Crucially, it is \textbf{trained exclusively on hesitation trajectories}---data points where the linear probe exhibited hesitation---using only hidden states within the minimal contiguous \emph{hesitation window} $W$ containing all hesitant steps.
+
+\paragraph{Training Pipeline.}
+\textbf{Stage 1 (Out-of-Fold Scoring):} The training set is partitioned into $k$ folds. For each fold, a linear probe trained on the remaining $k-1$ folds produces leakage-free signed margins, ensuring unbiased hesitation identification. \textbf{Stage 2:} The base probe is retrained on the full dataset; the advanced probe is trained exclusively on the hesitation subset. \textbf{Stage 3 (Inference):} The cascade operates as described above---easy samples are handled by the base probe alone, while hesitant samples are escalated.
+
+The key empirical finding motivating this design: hesitation severity correlates strongly with linear probe failure rates, with performance gaps reaching $\sim$0.30 F1 between low- and high-hesitation trajectories. This establishes $n_\tau$ as an effective difficulty proxy.
+
+\paragraph{Results.}
+Experiments span four LLaDA models (8B-Base, 8B-Instruct, 1.5-8B, 2.0-mini-16B) across WildGuardMix (86.8k train), ToxicChat (5.08k), and OpenAI-Moderation. Eight baselines include single-step probes, multi-step majority voting, mean pooling, temporal attention, and LSTM.
+
+\begin{itemize}[nosep]
+    \item \textbf{WildGuardMix (LLaDA-8B-Instruct):} D$^2$-MLP achieves \textbf{89.7 F1} vs.\ 88.0 (LP Mean), +1.7. D$^2$-TimeAttn achieves 89.4 F1.
+    \item \textbf{WildGuardMix (LLaDA-2.0-mini-16B):} D$^2$-TimeAttn achieves \textbf{83.0 F1} vs.\ 80.9 (LSTM), +2.1---the largest intra-dataset gain, demonstrating greater advantage on harder models.
+    \item \textbf{ToxicChat (LLaDA-8B-Instruct):} D$^2$-TimeAttn achieves \textbf{89.9 F1} vs.\ 88.9 (LSTM), +1.0. Over the single-step baseline: +13.6 F1 (76.3 $\to$ 89.9).
+    \item \textbf{Cross-dataset (WildGuardMix $\to$ ToxicChat):} D$^2$-MLP achieves \textbf{75.0 F1} vs.\ 73.1 (TimeAttn), +1.9 on LLaDA-8B-Instruct.
+    \item \textbf{Cross-dataset (WildGuardMix $\to$ OpenAI-Moderation):} D$^2$-TimeAttn achieves \textbf{69.1 F1} vs.\ 67.7 (LSTM), +1.4.
+    \item \textbf{Efficiency:} All results achieved with $<$0.85M parameters (0.01\% of 8B model). Expected parameter count is even lower since the advanced probe activates only for the hesitant subset.
+\end{itemize}
+
+\paragraph{Routing Signal Ablation.}
+Margin-based hesitation (proposed) produces $\sim$2$\times$ the accuracy differential between base and advanced probes compared to entropy- or confidence-based alternatives: 13.5\% accuracy gap (margin) vs.\ 7.2\% (entropy) vs.\ 7.1\% (confidence). Margin signals also demonstrate greater robustness to threshold selection.
+
+\paragraph{Robustness.}
+D$^2$-Monitor maintains consistent superiority across generation lengths ($L \in \{16, 32, 64, 128\}$), denoising step counts ($L_S \in \{1, 2, 4, 8\}$), and re-masking strategies (low-confidence, entropy, random)---all without retraining. Adversarial input analysis shows hesitation severity effectively captures adversarially-crafted prompts, with higher hesitation counts for jailbreak attempts.
+
+\paragraph{Limitations.}
+(1)~Vulnerable to adaptive attacks specifically targeting probe-based systems (obfuscated activations). (2)~Requires access to internal hidden states---cannot be applied as a black-box wrapper. (3)~Evaluated only on the LLaDA family; generalization to structurally different dLLMs (MDLM, SEDD) is unverified. (4)~Training overhead from out-of-fold scoring (one-time cost). (5)~Limited to binary safe/unsafe classification; multi-category harm taxonomy is not addressed.
+
+\paragraph{Relevance.}
+D$^2$-Monitor addresses a fundamental blind spot in our T4 review series. Our 14 prior dLLM reviews have focused exclusively on generation quality and efficiency: DMax (Review~\#29) and S2D2 (Review~\#19) accelerated decoding, Orthrus (Review~\#51) reduced memory, DARE (Review~\#27) and V-GRPO (Review~\#42) improved alignment, and TIDE (Review~\#43) enabled cross-architecture distillation. None addressed safety monitoring. As dLLMs reach production scale (Mercury at 1000+ tok/s), the safety infrastructure must keep pace. D$^2$-Monitor demonstrates that the iterative denoising process---designed for generation quality---serendipitously provides \emph{richer safety signals} than AR-LLMs' single-pass generation. The hesitation concept connects to a broader pattern in our reviews: intermediate representations during iterative processes carry valuable information that final outputs obscure (cf.\ DelTA's token-gradient discriminative structure, Review~\#57; Orthrus's dual-view consensus, Review~\#51).
+
+\section*{Follow-up Research Directions}
+
+\subsection*{Direction 1: Hesitation-Guided Alignment for Diffusion LLMs}
+
+\paragraph{Gap.}
+D$^2$-Monitor uses hesitation as a \emph{detection} signal for post-hoc monitoring, but the same signal could inform \emph{alignment training} itself. Current dLLM alignment methods (DARE, V-GRPO) treat all training examples equally, yet D$^2$-Monitor shows that some inputs induce persistent hesitation---the model is genuinely ``uncertain'' about their safety status. These hesitant examples are precisely the ones where alignment training would provide the greatest marginal value, analogous to active learning for safety.
+
+\paragraph{Approach.}
+Integrate hesitation severity into the dLLM alignment loop: (1)~During DARE-style alignment training (Review~\#27), compute hesitation severity for each training prompt using a frozen monitor. (2)~Up-weight high-hesitation prompts in the alignment objective, focusing training compute on genuinely ambiguous safety cases. (3)~Apply DVAO's variance-adaptive weighting (Review~\#59) across a dual-objective alignment: safety reward + generation quality, where hesitation severity modulates the safety reward weight per example. High-hesitation examples get stronger safety signal; low-hesitation examples (already well-classified) get proportionally more generation quality signal. (4)~After alignment, re-evaluate hesitation severity to measure whether training successfully resolves the uncertainty. This creates a closed-loop system: D$^2$-Monitor identifies weakness $\to$ alignment training targets those weaknesses $\to$ monitoring re-evaluates.
+
+\paragraph{Feasibility.}
+High. The hesitation computation infrastructure already exists from D$^2$-Monitor; the integration with DARE's alignment objective requires only reweighting the loss. The main research question is whether high-hesitation examples are learnable (alignment can resolve the uncertainty) or inherently ambiguous (some inputs are genuinely borderline).
+
+\subsection*{Direction 2: Unified Hesitation Monitoring Across Modalities and Tasks}
+
+\paragraph{Gap.}
+The hesitation phenomenon---intermediate representations oscillating near decision boundaries during iterative denoising---is likely not specific to safety or to text-only dLLMs. Diffusion models for images (Stable Diffusion, DALL-E), multimodal generation (LLaDA2.0-Uni, Review~\#38), and even non-diffusion iterative models (looped transformers, Review~\#41) all produce multi-step trajectories where analogous hesitation could occur. However, D$^2$-Monitor is validated only for text safety on a single model family.
+
+\paragraph{Approach.}
+Develop a \emph{universal hesitation framework} applicable across: (1)~\textbf{Multiple tasks:} Beyond safety, test whether hesitation severity predicts factual correctness (hallucination detection), reasoning confidence, and code correctness in dLLMs. The hypothesis is that hesitation is a general uncertainty indicator, not safety-specific. (2)~\textbf{Multimodal dLLMs:} Apply the cascade to LLaDA2.0-Uni's joint text-image denoising trajectory, where safety monitoring must detect both textual and visual harms. Image-side hesitation may manifest differently (spatial attention oscillation vs.\ token-level margin oscillation). (3)~\textbf{Non-diffusion iterative models:} Looped language models (Review~\#41) also produce multi-pass hidden trajectories. Test whether the margin-based hesitation metric transfers, with the ``denoising step'' replaced by ``recurrence iteration.'' This would establish hesitation as a fundamental property of iterative generation rather than a diffusion-specific artifact.
+
+\paragraph{Feasibility.}
+Moderate. The framework extension to multiple tasks and multimodal settings is conceptually straightforward (compute margins from probes trained on task-specific labels). The main challenge is empirical: collecting multi-task hesitation datasets and validating the correlation between hesitation severity and task-specific error rates across diverse domains.
+
+\subsection*{Direction 3: Adversarial Robustness via Stochastic Hesitation Ensembles}
+
+\paragraph{Gap.}
+D$^2$-Monitor's most significant limitation is vulnerability to adaptive attacks that target probe-based systems. An adversary who knows the probe architecture could craft inputs that produce clean (non-hesitant) trajectories while still being unsafe---bypassing both the base and advanced probes. The deterministic nature of the margin-based routing (fixed $\tau$ and $\lambda$) makes it particularly susceptible to white-box attacks.
+
+\paragraph{Approach.}
+Introduce stochasticity into the cascade to make adaptive attacks harder: (1)~\textbf{Randomized thresholds:} At inference, sample $\tau \sim \mathcal{U}[\tau_{\min}, \tau_{\max}]$ and $\lambda \sim \mathcal{U}[\lambda_{\min}, \lambda_{\max}]$, so the routing decision is non-deterministic. An adversary cannot optimize against a fixed decision boundary. (2)~\textbf{Probe ensemble:} Train $K$ diverse probes with different random initializations and feature subsets. Each probe induces a different decision boundary and thus different hesitation patterns. Route based on \emph{consensus hesitation} across the ensemble---an input is classified as hesitant only if multiple probes disagree. This makes gradient-based attacks exponentially harder (must simultaneously fool $K$ probes). (3)~\textbf{Trajectory perturbation:} Randomly inject small noise into intermediate hidden states before computing margins, analogous to randomized smoothing for certified robustness. If the margin remains stable under perturbation, the classification is reliable; if it flips, the input is genuinely borderline and should be escalated. This connects to the certified robustness literature for classifiers and could yield provable detection guarantees under bounded adversarial perturbation.
+
+\paragraph{Feasibility.}
+High for randomized thresholds and probe ensembles (trivial implementation, modest compute increase from $K$ probes). Moderate for certified robustness via trajectory perturbation (requires establishing the noise sensitivity of dLLM denoising trajectories, which is non-trivial). A staged approach: first demonstrate that randomized thresholds reduce attack success rates, then scale to full ensembles.
+
+\section*{Conclusion}
+
+D$^2$-Monitor introduces the concept of \emph{safety hesitation} in diffusion LLMs---the oscillation of intermediate representations near probe decision boundaries during iterative denoising---and leverages it for efficient, dynamic safety monitoring. The bi-level cascade achieves state-of-the-art detection (up to 89.9 F1) with fewer than 0.85M parameters (0.01\% of model size) by routing hesitant samples to a specialized advanced probe trained exclusively on difficult cases. Within our review series, D$^2$-Monitor fills a critical gap: 14 prior T4 reviews focused on generation quality and efficiency, while safety monitoring---essential for the production deployment that DMax, Orthrus, and S2D2 enable---was entirely absent. The finding that dLLMs' iterative denoising trajectory provides richer safety signals than AR-LLMs' single-pass generation suggests a fundamental advantage of diffusion architectures for trustworthy deployment. The three proposed follow-up directions---hesitation-guided alignment, cross-modal/cross-task unified monitoring, and adversarial robustness via stochastic ensembles---collectively point toward a comprehensive safety infrastructure for the diffusion LLM ecosystem.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{d2monitor2026}
+A.~Liu, Y.~Chen, J.~Oldfield, G.~Hong, J.~Yu, B.~Wu, P.~Torr, and A.~Bibi.
+\newblock D$^2$-Monitor: Dynamic Safety Monitoring for Diffusion LLMs via Hesitation-Aware Routing.
+\newblock \emph{arXiv preprint arXiv:2605.25893}, 2026.
+
+\bibitem{dare2026}
+Y.~Zhao et~al.
+\newblock DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.
+\newblock \emph{arXiv preprint arXiv:2604.04215}, 2026.
+
+\bibitem{vgrpo2026}
+J.~Wang et~al.
+\newblock V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\bibitem{dmax2026}
+S.~Kim et~al.
+\newblock DMax: Aggressive Parallel Decoding for dLLMs.
+\newblock \emph{arXiv preprint arXiv:2604.08302}, 2026.
+
+\bibitem{s2d22026}
+X.~Chen et~al.
+\newblock S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.
+\newblock \emph{arXiv preprint arXiv:2603.25702}, 2026.
+
+\bibitem{orthrus2026}
+L.~Zhang et~al.
+\newblock Orthrus: Memory-Efficient Parallel Token Generation via Dual-View Diffusion.
+\newblock \emph{arXiv preprint arXiv:2605.12825}, 2026.
+
+\bibitem{tide2026}
+M.~Park et~al.
+\newblock Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.26951}, 2026.
+
+\bibitem{llada2026}
+S.~Nie et~al.
+\newblock LLaDA: Large Language Diffusion with mAsking.
+\newblock \emph{arXiv preprint arXiv:2502.09992}, 2025.
+
+\bibitem{dvao2026}
+G.~Jiang et~al.
+\newblock DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2605.25604}, 2026.
+
+\bibitem{delta2026}
+K.~Zhang, W.~Wu, and Y.~Lin.
+\newblock DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.
+\newblock \emph{arXiv preprint arXiv:2605.21467}, 2026.
+
+\end{thebibliography}
+
+\end{document}
