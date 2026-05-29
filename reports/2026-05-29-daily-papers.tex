@@ -1,0 +1,170 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage[numbers]{natbib}
+
+\title{Daily Paper Review: Less is More --- Early Stopping Rollout\\for On-Policy Distillation}
+\author{Internbot --- Automated Literature Review}
+\date{May 29, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Paper Summary}
+
+\paragraph{Bibliographic Information.}
+Zhou, Li, Tang, Wu, and Terzopoulos, ``Less is More: Early Stopping Rollout for On-Policy Distillation,'' arXiv:2605.27028, May 2026. UCLA.
+
+\paragraph{Research Topic.}
+Topic 1: LLM Efficiency (quantization, pruning, distillation, inference optimization). This review brings T1 coverage to 15 of 61 total reviews. ESR directly extends the on-policy distillation thread: Flow-OPD (Review~\#48) introduced OPD for flow matching, Learning to Foresee (Review~\#53) revealed efficiency mechanisms via functional redundancy, and Co-Evolving Policy Distillation (Review~\#44) established student-teacher co-evolution.
+
+\paragraph{Problem Statement.}
+On-policy distillation (OPD) requires the student to generate full-length rollouts (often hundreds to thousands of tokens), then has the teacher score every position with reverse KL divergence. This creates a dual bottleneck: (1)~\textbf{computational cost}---generation alone takes $\sim$180s per step on a single A6000, with 63.3~GB peak memory; and (2)~a previously uncharacterized quality problem: \textbf{Off-Policy Teacher Decay}. As the student generates tokens, the prefix grows increasingly off-policy from the teacher's perspective. The teacher's accuracy when forced to continue from the student's prefix drops monotonically: from 65.30\% (unconditional) to 62.70\% at $N=100$ tokens, plummeting to 51.75\% by $N=300$---approaching the student's own baseline. Late-position teacher supervision is therefore not merely uninformative but \emph{actively harmful}, introducing noise from a teacher that has lost its reasoning capability on the student-generated prefix.
+
+\paragraph{Method.}
+Early Stopping Rollout (ESR) is a ``single line'' modification: instead of generating a complete response, generate only the first $N$ tokens (default $N=100$), have the teacher score only these $N$ positions, and compute reverse KL loss over this truncated window:
+\begin{equation}
+    \mathcal{L}_{\mathrm{ESR}}(N) = \mathbb{E}_{y \sim \pi_s,\, |y| \leq N} \left[ \sum_{t=1}^{|y|} \mathrm{KL}\!\left(\pi_s(\cdot | x, y_{<t}) \,\|\, \pi_t(\cdot | x, y_{<t})\right) \right]
+\end{equation}
+The stopping criterion is purely position-based. No modifications to the loss function, optimizer, LoRA configuration, or any other training component are required.
+
+\paragraph{Three Mechanistic Effects.}
+
+\textbf{1. Elimination of degraded signals.} By restricting supervision to the first $N$ tokens where teacher accuracy remains high ($>$62\% at $N=100$ vs.\ 51.75\% at $N=300$), ESR avoids training on noisy off-policy teacher signals.
+
+\textbf{2. Cascading Alignment.} Training only on early tokens causes KL divergence on \emph{untrained late positions} (beyond $N$) to drop by 30--40\%. The student learns the teacher's reasoning strategy from initial tokens (problem framing, approach selection) and this generalizes to later positions without direct supervision.
+
+\textbf{3. Sub-mode Commitment.} Under reverse KL with truncated supervision, the student commits to a specific mode in the teacher's multi-modal distribution---typically a concise, efficient reasoning mode. ESR-trained students produce responses $\sim$380 tokens (median) vs.\ $\sim$1,150 for the teacher and $\sim$1,530 for full OPD, yet achieve higher accuracy.
+
+\paragraph{Results.}
+Experiments span 6 student models (Qwen3-1.7B, Qwen2.5-14B/32B, Qwen2.5-Math-1.5B/7B, Gemma-2 2B), 5 teachers (Qwen3-4B/14B, Qwen3.5-35B-A3B, Qwen2.5-Math-72B, Gemma-3 4B), evaluated on MATH-500 (avg@4), HumanEval (pass@1), and BFCL (full accuracy).
+
+\begin{itemize}[nosep]
+    \item \textbf{Quality:} ESR outperforms full OPD in 8/9 configurations on MATH-500 avg@4. ESR \emph{exceeds teacher performance} in 4 configurations. Most dramatically: Qwen2.5-14B $\to$ Qwen3.5-35B-A3B, where OPD \textbf{completely collapses} (5.40\%) while ESR achieves 75.15\%.
+    \item \textbf{Stability:} OPD exhibits training collapse ($>$5\% drop from peak) in 4/9 configurations; \textbf{ESR never collapses}.
+    \item \textbf{Cross-generation:} Qwen2.5-Math-1.5B $\to$ Qwen3-1.7B: ESR 65.85 vs.\ OPD 62.35 (+3.50), \emph{matching the teacher} (65.30).
+    \item \textbf{Cross-task:} HumanEval: ESR 42.10 vs.\ OPD 40.20; BFCL: ESR 61.30 vs.\ OPD 58.20.
+    \item \textbf{Efficiency:} \textbf{24$\times$ total speedup} (194s $\to$ 8s per step), dominated by 36$\times$ generation speedup. \textbf{2.6$\times$ memory reduction} (63.3~GB $\to$ 24.1~GB). Enables single A6000 training previously requiring multi-GPU.
+    \item \textbf{Inference efficiency:} ESR-trained students produce responses 2--3$\times$ shorter than OPD-trained students, directly reducing deployment cost.
+\end{itemize}
+
+\paragraph{Critical Ablation: Position vs.\ Information-Theoretic Selection.}
+All methods select the same number of tokens ($N=100$) but differ in \emph{which} tokens:
+\begin{itemize}[nosep]
+    \item ESR (first 100 by position): \textbf{65.85}
+    \item Top-100 by teacher entropy: 63.30
+    \item Top-100 by student entropy: 62.70
+    \item Top-100 by reverse KL magnitude: 53.35
+    \item Full OPD (all tokens): 62.35
+\end{itemize}
+Position-based selection outperforms all alternatives. Top-by-RKL (53.35) performs \emph{worst}---even below full OPD. This establishes that token position carries supervision information independent of information-theoretic measures, a finding that cannot be explained by standard KL or entropy analysis.
+
+\paragraph{Rollout Length Sensitivity.}
+ESR is robust across $N \in \{50, 100, 150, 200\}$, with all variants substantially beating full OPD. Shorter cutoffs ($N=50$) show a slight advantage (66.65 vs.\ 65.85 at $N=100$), though cross-family settings prefer $N=50$ for stability.
+
+\paragraph{Limitations.}
+(1)~Assumes instruction-tuned students; pre-trained-only models are untested. (2)~Limited scale (3,200 problems, 200 steps); industrial-scale applicability is unverified. (3)~Position advantage over information-theoretic selection lacks formal theoretical explanation. (4)~Only reverse KL tested; interaction with forward KL or JSD is unknown. (5)~Long-horizon tasks where critical information appears late in responses may not benefit.
+
+\paragraph{Relevance.}
+ESR provides a remarkably simple yet powerful solution to the efficiency bottleneck that our prior OPD reviews identified. Flow-OPD (Review~\#48) introduced on-policy distillation for flow matching models; Learning to Foresee (Review~\#53) revealed that functional redundancy and early low-rank lock-in explain OPD's efficiency---ESR's cascading alignment effect provides a complementary mechanism showing that early tokens capture the teacher's ``global reasoning strategy'' that propagates to later positions. Co-Evolving Policy Distillation (Review~\#44) demonstrated student-teacher co-evolution; ESR shows that even without co-evolution, truncating the student's rollout is sufficient to improve quality. The Off-Policy Teacher Decay finding reframes the OPD problem fundamentally: the issue is not just computational cost but signal quality degradation, and the solution is elegantly to stop before the signal degrades. The sub-mode commitment effect---ESR students produce 2--3$\times$ shorter but more accurate responses---suggests that OPD's verbosity problem is an artifact of training on late-position noise.
+
+\section*{Follow-up Research Directions}
+
+\subsection*{Direction 1: Adaptive Position Cutoff via Teacher Decay Estimation}
+
+\paragraph{Gap.}
+ESR uses a fixed cutoff $N=100$ for all examples and training steps. However, teacher decay rates likely vary across problems: simple problems may have teacher signals that remain strong for 200+ tokens, while complex problems with non-standard reasoning chains may cause rapid teacher degradation within 50 tokens. A fixed $N$ either wastes valid supervision (on easy problems) or includes degraded signals (on hard problems). The paper's robustness analysis shows $N \in [50, 200]$ all work, but per-example adaptation could push the frontier.
+
+\paragraph{Approach.}
+Develop an \emph{adaptive decay estimator} that predicts the optimal cutoff $N_i$ per problem: (1)~During training, periodically sample a diagnostic batch where full rollouts are generated and teacher accuracy is measured at each position. Fit a per-problem decay curve $\Delta_{\mathrm{decay}}(t; x_i)$ and identify the position where teacher accuracy drops below a threshold (e.g., student baseline + 5\%). (2)~Train a lightweight regressor (from the student's first-layer hidden state of the prompt) to predict this optimal cutoff without running the full diagnostic. (3)~At training time, use the predicted $N_i$ for each example. This connects to DVAO's variance-adaptive mechanism (Review~\#59): just as DVAO adapts reward weights based on within-group variance, the adaptive cutoff adapts supervision length based on estimated teacher signal quality. The per-example decay estimation could also use DelTA's discriminative scoring (Review~\#57) to identify the position where token-gradient discriminative structure breaks down.
+
+\paragraph{Feasibility.}
+High. The diagnostic sampling is a minor overhead (run periodically, not every step). The cutoff regressor is trivially small. The main research question is whether per-problem decay variation is large enough to justify the additional complexity over fixed $N$.
+
+\subsection*{Direction 2: ESR for Diffusion LLM On-Policy Distillation}
+
+\paragraph{Gap.}
+ESR is designed for autoregressive on-policy distillation, where the student generates tokens left-to-right and the teacher scores each position. Diffusion LLMs (dLLMs) use a fundamentally different generation process: iterative denoising from a fully masked sequence, unmasking tokens across the sequence simultaneously. Flow-OPD (Review~\#48) and TIDE (Review~\#43) demonstrated on-policy distillation for flow matching and diffusion models respectively, but neither addresses the analog of teacher decay in the diffusion setting. In dLLMs, the teacher decay analog would be \emph{denoising step decay}---the teacher's signal quality may degrade in later refinement steps when operating on the student's intermediate states.
+
+\paragraph{Approach.}
+Translate ESR's position-based cutoff to a \emph{step-based cutoff} for dLLM distillation: (1)~Instead of truncating at token position $N$, truncate at denoising step $S_{\mathrm{cut}}$---train the student only on teacher signals from the first $S_{\mathrm{cut}}$ denoising steps. (2)~Measure the dLLM analog of Off-Policy Teacher Decay: have the teacher score the student's intermediate denoised states at each step and measure how teacher signal quality degrades across steps. D$^2$-Monitor's hesitation analysis (Review~\#60) provides the diagnostic tool---steps with high hesitation severity may correspond to degraded teacher signals. (3)~Apply ESR's cascading alignment hypothesis: if early denoising steps capture the teacher's ``global unmasking strategy,'' then restricting supervision to these steps should propagate improvements to later steps. This would unify ESR's insight (early signals suffice) with dLLM distillation's unique multi-step structure.
+
+\paragraph{Feasibility.}
+Moderate. The translation from position to denoising step is conceptually natural, but the empirical question---whether teacher decay occurs across denoising steps as it does across token positions---is unknown. The diagnostic measurement is straightforward using existing dLLM infrastructure. If validated, this would significantly accelerate dLLM distillation, which is currently a major bottleneck for training compact diffusion language models.
+
+\subsection*{Direction 3: Combining ESR with Token-Level Credit for Multi-Objective Distillation}
+
+\paragraph{Gap.}
+ESR selects tokens by position; DelTA (Review~\#57) selects tokens by discriminative value within a reward signal. The ablation shows these axes are independent---position-based selection cannot be replicated by KL or entropy selection. This suggests that combining position and discriminative weighting could yield compound improvements. Furthermore, real-world distillation often targets multiple objectives (reasoning accuracy + format compliance + conciseness), mirroring DVAO's multi-reward setting (Review~\#59).
+
+\paragraph{Approach.}
+Design a \emph{position-aware discriminative distillation} framework: (1)~Apply ESR to truncate rollouts at $N$ tokens (eliminating decayed teacher signals). (2)~Within the first $N$ tokens, apply DelTA's discriminative scoring to reweight tokens---compute positive/negative centroids from high-KL vs.\ low-KL token-gradient vectors and assign per-token importance weights $\lambda_{i,t}$. (3)~For multi-objective distillation (e.g., simultaneously distilling reasoning quality and format compliance from different teacher heads), apply DVAO's variance-adaptive weighting across objectives within the truncated window. The final per-token loss weight becomes $\lambda_{i,t} \cdot \tilde{w}_k^{(i)}$---a three-way product of positional selection (ESR), token-level discrimination (DelTA), and objective-level adaptation (DVAO). This creates a fully adaptive distillation system operating at three granularities: which positions (ESR), which tokens within those positions (DelTA), and which objectives (DVAO).
+
+\paragraph{Feasibility.}
+High. All three components are independently validated with minimal overhead: ESR is a one-line change, DelTA adds $\sim$10\% forward passes, and DVAO adds zero parameters. The main research question is whether the compound benefits are additive or exhibit diminishing returns. A staged evaluation---ESR alone, ESR+DelTA, ESR+DVAO, ESR+DelTA+DVAO---would isolate each component's contribution.
+
+\section*{Conclusion}
+
+ESR demonstrates that a single-line modification---truncating on-policy distillation rollouts to the first 100 tokens---achieves 24$\times$ training speedup with 2.6$\times$ memory reduction while \emph{improving} quality in 8/9 configurations and preventing training collapse entirely. The underlying discovery of Off-Policy Teacher Decay reframes the OPD problem: late-position teacher signals are not merely costly to compute but actively harmful, with teacher accuracy dropping to near-student levels by 300 tokens. Within our review series, ESR completes the on-policy distillation efficiency arc: Flow-OPD established OPD for generative models, Learning to Foresee explained its efficiency via spectral analysis, and now ESR shows that the most effective intervention is the simplest---stop before the teacher's signal degrades. The cascading alignment effect (early tokens improve late-token quality without supervision) and sub-mode commitment (shorter, more accurate responses) together suggest that OPD's verbosity and instability problems are artifacts of training on degraded late-position signals. The three proposed follow-up directions---adaptive per-example cutoffs, dLLM denoising step truncation, and multi-granularity discriminative distillation---collectively point toward a unified, efficient distillation framework operating across positions, tokens, objectives, and architectures.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{esr2026}
+Z.~Zhou, J.~Li, H.~Tang, Y.~N.~Wu, and D.~Terzopoulos.
+\newblock Less is More: Early Stopping Rollout for On-Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2605.27028}, 2026.
+
+\bibitem{flowopd2026}
+Y.~Chen et~al.
+\newblock Flow-OPD: On-Policy Distillation for Flow Matching Models.
+\newblock \emph{arXiv preprint arXiv:2605.08063}, 2026.
+
+\bibitem{foresee2026}
+J.~Wang et~al.
+\newblock Learning to Foresee: Unveiling the Unlocking Efficiency of On-Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2605.11739}, 2026.
+
+\bibitem{coevolving2026}
+J.~Lee et~al.
+\newblock Co-Evolving Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2604.27083}, 2026.
+
+\bibitem{delta2026}
+K.~Zhang, W.~Wu, and Y.~Lin.
+\newblock DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.
+\newblock \emph{arXiv preprint arXiv:2605.21467}, 2026.
+
+\bibitem{dvao2026}
+G.~Jiang et~al.
+\newblock DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2605.25604}, 2026.
+
+\bibitem{d2monitor2026}
+A.~Liu et~al.
+\newblock D$^2$-Monitor: Dynamic Safety Monitoring for Diffusion LLMs via Hesitation-Aware Routing.
+\newblock \emph{arXiv preprint arXiv:2605.25893}, 2026.
+
+\bibitem{tide2026}
+M.~Park et~al.
+\newblock Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.26951}, 2026.
+
+\bibitem{gkd2024}
+R.~Agarwal et~al.
+\newblock On-Policy Distillation of Language Models: Learning from Self-Generated Mistakes.
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem{minillm2024}
+Y.~Gu et~al.
+\newblock MiniLLM: Knowledge Distillation of Large Language Models.
+\newblock In \emph{ICLR}, 2024.
+
+\end{thebibliography}
+
+\end{document}
