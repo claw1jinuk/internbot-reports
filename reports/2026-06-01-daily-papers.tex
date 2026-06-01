@@ -1,0 +1,152 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: How LoRA Remembers?\\A Parametric Memory Law for LLM Finetuning}
+\author{Internbot --- Automated Research Summary}
+\date{June 1, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Large language models must continuously absorb new factual knowledge through fine-tuning, yet we lack quantitative understanding of how much information a parameter-efficient adapter can actually store. Xu et al.~\cite{xu2026lora} address this fundamental question for LoRA (Low-Rank Adaptation), identifying a puzzling phenomenon they term \emph{loss-accuracy misalignment}: training loss can converge near zero while exact-match recall accuracy remains negligible. This disconnect misleads practitioners about true memorization capacity and creates blind spots in knowledge-intensive applications such as domain adaptation, factual editing, and continual knowledge integration.
+
+The paper draws on \emph{fuzzy-trace theory} from cognitive science, distinguishing gist-level memory (semantic understanding captured by downstream benchmarks) from verbatim-level memory (exact reproduction of target sequences). By isolating the latter, the authors establish the first quantitative scaling law governing how LoRA's parametric memory capacity relates to adapter rank and sequence complexity.
+
+\subsection{Method}
+
+The methodology centers on controlled memorization experiments designed to isolate pure storage from semantic reasoning:
+
+\paragraph{Experimental Design.} The authors construct stress tests using (1) long-context sequences from LongBench with 0--100\% of tokens replaced by random vocabulary items (eliminating semantic shortcuts at high replacement rates), and (2) a PhoneBook benchmark of discrete key-value pairs (name $\to$ phone number). Models tested are Qwen3-8B-Instruct and Llama3.1-8B-Instruct with LoRA ranks spanning $r \in \{1, 2, 4, \ldots, 256\}$.
+
+\paragraph{The Parametric Memory Law.} The central theoretical contribution is the empirical discovery that loss reduction during LoRA fine-tuning follows a separable power law:
+\begin{equation}
+\Delta L(r, l) = C \cdot r^{\alpha} \cdot l^{-\beta} + b
+\end{equation}
+where $\Delta L$ is the memory gain (initial minus converged loss), $r$ is LoRA rank, $l$ is sequence length, $C$ is a model-dependent scaling constant, $\alpha > 0$ is the capacity exponent (rank efficiency), $\beta > 0$ is the length penalty exponent, and $b$ is a residual offset. This law achieves $R^2 > 0.98$ across all tested configurations and $R^2 > 0.99$ for individual task fits.
+
+\paragraph{Deterministic Phase Transition.} The second contribution identifies a sharp phase transition at token level: when the per-token loss $L_t$ crosses the critical threshold $L_{\mathrm{crit}} = \ln(2) \approx 0.693$, the prediction probability exceeds 0.5, guaranteeing correct greedy decoding. Tokens remaining in the ``disordered phase'' ($L_t > L_{\mathrm{crit}}$) trigger autoregressive cascade failures---a single stubborn token corrupts all subsequent predictions. The authors validate this with Spearman correlation $\rho = 0.908$ between the earliest stubborn position and first error position.
+
+\paragraph{MemFT: Memorization-Oriented Fine-Tuning.} Leveraging these insights, the authors propose two training strategies:
+\begin{itemize}
+\item \textbf{MemFT-OT (Only Threshold):} Hard masking $w_t = \mathbf{1}[L_t > L_{\mathrm{crit}}]$ focuses gradient signal exclusively on unmemorized tokens.
+\item \textbf{MemFT-SW (Sliding Window):} Combines (a) intra-sample spatial weighting with exponential decay around the first error position, and (b) inter-batch temporal curriculum that progressively introduces harder samples.
+\end{itemize}
+
+\subsection{Results}
+
+\paragraph{Memorization Performance.} MemFT achieves perfect verbatim recall where standard SFT fails:
+\begin{itemize}
+\item Long-context (Llama, rank 16): SFT 94.7\% token accuracy $\to$ MemFT-OT \textbf{100.0\%}
+\item Long-context (Qwen, rank 8): SFT 40.0\% $\to$ MemFT-OT \textbf{100.0\%}
+\item PhoneBook (Llama, rank 64): SFT 59.3\% exact match $\to$ MemFT-SW \textbf{100.0\%}
+\end{itemize}
+
+\paragraph{Generalization Benefit.} On a linear rule-learning task ($f(x,y) = 3x + 5y + 7$), MemFT improved out-of-distribution generalization by 7--15\% over SFT (e.g., rank 1: SFT 19\% $\to$ MemFT 34\%), attributed to preventing overconfidence on easy tokens.
+
+\paragraph{Robustness.} The parametric memory law remains robust ($R^2 > 0.98$) regardless of semantic density (0--100\% random token replacement), confirming that the law captures genuine memorization mechanics rather than semantic shortcuts.
+
+\subsection{Limitations}
+
+\begin{enumerate}
+\item \textbf{Scale restriction:} All experiments use 8B models; generalization to 70B+ or sub-1B models is unverified.
+\item \textbf{Decoding specificity:} The $p = 0.5$ phase transition is specific to greedy decoding; temperature sampling, nucleus decoding, or beam search shift the critical threshold.
+\item \textbf{No forgetting analysis:} Since base parameters are frozen and only LoRA adapters train, no measurement of how memorization degrades pre-existing capabilities or previously stored facts.
+\item \textbf{Empirical law without derivation:} The power-law form is fit from data with no first-principles justification from optimization or information theory.
+\item \textbf{Single-adapter focus:} All experiments memorize one sequence/fact-set at a time, leaving multi-fact capacity composition unexplored.
+\end{enumerate}
+
+\subsection{Relevance to Our Research}
+
+This work is highly relevant to our continual learning research (Topic 3). The parametric memory law provides the first quantitative framework for understanding LoRA's storage limits---a critical constraint when deploying adapters for continual knowledge integration. The phase transition finding explains why sequential fine-tuning often exhibits catastrophic failure: even small perturbations pushing one token below $p = 0.5$ can cascade into complete sequence loss. This connects directly to our prior reviews of Geometry Conflict~\cite{geometry2026} (which identified gradient direction conflicts as forgetting mechanisms) and Abstraction as Memory-Efficient Inductive Bias~\cite{abstraction2026} (which proposed compressed representations to mitigate forgetting). The MemFT approach of focusing gradients on unmemorized tokens also resonates with the selective update strategies explored in Token's Dilemma~\cite{tokendilemma2026} for drift-aware continual learning.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Capacity-Aware Continual LoRA with Forgetting Dynamics}
+
+\paragraph{Gap.} The parametric memory law quantifies single-task memorization but ignores the critical continual learning scenario: when a LoRA adapter trained on task A is subsequently fine-tuned on task B, how does the memory law predict forgetting of A? The current law provides a static snapshot but no temporal dynamics of memory competition.
+
+\paragraph{Approach.} Extend the parametric memory law to a \emph{dynamic capacity allocation} framework:
+\begin{equation}
+\Delta L_A(r, t) = C \cdot r^{\alpha} \cdot l_A^{-\beta} \cdot \exp(-\gamma \cdot N_B(t))
+\end{equation}
+where $N_B(t)$ counts task-B gradient steps and $\gamma$ captures the forgetting rate. Study how multiple facts compete for the same rank budget by training on sequential memorization tasks and measuring per-fact retention curves. The phase transition framework predicts that forgetting occurs via specific tokens crossing back above $L_{\mathrm{crit}}$, enabling fine-grained tracking of which facts are forgotten first and why. Combine with elastic weight consolidation (EWC) or Fisher-information-based importance weighting to protect high-vulnerability tokens identified by proximity to the phase boundary.
+
+\paragraph{Feasibility.} High. Requires extending the existing experimental setup (already open and reproducible) to sequential task scenarios. The theoretical framework is well-defined; the main challenge is characterizing the $\gamma$ parameter and its dependence on task similarity. Can reuse the Qwen3-8B/Llama3.1-8B setup with sequential PhoneBook memorization tasks.
+
+\subsection{Direction 2: Phase-Transition-Guided Rehearsal for Continual Knowledge Editing}
+
+\paragraph{Gap.} Knowledge editing methods (ROME, MEMIT, GRACE) modify specific facts but lack a principled criterion for when edits are ``stable.'' The phase transition at $L_{\mathrm{crit}} = \ln(2)$ provides exactly such a criterion---an edit is stable only when all tokens in the target sequence cross below this threshold---but this has never been exploited for selective rehearsal in continual settings.
+
+\paragraph{Approach.} Design a \emph{phase-boundary rehearsal} strategy for continual knowledge editing:
+\begin{enumerate}
+\item After each edit, identify tokens near the phase boundary ($L_t \in [0.5, 0.9]$, the ``vulnerable zone'').
+\item Maintain a priority queue of edited facts ranked by their minimum margin $\min_t(L_{\mathrm{crit}} - L_t)$.
+\item During subsequent fine-tuning, periodically rehearse only the most vulnerable facts (those closest to crossing back into the disordered phase).
+\item Use the parametric memory law to predict \emph{a priori} which edits will become unstable given planned future training, enabling proactive rather than reactive rehearsal.
+\end{enumerate}
+This connects to Memanto's typed semantic memory~\cite{memanto2026} by providing a principled forgetting-risk score for memory consolidation decisions, and to Geometry Conflict's~\cite{geometry2026} gradient orthogonality analysis by identifying which parameter subspaces are most contested.
+
+\paragraph{Feasibility.} Medium-high. The phase boundary monitoring requires per-token loss tracking (computationally cheap during validation passes). The rehearsal selection mechanism is straightforward to implement. Main challenge is scaling to thousands of edited facts while maintaining tractable priority queue updates. The MemFT codebase provides starting infrastructure.
+
+\subsection{Direction 3: Theoretical Derivation from Low-Rank Approximation Theory}
+
+\paragraph{Gap.} The parametric memory law is purely empirical ($R^2 > 0.98$) but lacks first-principles derivation. Why should memorization follow $r^{\alpha} \cdot l^{-\beta}$ specifically? Without theoretical grounding, we cannot predict when the law breaks down, extend it to new architectures, or connect it to broader neural scaling laws.
+
+\paragraph{Approach.} Derive the power-law relationship from the information-theoretic capacity of low-rank perturbations:
+\begin{enumerate}
+\item Model the memorization problem as channel coding: LoRA adapter of rank $r$ in a $d$-dimensional weight space provides a channel with capacity $\sim 2dr$ parameters encoding $l$ tokens each requiring $\log V$ bits (vocabulary size $V$).
+\item The rate-distortion relationship for this channel under gradient descent dynamics should yield the power-law form, with $\alpha$ relating to the effective dimensionality of the loss landscape's low-rank structure and $\beta$ relating to the entropy rate of the target sequence.
+\item Connect to the Eckart--Young theorem: LoRA's rank-$r$ update is the best rank-$r$ approximation to the full parameter update, and the approximation error follows a power law in $r$ governed by the singular value spectrum of the gradient accumulation matrix.
+\item Validate by predicting $\alpha$ and $\beta$ from measurable properties (singular value decay rate, sequence entropy) without fitting, then comparing to empirical values.
+\end{enumerate}
+This would unify the parametric memory law with Chinchilla-style scaling laws~\cite{hoffmann2022training} and provide a foundation for predicting LoRA capacity limits in novel settings (different architectures, multimodal models, mixture-of-experts).
+
+\paragraph{Feasibility.} Medium. The theoretical components exist separately (rate-distortion theory, Eckart--Young, neural tangent kernel analysis) but combining them into a tight derivation is non-trivial. A partial result connecting $\alpha$ to singular value decay would be publishable even without a complete closed-form derivation.
+
+\section{Conclusion}
+
+Xu et al.'s parametric memory law ($\Delta L = C \cdot r^{\alpha} \cdot l^{-\beta} + b$) provides the first quantitative framework for understanding LoRA's memorization capacity, complemented by the discovery of a deterministic phase transition at $L_{\mathrm{crit}} = \ln(2)$ that explains catastrophic cascade failures in verbatim recall. For continual learning research, the most immediate implications are: (1) LoRA rank imposes hard capacity ceilings on storable facts, quantifiable \emph{a priori}; (2) forgetting can be localized to specific token positions crossing the phase boundary; and (3) gradient focusing on unmemorized tokens (MemFT) can dramatically improve rank efficiency. The three proposed follow-up directions---dynamic capacity allocation for sequential tasks, phase-boundary rehearsal for knowledge editing, and theoretical derivation from low-rank approximation theory---address the paper's main limitation (static single-task analysis) while connecting to our broader research program on continual adaptation of LLM agents.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{xu2026lora}
+Z.~Xu, H.~Hong, L.~Yu, B.~Cui, L.~Huang, H.~Xue, and N.~Zhang.
+\newblock How {LoRA} remembers? {A} parametric memory law for {LLM} finetuning.
+\newblock \emph{arXiv preprint arXiv:2605.30260}, 2026.
+
+\bibitem{geometry2026}
+Geometry Conflict: Explaining and controlling forgetting in {LLM} continual post-training.
+\newblock \emph{arXiv preprint arXiv:2605.09608}, 2026.
+
+\bibitem{abstraction2026}
+Abstraction as a memory-efficient inductive bias for continual learning.
+\newblock \emph{arXiv preprint arXiv:2603.17198}, 2026.
+
+\bibitem{tokendilemma2026}
+On token's dilemma: Dynamic {MoE} with drift-aware token assignment for continual learning of large vision language models.
+\newblock \emph{arXiv preprint arXiv:2603.27481}, 2026.
+
+\bibitem{memanto2026}
+Memanto: Typed semantic memory with information-theoretic retrieval for long-horizon agents.
+\newblock \emph{arXiv preprint arXiv:2604.22085}, 2026.
+
+\bibitem{hoffmann2022training}
+J.~Hoffmann, S.~Borgeaud, A.~Mensch, et~al.
+\newblock Training compute-optimal large language models.
+\newblock \emph{arXiv preprint arXiv:2203.15556}, 2022.
+
+\end{thebibliography}
+
+\end{document}
