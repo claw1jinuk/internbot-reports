@@ -1,0 +1,155 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Beyond Holistic Models\\Systematic Component-Level Benchmarking of\\Deep Multivariate Time-Series Forecasting}
+\author{Internbot --- Automated Research Summary}
+\date{June 2, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Standard time-series forecasting benchmarks treat each model as a monolithic black box: train, measure MSE/MAE, rank. Liang et al.~\cite{liang2026tscomp} argue that this holistic evaluation paradigm obscures which specific design choices actually drive performance. Every multivariate time-series forecasting (MTSF) model is implicitly a multi-stage pipeline---normalization, tokenization, backbone architecture, loss function---yet standard benchmarks collapse this hierarchy into a single ranking. This makes it impossible to determine whether iTransformer outperforms PatchTST because of inverted encoding, channel-dependent modeling, or merely better normalization. TSCOMP (the proposed framework) decomposes MTSF models into atomic components, benchmarks them systematically, and reconstructs optimal pipelines from the best components per dataset.
+
+\subsection{Method}
+
+\paragraph{Hierarchical Deconstruction.} TSCOMP organizes MTSF design into four pipeline stages containing 11 component dimensions and 49 specific implementations extracted from state-of-the-art models:
+\begin{enumerate}
+\item \textbf{Series Preprocessing} (3 dimensions): normalization (None/RevIN/Stationary/DishTS), decomposition (None/Moving Average/MoEMA/DFT), sampling/mixing.
+\item \textbf{Series Encoding} (3 dimensions): channel strategy (dependent vs.\ independent), tokenization (point/patching/inverted/orthogonal encoding), timestamp embedding.
+\item \textbf{Network Architecture} (3 dimensions): backbone (MLP, RNN, Transformer, LLM adapters, TSFMs---16+ variants), feature attention, retrieval augmentation (RAG).
+\item \textbf{Network Optimization} (2 dimensions): sequence length, loss function (MSE/MAE/HUBER/DBLoss/PSLoss/FreDFLoss).
+\end{enumerate}
+
+\paragraph{Constrained Orthogonal Design.} The full Cartesian product exceeds $10^6$ configurations. TSCOMP uses pairwise coverage---ensuring every valid pair of components from different dimensions co-occurs in at least one configuration---reducing the pool to $\sim$136 configurations per horizon while guaranteeing rigorous coverage.
+
+\paragraph{Statistical Analysis.} Three-tier analysis: (1) Generalized Linear Mixed Models (GLMM) estimate each component's marginal contribution controlling for dataset/horizon random effects; (2) ANOVA quantifies variance explained by each dimension; (3) Cohen's $d$ measures effect sizes across data characteristics.
+
+\paragraph{Meta-Learning Automated Construction.} A performance corpus of $\sim$20,760 entries feeds a meta-predictor. Dataset meta-features are extracted via TabPFN (a pre-trained tabular Transformer) capturing the conditional predictive relationship $P(Y|X)$ rather than handcrafted statistics (achieving Pearson $r = -0.549$ vs.\ $-0.291$ for TimeFuse). A two-layer MLP maps concatenated meta-features and component embeddings to predicted rankings, enabling zero-shot pipeline recommendation for new datasets.
+
+\subsection{Results}
+
+\paragraph{Preprocessing Dominates Everything.} The headline finding from ANOVA: series normalization alone explains \textbf{63.0\%} of total performance variance. Aggregated by pipeline stage: preprocessing accounts for 66.6\%, encoding 18.3\%, architecture only 8.0\%, and optimization 7.1\%. Preprocessing contributes over $8\times$ the variance of the backbone architecture. Under scale-independent MASE, this ratio increases to $11.3\times$.
+
+\paragraph{Component-Level Insights (GLMM coefficients, negative = improvement):}
+\begin{itemize}
+\item \textbf{Normalization:} RevIN ($-1.18$) and Stationary ($-1.16$) provide massive improvements; omitting normalization is catastrophic.
+\item \textbf{Decomposition:} Counterintuitively, all three decomposition methods \emph{increase} MSE on average (MA: $+0.25$, MoEMA: $+0.13$, DFT: $+0.23$), contradicting the common assumption that decomposition helps.
+\item \textbf{Channel Independence:} Beneficial on average ($-0.52$) but degrades on highly correlated datasets ($+0.22$ difference, Cohen's $d = 0.31$).
+\item \textbf{Tokenization:} Orthogonal encoding ($-0.29$) and inverted encoding ($-0.25$) outperform patching ($+0.17$).
+\item \textbf{Loss:} HUBER ($-0.36$) and MAE ($-0.33$) substantially outperform MSE (baseline).
+\end{itemize}
+
+\paragraph{Architecture-Specific Preferences.} The same component can have opposite effects across backbones:
+\begin{itemize}
+\item Moving Average decomposition hurts globally ($+0.25$) but uniquely \emph{helps} LLM-based models ($-0.23$).
+\item MAE loss helps globally ($-0.33$) but \emph{hurts} RNNs ($+0.50$).
+\item For Transformers, loss function explains 20.9\% of variance; advanced losses (HUBER: $-0.69$, PSLoss: $-0.67$) provide dramatic gains.
+\item For TSFMs, series tokenization explains 24.7\% of variance ($3.5\times$ the global average), and series patching---the encoding used during pre-training---actually \emph{degrades} downstream performance ($+0.64$).
+\end{itemize}
+
+\paragraph{MLP Dominance.} MLP-based configurations rank first in 164 out of 168 evaluation scenarios. The automated TSCOMP pipeline (MLP-only) achieves best MSE on 10/14 dataset-metric combinations, outperforming iTransformer, TimeMixer, OLinear, RAFT, and all evaluated TSFMs/AutoML systems. TSCOMP-fast runs in 163s vs.\ 1102s for AutoGluon with substantially better accuracy.
+
+\paragraph{TSFM Challenges.} TSFMs degrade on large-sample datasets (Cohen's $d = +0.21$), suggesting downstream adaptation overrides pre-trained knowledge. A well-configured MLP with proper normalization matches or exceeds TSFMs while being orders of magnitude cheaper.
+
+\subsection{Limitations}
+
+\begin{enumerate}
+\item \textbf{Static corpus:} The performance corpus is a snapshot; new components require re-evaluation. The authors propose an LLM-agent-powered workflow for continuous updates as future work.
+\item \textbf{Pairwise coverage only:} Higher-order interactions (58/66 estimable 3-way interactions are significant) are unexplored, though main effects account for 83.8\% of explainable variance.
+\item \textbf{Point forecasting only:} The framework does not address probabilistic forecasting, anomaly detection, classification, or imputation.
+\item \textbf{MLP-only automation:} Automated construction restricts to MLP backbones for efficiency, potentially missing edge cases.
+\item \textbf{No SSM/Mamba decomposition:} State-space models are compared but not fully decomposed into the component framework.
+\end{enumerate}
+
+\subsection{Relevance to Our Research}
+
+This work is foundational for our time-series forecasting research (Topic~5). The finding that preprocessing explains $8\times$ more variance than architecture directly challenges the prevailing focus on novel backbones---including the scaling paradigm explored in Toto~2.0~\cite{toto2026}, where massive compute is invested in backbone pre-training. The TSFM-specific results (patching hurts downstream, encoding explains 43.2\% of variance) suggest that our prior review of SAGA's~\cite{saga2026} sequence-adaptive encoding may be more impactful than its decoder-only architecture. The meta-learning approach to automated component selection connects to Nexus~\cite{nexus2026}, which uses agentic reasoning for forecasting pipeline construction, but TSCOMP provides the quantitative component-level evidence that Nexus's agent would need to make informed decisions.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Component-Level Benchmarking for Probabilistic Forecasting}
+
+\paragraph{Gap.} TSCOMP exclusively addresses point forecasting (MSE/MAE metrics). Probabilistic forecasting---predicting full conditional distributions via quantile regression, conformal prediction, or distributional outputs---has distinct component sensitivities. Normalization that improves point accuracy may distort prediction intervals; decomposition that hurts MSE may improve calibration. No systematic component-level analysis exists for probabilistic MTSF.
+
+\paragraph{Approach.} Extend the TSCOMP framework to probabilistic forecasting by adding three new component dimensions: (1) output head type (point/quantile/distributional/conformal), (2) calibration method (none/Platt scaling/temperature/adaptive conformal), and (3) uncertainty aggregation strategy for multivariate settings. Evaluate using proper scoring rules (CRPS, calibration error, interval sharpness) alongside MSE. The key hypothesis is that the variance decomposition will shift---loss function and output head may dominate over normalization when the evaluation target is distributional quality rather than point accuracy. This directly extends SAGA's~\cite{saga2026} adaptive temporal conformal prediction by asking whether conformal calibration or the underlying normalization matters more for coverage guarantees.
+
+\paragraph{Feasibility.} High. The TSCOMP codebase is open-source with modular design. Adding probabilistic output heads and scoring rules requires moderate engineering. The same orthogonal experimental design and GLMM/ANOVA analysis apply directly.
+
+\subsection{Direction 2: Adaptive Per-Sample Component Selection via Data Characteristics}
+
+\paragraph{Gap.} TSCOMP's meta-predictor operates at the dataset level: one configuration per dataset. But real-world time series exhibit non-stationarity---distribution shift, regime changes, evolving correlation structure---within a single dataset. A configuration optimal for the first half may be suboptimal for the second. The paper's own data-specific analysis (Table~5) shows that normalization effectiveness varies with distribution shift level and channel strategy depends on correlation structure, both of which change over time.
+
+\paragraph{Approach.} Design a \emph{sliding-window component selector} that adapts the forecasting pipeline at the sub-window level:
+\begin{enumerate}
+\item Partition each time series into overlapping windows and extract per-window meta-features using TabPFN.
+\item Train the meta-predictor to output component selections conditioned on local data characteristics (correlation structure, stationarity level, distribution shift magnitude).
+\item At inference, dynamically switch between configurations---e.g., use Channel Independence when local correlation drops below a threshold, switch normalization from RevIN to Stationary when distribution shift intensifies.
+\item Use the parametric memory law from our recent LoRA review~\cite{xu2026lora} to predict how many component configurations can be simultaneously maintained without ``forgetting'' previous adaptation states.
+\end{enumerate}
+This creates a non-stationary forecasting system that adapts its own preprocessing and encoding to the evolving data regime, addressing a gap identified in both TSCOMP and our LLaTiSA review~\cite{llatisa2026} on difficulty-stratified time-series reasoning.
+
+\paragraph{Feasibility.} Medium. Per-window meta-feature extraction is computationally cheap (TabPFN inference). The main challenge is defining component switching criteria that avoid oscillation and the overhead of maintaining multiple pipeline configurations simultaneously. A simplified version using only normalization switching (the dominant component) is immediately tractable.
+
+\subsection{Direction 3: Component-Aware Pre-Training for Time-Series Foundation Models}
+
+\paragraph{Gap.} TSCOMP reveals a fundamental tension in TSFMs: design choices baked into pre-training (patching, channel strategy) may be suboptimal downstream. Patching degrades TSFM performance ($+0.64$ coefficient); encoding explains 43.2\% of TSFM variance. Yet current TSFMs (Timer, Moment, Toto~2.0~\cite{toto2026}) commit to fixed tokenization at pre-training time. This means billions of training FLOPs optimize a pipeline whose most impactful component (encoding) is potentially wrong for the deployment scenario.
+
+\paragraph{Approach.} Design a \emph{component-agnostic} pre-training strategy for TSFMs:
+\begin{enumerate}
+\item During pre-training, randomly sample from multiple tokenization strategies (point, patching, inverted, orthogonal) per batch, forcing the backbone to learn representations that are tokenization-invariant.
+\item Use a lightweight tokenization adapter at fine-tuning time that can be swapped without retraining the backbone, analogous to how LoRA adapts language models without modifying base weights.
+\item Pre-train with multiple normalization schemes (RevIN, Stationary) applied stochastically, so the backbone learns to handle both normalized and raw inputs.
+\item Evaluate using TSCOMP's variance decomposition to verify that the pre-trained backbone's performance is less sensitive to encoding choices (reduced encoding variance contribution).
+\end{enumerate}
+This addresses the core finding that encoding dominates TSFM performance by decoupling it from pre-training. Combined with Toto~2.0's~\cite{toto2026} scaling insights (u-muP hyperparameter transfer, NorMuon optimizer), this could produce TSFMs that scale efficiently \emph{and} adapt flexibly to downstream encoding requirements.
+
+\paragraph{Feasibility.} Medium-high. Multi-tokenization pre-training is straightforward to implement---it requires augmenting the data pipeline to apply random tokenization per batch. The tokenization adapter is architecturally simple (a learnable projection layer). The main challenge is increased pre-training cost (multiple tokenization forward passes) and potential interference between tokenization modes during optimization. A proof-of-concept on a small TSFM ($\sim$10M parameters) is immediately feasible.
+
+\section{Conclusion}
+
+TSCOMP provides the first systematic component-level analysis of multivariate time-series forecasting, revealing that preprocessing (especially normalization) explains $8\times$ more performance variance than backbone architecture. This fundamentally challenges the field's emphasis on increasingly complex model designs and calls into question the value proposition of expensive TSFM pre-training when a well-configured MLP matches or exceeds foundation model performance. For our research program, the most actionable insights are: (1) normalization is the highest-leverage intervention point; (2) tokenization strategy matters more than backbone choice for TSFMs; (3) component interactions are architecture-dependent, requiring tailored rather than universal design guidelines. The three proposed directions---probabilistic component benchmarking, adaptive per-sample selection, and component-agnostic TSFM pre-training---extend TSCOMP's static analysis toward dynamic, task-adaptive, and scalable forecasting systems.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{liang2026tscomp}
+S.~Liang, C.~Hou, X.~Yao, S.~Wang, H.~Huang, S.~Han, and M.~Jiang.
+\newblock Beyond holistic models: Systematic component-level benchmarking of deep multivariate time-series forecasting.
+\newblock In \emph{Proc.\ KDD}, 2026.
+\newblock arXiv:2605.26562.
+
+\bibitem{toto2026}
+Toto 2.0: Time series forecasting enters the scaling era.
+\newblock \emph{arXiv preprint arXiv:2605.20119}, 2026.
+
+\bibitem{saga2026}
+SAGA: A sequence-adaptive generative architecture for multi-horizon probabilistic forecasting with adaptive temporal conformal prediction.
+\newblock \emph{arXiv preprint arXiv:2605.19014}, 2026.
+
+\bibitem{nexus2026}
+Nexus: An agentic framework for time series forecasting.
+\newblock \emph{arXiv preprint arXiv:2605.14389}, 2026.
+
+\bibitem{llatisa2026}
+LLaTiSA: Towards difficulty-stratified time series reasoning from visual perception to semantics.
+\newblock \emph{arXiv preprint arXiv:2604.17295}, 2026.
+
+\bibitem{xu2026lora}
+Z.~Xu et~al.
+\newblock How {LoRA} remembers? {A} parametric memory law for {LLM} finetuning.
+\newblock \emph{arXiv preprint arXiv:2605.30260}, 2026.
+
+\end{thebibliography}
+
+\end{document}
