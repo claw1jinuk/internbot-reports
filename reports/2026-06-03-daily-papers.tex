@@ -1,0 +1,152 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: On the Scaling of PEFT\\Towards Million Personal Models of Trillion Parameters}
+\author{Internbot --- Automated Research Summary}
+\date{June 3, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Mind Lab~\cite{mindlab2026peft} addresses a fundamental question: how can millions of persistent, individualized model instances coexist atop a small number of trillion-parameter shared foundation models? The paper argues that PEFT (particularly LoRA) is not merely a cheaper alternative to full fine-tuning but the \emph{practical mechanism for scalable persistent individuality}---analogous to how humans share $>$99.9\% of their genome while $<$0.1\% variation produces the full range of individuality. Three coupled scaling challenges are identified: \textbf{Scale Up} (making trillion-parameter models adaptable via LoRA RL), \textbf{Scale Down} (minimizing adapter size while learning reliably), and \textbf{Scale Out} (supporting populations of millions of persistent adapter instances with proper identity and serving).
+
+\subsection{Method}
+
+The paper presents a unified framework spanning theory, algorithms, and infrastructure across all three scaling axes.
+
+\paragraph{Scale Up: Trillion-Scale LoRA RL.} The key insight is that RL is \emph{prior-limited}: a stronger base model assigns non-negligible probability to useful but unstable behaviors, making them reachable by exploration. LoRA on a 32B model (0.07B trainable) achieves $2.5\times$ the AIME gain of full RL on 1.5B (1.5B trainable). For MoE architectures, a Training-Inference Mismatch (TIM) problem is identified where numerical differences alter routing decisions. \emph{Router Replay} ($R^3$) records routing during rollout and replays during training, achieving near-zero KL divergence (0.000026 at step 46). Trillion-scale LoRA RL is demonstrated on Kimi K2 (1.04T total, 32.6B active) at $\sim$10\% of full-parameter RL compute.
+
+\paragraph{Scale Down: Rank Regimes and Initialization.} A systematic sweep (216 runs: 9 ranks $\times$ 4 batch sizes $\times$ 6 seeds, PPO on Qwen3-8B) reveals three operating regimes:
+\begin{itemize}
+\item \textbf{Low-rank frontier} ($r$=1--4): Best-seed performance matches middle ranks, but cross-seed reliability collapses. The limitation is \emph{stability, not capacity}.
+\item \textbf{Deployment default} ($r$=16--32): Highest mean gains, lowest downside risk.
+\item \textbf{Cost warning} ($r$=64--256): Performance frontier flattens while footprint grows.
+\end{itemize}
+A formal KL leash is derived: $\|\Delta W\|_F \leq \sqrt{2K/m}(1 + o(1))$, showing initialization biases the entire optimization trajectory inside a narrow trust region. \emph{OLoRA-tail} (orthonormal initialization from minor singular vectors) is proposed as RL-safe initialization, achieving 35.5\% vs.\ LoRA's 24.0\% at rank 1 on Qwen3-30B (+48\% relative), while principal-subspace initializations (PiSSA, OLoRA) catastrophically collapse under RL.
+
+Additionally, \emph{delta-mem} provides online associative-memory via a recurrent state with delta-rule updates (4.87M parameters, 0.12\% of backbone), improving average scores from 46.79\% to 51.66\% on memory benchmarks.
+
+\paragraph{Scale Out: Population Scaling Laws.} Two key scaling relationships are established:
+\begin{enumerate}
+\item \textbf{Memory Capacity Law:} Usable LoRA memory lies between $10^{-3}$ and $10^{-2}$ tokens per trainable parameter. Below this threshold, accuracy stays near 1.0; above it, performance degrades linearly. MLP LoRA is most parameter-efficient for memory.
+\item \textbf{Collective Intelligence Law:} Accuracy across $k$ distinct LoRA models follows $\mathrm{accuracy} \approx 0.386 + 0.0172\ln(k)$ ($R^2 \approx 0.888$). Collaboration (distinct LoRA policies) outperforms Repetition (same model, different samples) by +0.0533 at large $k$.
+\end{enumerate}
+Per-user LoRA agents in social simulation (OASIS platform) produce 2.18--2.45$\times$ more stance dispersion than shared-base agents, with community modularity growing from 0.502 to 0.716 as population scales from 128 to 512.
+
+\paragraph{Infrastructure: MinT.} A three-tier serving architecture supports $10^6$-entry adapter catalogs: addressable catalog (full population), CPU adapter cache (369--550 loaded), GPU batch slots (64 distinct adapters). Packed MoE LoRA loading achieves 8.5--8.7$\times$ faster live engine loading via 55.4$\times$ tensor object reduction.
+
+\subsection{Results}
+
+Key quantitative findings:
+\begin{itemize}
+\item \textbf{Prior matters more than adapter size:} LoRA $r$=8 on 32B achieves 20.61\% normalized AIME gain vs.\ 8.33\% for full RL on 1.5B.
+\item \textbf{OLoRA-tail at rank 16:} 58.3\% vs.\ 56.3\% average accuracy on math reasoning.
+\item \textbf{Hyperparameter transfer:} $\alpha \propto \sqrt{r}$ (rsLoRA) is most robust for cross-rank learning-rate reuse.
+\item \textbf{Population voting (AIME24):} 0.3644 (single) $\to$ 0.4867 at $k$=198 (+33.5\% relative); Collaboration saturates slower than Repetition.
+\item \textbf{Serving latency:} With admission control, post-TTFT p95 drops from 24.03s to 9.71s; cold-load adapter mobility is 55.7s (full checkpoint) vs.\ 4.1s (adapter-only) for Qwen3-4B.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+\item \textbf{Benchmark scale:} Most experiments use controlled benchmarks; real personal-model deployments at million-user scale remain validated only at the infrastructure level.
+\item \textbf{Social simulation:} Results from one community, one recommender, one seed per cell---not a universal law.
+\item \textbf{Memory capacity law:} Established on factual memorization (DishNameBenchmark); extension to RL-trained multi-task adapters is open.
+\item \textbf{Log-scaling law:} Empirical in one regime (200 variants, one model family); not proven as universal.
+\item \textbf{No long-horizon heterogeneity analysis:} Whether per-user adapters maintain distinct personalities over thousands of interactions is untested.
+\end{enumerate}
+
+\subsection{Relevance to Our Research}
+
+This paper directly extends our recent review of ``How LoRA Remembers?''~\cite{xu2026lora}, which established a parametric memory law for single-adapter memorization. The present work places that law within a broader scaling framework: the $10^{-3}$--$10^{-2}$ tokens/parameter capacity bound provides the hard constraint governing how many facts a personal adapter can store, while the collective intelligence law shows how populations of capacity-bounded adapters can transcend individual limits. The KL leash theory formalizes why initialization matters under RL---explaining from first principles why the phase transition in~\cite{xu2026lora} is initialization-sensitive. For continual learning (Topic~3), the per-user LoRA social simulation demonstrates that adapter-based personalization produces qualitatively different behavioral diversity than prompt-based approaches, directly connecting to our reviews of SkillOpt~\cite{skillopt2026} (skill optimization) and Geometry Conflict~\cite{geometry2026} (forgetting during continual post-training).
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Extending the Memory Capacity Law to Continual Multi-Task RL Adapters}
+
+\paragraph{Gap.} The $10^{-3}$--$10^{-2}$ tokens/parameter capacity bound is established on factual memorization (key-value pairs). Real personal adapters face a fundamentally different regime: they must simultaneously store behavioral skills, factual memories, and policy improvements from RL, all competing for the same rank budget. How does the capacity law change under interference from multiple concurrent learning signals, and when does a personal adapter ``overflow''?
+
+\paragraph{Approach.} Design a multi-task capacity stress test:
+\begin{enumerate}
+\item Train a single LoRA adapter sequentially on $N$ diverse tasks (factual memorization, behavioral skills, RL policy improvement) and measure per-task retention as $N$ grows.
+\item Map the capacity transition boundary as a function of task heterogeneity (measuring gradient direction conflict via the Geometry Conflict framework~\cite{geometry2026}).
+\item Extend the capacity law to: $\Delta L(r, l, N) = C \cdot r^{\alpha} \cdot l^{-\beta} \cdot N^{-\gamma}$ where $\gamma$ captures multi-task interference.
+\item Use the phase transition from~\cite{xu2026lora} ($L_{\mathrm{crit}} = \ln 2$) to identify which specific facts/skills are lost first as capacity fills, enabling principled write-eviction policies for personal adapters.
+\end{enumerate}
+This directly addresses the paper's open question of ``which experience deserves to become durable state vs.\ stay in retrieval.''
+
+\paragraph{Feasibility.} High. Requires extending the DishNameBenchmark setup to include interleaved RL and memorization tasks. The theoretical framework (capacity law + phase transition) is established; the main work is empirical characterization of the interference parameter $\gamma$ and its dependence on task similarity.
+
+\subsection{Direction 2: Adaptive Rank Allocation via Population-Level Meta-Learning}
+
+\paragraph{Gap.} The paper shows that rank defines operating regimes rather than a monotonic capacity curve, and that $\alpha \propto \sqrt{r}$ enables hyperparameter transfer. However, all adapters in the population use the \emph{same} rank. In a million-adapter deployment, different users have different complexity needs: a power user with diverse skills needs higher rank than a casual user with simple preferences. No mechanism exists for automatically determining per-user optimal rank from interaction history.
+
+\paragraph{Approach.} Design a \emph{rank allocation meta-learner} for adapter populations:
+\begin{enumerate}
+\item Extract per-user meta-features from interaction traces: behavioral diversity (number of distinct skill types), memory load (factual information density), policy complexity (entropy of action distributions).
+\item Train a lightweight predictor mapping user meta-features to optimal rank, using the systematic rank sweep data (216 runs) as ground truth for different complexity levels.
+\item Implement rank migration: start all users at rank 4 (cheap, sufficient for most), automatically promote to rank 16/32 when the meta-learner predicts capacity overflow, demote inactive users back to save serving budget.
+\item Connect to MinT infrastructure: rank migration triggers adapter re-initialization (using OLoRA-tail for RL stability) and catalog re-indexing.
+\end{enumerate}
+This creates an adaptive serving system where the population's total GPU memory budget is allocated proportionally to user complexity, maximizing collective capability under fixed hardware constraints.
+
+\paragraph{Feasibility.} Medium-high. The rank sweep provides training signal for the meta-learner. The MinT catalog already supports heterogeneous adapter sizes. Main challenge is defining robust meta-features that predict rank needs without overfitting to short-term interaction patterns.
+
+\subsection{Direction 3: Compositional Adapter Routing Beyond Majority Voting}
+
+\paragraph{Gap.} The collective intelligence law shows logarithmic accuracy scaling via majority voting across $k$ distinct LoRA variants. But voting is a crude aggregation---it treats all adapters equally and discards rich structural information about \emph{which} adapters succeed on \emph{which} problem types. The paper identifies ``population-as-computation (routing, voting, debate, distillation)'' as needing formal scaling theory but provides only the voting baseline.
+
+\paragraph{Approach.} Design a \emph{task-conditional adapter router} that learns which subset of the adapter population to activate for each input:
+\begin{enumerate}
+\item Train 200+ LoRA variants (as in the paper) and record per-problem success/failure patterns to build a specialization matrix $S \in \{0,1\}^{k \times P}$ (adapters $\times$ problems).
+\item Learn a router network $f_\theta(x) \to \Delta^k$ mapping input features to adapter selection weights, trained to maximize expected accuracy via reinforcement learning on the specialization matrix.
+\item At inference, route each query to top-$m$ adapters (with $m \ll k$), merge their outputs via weighted voting, achieving better-than-log scaling while using only a fraction of the population.
+\item Study whether the scaling law transitions from $\ln(k)$ (random voting) to $\sqrt{k}$ or even linear scaling under optimal routing.
+\end{enumerate}
+This extends the MoE paradigm from \emph{within} a model (expert layers) to \emph{across} a population of adapted models, connecting to our review of DVAO~\cite{dvao2026} (multi-reward optimization) by treating each adapter as an ``expert'' specialized for a reward subspace.
+
+\paragraph{Feasibility.} Medium. The adapter population and evaluation infrastructure exist (the paper's 200-variant AIME24 setup). The router training requires defining input features predictive of adapter specialization---problem difficulty, domain, and reasoning type are natural candidates. The theoretical challenge is characterizing when routing provably outperforms uniform voting.
+
+\section{Conclusion}
+
+This paper establishes PEFT scaling as a three-axis framework (Scale Up/Down/Out) with concrete theoretical bounds: the KL leash constraining adapter optimization trajectories, the $10^{-3}$--$10^{-2}$ tokens/parameter memory capacity law, and the logarithmic collective intelligence scaling. The most transformative insight is that rank is an operating regime (not a monotonic capacity knob), low-rank limitations are about stability rather than capacity, and populations of diverse adapters constitute a computational resource transcending individual limits. For our research, this provides the systems-level context for deploying continual learning agents: each agent's adaptive state lives as a small LoRA adapter whose capacity is bounded, whose initialization must respect RL constraints, and whose collective can achieve capabilities no individual possesses.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{mindlab2026peft}
+Mind Lab.
+\newblock On the scaling of {PEFT}: Towards million personal models of trillion parameters.
+\newblock \emph{arXiv preprint arXiv:2606.02437}, 2026.
+
+\bibitem{xu2026lora}
+Z.~Xu et~al.
+\newblock How {LoRA} remembers? {A} parametric memory law for {LLM} finetuning.
+\newblock \emph{arXiv preprint arXiv:2605.30260}, 2026.
+
+\bibitem{geometry2026}
+Geometry Conflict: Explaining and controlling forgetting in {LLM} continual post-training.
+\newblock \emph{arXiv preprint arXiv:2605.09608}, 2026.
+
+\bibitem{skillopt2026}
+SkillOpt: Executive strategy for self-evolving agent skills.
+\newblock \emph{arXiv preprint arXiv:2605.23904}, 2026.
+
+\bibitem{dvao2026}
+DVAO: Dynamic variance-adaptive advantage optimization for multi-reward reinforcement learning.
+\newblock \emph{arXiv preprint arXiv:2605.25604}, 2026.
+
+\end{thebibliography}
+
+\end{document}
