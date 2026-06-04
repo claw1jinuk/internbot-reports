@@ -1,0 +1,176 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: A Local Perturbation Theory for\\Cross-Domain Interference and Recovery in Multi-Domain RL}
+\author{Internbot --- Automated Research Summary}
+\date{June 4, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+When training LLMs with reinforcement learning across multiple domains sequentially (e.g., Code $\to$ Math $\to$ QA $\to$ Creative Writing), later-domain training selectively degrades earlier-domain performance---even when standard gradient cosine diagnostics show no conflict. Yang et al.~\cite{yang2026perturbation} demonstrate this concretely on Qwen3-4B-Thinking: Math performance peaks at 66.49 after its own RL stage, then drops 8.83 points to 57.66 after QA and CW training, while Code and QA remain stable. Two mainstream explanations---catastrophic forgetting (predicting uniform degradation) and global gradient conflict (showing near-zero cosine)---fail to explain this selective, asymmetric interference. The paper asks: \emph{where does cross-domain interference reside if not in global gradient antagonism?}
+
+\subsection{Method}
+
+\paragraph{Empirical Foundation: Four Structural Observations.}
+The paper first establishes the structural conditions constraining the theoretical framework:
+\begin{enumerate}
+\item \textbf{Global gradients are nearly orthogonal} between domains, yet layer-wise decomposition reveals localized conflict and synergy in specific modules.
+\item \textbf{RL updates are sparse and small:} 77--89\% of parameters change by $<10^{-7}$ in absolute magnitude. Domain-specific RL is a mild perturbation, not a global rewrite.
+\item \textbf{Weak edit overlap:} Top-changed neurons overlap weakly across domains (Jaccard $<0.19$). Different domains edit largely distinct neuron sets.
+\item \textbf{High active-route overlap:} Despite editing different neurons, reasoning domains (Math, Code, QA) share substantial active computation routes during inference.
+\end{enumerate}
+This creates the central paradox: domains edit different neurons but share active routes, so sparse edits can interact through shared functional pathways.
+
+\paragraph{Local Perturbation Theory.}
+Three formal results characterize the interference:
+
+\emph{Proposition 1 (Second-Order Local Damage):} For a later-domain update $\delta_B$ applied to a checkpoint $\theta_A^*$ approximately stationary for domain $A$:
+\begin{equation}
+\Delta_{A \leftarrow B} = \tfrac{1}{2}\,\delta_B^\top H_A(\theta_A^*)\,\delta_B + \mathcal{O}(\epsilon_A\|\delta_B\| + \|\delta_B\|^3)
+\end{equation}
+Forgetting is determined by the second-order sensitivity $S_A^{(2)}(\theta; v) = v^\top H_A(\theta)\,v / \|v\|^2$, not update magnitude alone. A small update in a high-curvature direction causes more damage than a large update in a flat direction.
+
+\emph{Proposition 2 (Low-Dimensional Conflict Subspace):} With projection $P_S$ onto a shared conflict subspace $\mathcal{S}_{A,B}$:
+\begin{equation}
+\Delta_{A \leftarrow B} = \tfrac{1}{2}(P_S\delta_B)^\top H_A(\theta_A^*)(P_S\delta_B) + \mathcal{O}(\epsilon_A\|\delta_B\| + \gamma_A\|\delta_B\|^2 + \|\delta_B\|^3)
+\end{equation}
+Interference concentrates in a low-dimensional subspace where domains' active routes overlap and curvature is significant. Low parameter-overlap does not imply low interference.
+
+\emph{Theorem 1 (Geometric Contraction under Refresh):} A short refresh on domain $A$ starting from $\theta_A^* + \delta_B$ satisfies:
+\begin{equation}
+\|P_S(\theta_t - \theta_A^*)\| \leq (1 - \alpha\mu_A)^t \|P_S\delta_B\|
+\end{equation}
+The harmful component decays exponentially with refresh steps, while other domains remain stable when global gradients are near-orthogonal (bounded by $\kappa_{A,C} \ll 1$).
+
+\paragraph{Practical Strategy: Sequential Training + Targeted Refresh.}
+The theory motivates a simple pipeline: train domains sequentially, monitor per-domain performance, then apply short targeted refresh on degraded domains. A training-free diagnostic (proxy rollback) is also provided: score each neuron by Activation $\times$ Magnitude $\times$ Conflict ($A \times M \times C$), revert later-domain displacement on top-scored neurons, and measure recovery.
+
+\subsection{Results}
+
+\paragraph{Recovery Performance.} Re-Math (short Math refresh from CW checkpoint) achieves the best overall average:
+\begin{itemize}
+\item \textbf{Re-Math: 66.39} vs.\ Joint Training: 65.62 vs.\ CGPO: 65.30
+\item Math recovers from 57.66 to 66.04 (+8.38 of 8.83-point drop), Code +0.58, QA +0.15, CW $-0.56$
+\end{itemize}
+
+\paragraph{Proxy Rollback (Training-Free).} The $A \times M \times C$ selector at 2\% neuron budget recovers 20.4\% of Math damage while changing QA by only $-0.06$. Random rollback at the same budget \emph{decreases} Math by 0.42 ($-6.3\%$ recovery). Joint MLP+Attention rollback at 32\% budget reaches 73.6\% recovery.
+
+\paragraph{Directional Asymmetry.} QA-after-Math harms Math strongly, but Math-after-QA does not harm QA. Layer-wise directional cosines reveal Code-Math alignment (positive) and Math-QA conflict concentrated in layers L3--6 (negative cosines).
+
+\paragraph{Refresh Dynamics.} Short refresh rapidly contracts the harmful component (consistent with Theorem~1), but prolonged refresh itself causes interference---demonstrating the theory's own prediction that accumulated displacement beyond the local regime triggers new second-order damage.
+
+\subsection{Limitations}
+
+\begin{enumerate}
+\item \textbf{No automatic pipeline:} Degradation detection, refresh ordering, budget selection, and stopping criteria are all manual.
+\item \textbf{Single model scale (4B):} Conflict subspace dimensionality and route overlap may change at 14B/72B/405B.
+\item \textbf{No direct Hessian computation:} The conflict subspace is a theoretical construct validated only through proxies.
+\item \textbf{Pairwise analysis only:} Three-way or higher-order domain interactions are not formally analyzed.
+\item \textbf{Incomplete recovery:} Even at 32\% budget, 26.4\% of damage remains unrecovered, possibly due to non-coordinate-aligned effects or attention/normalization components.
+\item \textbf{Four specific domains:} Generalization to safety-helpfulness conflicts, multilingual domains, or other RL objectives is untested.
+\end{enumerate}
+
+\subsection{Relevance to Our Research}
+
+This paper provides the theoretical foundation for understanding multi-domain RL training dynamics that our prior reviews identified empirically. The second-order curvature analysis directly complements Geometry Conflict~\cite{geometry2026}, which identified gradient direction conflicts as forgetting mechanisms in continual post-training but lacked the Hessian-level analysis explaining \emph{why} near-orthogonal gradients still cause interference. The localized conflict subspace framework also extends our PEFT scaling review~\cite{mindlab2026peft}: the KL leash constraining LoRA optimization trajectories now has a geometric interpretation---LoRA updates that project onto the conflict subspace cause disproportionate cross-domain damage, explaining why initialization (OLoRA-tail vs.\ PiSSA) matters so much under RL. For multi-reward RL (DVAO~\cite{dvao2026}), the finding that global gradient orthogonality masks localized interference suggests that variance-adaptive weighting schemes should operate at the route level, not the full-parameter level.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Automatic Conflict Subspace Detection for Multi-Domain LLM RL}
+
+\paragraph{Gap.} The paper identifies the shared conflict subspace theoretically but relies on manual proxy diagnostics ($A \times M \times C$ scoring) and post-hoc analysis. No automated method exists to detect the conflict subspace \emph{during training} and prevent interference proactively. The rollback experiment requires access to a reference checkpoint (the pre-interference state), which is not always available.
+
+\paragraph{Approach.} Develop an online conflict subspace estimator that runs alongside multi-domain RL training:
+\begin{enumerate}
+\item Maintain a running low-rank approximation of each domain's Hessian restricted to shared active routes, using Kronecker-factored or sketched estimates (K-FAC, AdaHessian) applied only to top-active neurons per domain.
+\item At each training step, project the incoming domain gradient onto the estimated conflict subspace of other domains and measure the projected second-order sensitivity $S_A^{(2)}(\theta; P_S g_B)$.
+\item When projected sensitivity exceeds a threshold, apply gradient projection: remove the harmful component before the parameter update, similar to gradient surgery but operating on the Hessian-informed conflict subspace rather than raw gradient directions.
+\item Validate by comparing with the paper's sequential+refresh baseline: the proactive approach should achieve comparable or better overall scores without requiring post-hoc refresh.
+\end{enumerate}
+This connects to Geometry Conflict's~\cite{geometry2026} gradient orthogonality analysis by extending it from first-order to second-order geometric structure.
+
+\paragraph{Feasibility.} Medium. Low-rank Hessian estimation (K-FAC) is well-established and can be restricted to a small subset of active neurons, keeping overhead manageable. The gradient projection step is cheap once the subspace is identified. Main challenge is maintaining accurate Hessian estimates as the model evolves during training---the conflict subspace itself may shift.
+
+\subsection{Direction 2: Route-Aware LoRA for Multi-Domain Continual RL}
+
+\paragraph{Gap.} The paper shows that domains edit different neurons but interfere through shared active routes. LoRA adapters, by operating in a low-rank subspace of the full parameter space, naturally constrain the space of possible updates. However, standard LoRA placement is architecture-uniform (same rank everywhere), ignoring the route-level structure that determines interference. No method exists to allocate LoRA capacity based on route overlap and conflict subspace geometry.
+
+\paragraph{Approach.} Design a route-aware LoRA allocation strategy for multi-domain RL:
+\begin{enumerate}
+\item Profile active-route overlap between domains using the paper's activation-based neuron scoring. Identify layers and modules where domains share routes versus where they are independent.
+\item For shared-route modules (high Jaccard overlap), use \emph{domain-specific} LoRA adapters with orthogonality constraints between their subspaces, preventing one domain's update from projecting onto another's conflict subspace.
+\item For independent-route modules (low overlap), use \emph{shared} LoRA adapters with higher rank, since interference risk is minimal.
+\item During RL training, enforce the orthogonality constraint via a regularization term: $\mathcal{L}_{\mathrm{orth}} = \sum_{(A,B)} \|B_A^\top B_B\|_F^2$ where $B_A, B_B$ are LoRA matrices for different domains.
+\end{enumerate}
+This bridges the PEFT scaling framework~\cite{mindlab2026peft} (where rank defines operating regimes) with the perturbation theory (where route geometry determines interference), and connects to the LoRA memory capacity law~\cite{xu2026lora} by partitioning limited capacity between domain-specific and shared components.
+
+\paragraph{Feasibility.} High. LoRA with orthogonality regularization has been explored in multi-task SFT; the novel contribution is informing the allocation by empirically measured route overlap. The activation profiling is cheap (one forward pass per domain) and needs only periodic updates.
+
+\subsection{Direction 3: Extending Perturbation Theory to On-Policy Distillation Interference}
+
+\paragraph{Gap.} The paper notes that ``similar training dynamics may arise in on-policy distillation'' but does not study this. Our prior reviews of ESR~\cite{esr2026} (early stopping rollout) and Learning to Foresee~\cite{foresee2026} (on-policy distillation efficiency) identified that teacher-student distribution mismatch causes off-policy degradation. The perturbation theory framework could explain a parallel phenomenon: when distilling from multiple teachers (e.g., specialist models for different tasks), later-teacher distillation may cause localized second-order damage to earlier-teacher knowledge through the same shared-route mechanism.
+
+\paragraph{Approach.}
+\begin{enumerate}
+\item Formalize multi-teacher on-policy distillation as a sequential domain problem: each teacher defines a ``domain'' with its own loss landscape, and the student accumulates updates across teachers.
+\item Adapt the local perturbation theory: replace the RL reward signal with the KL divergence to each teacher, and characterize the Hessian of the student's distillation loss under each teacher.
+\item Predict which teacher's knowledge is most vulnerable to interference based on active-route overlap between teacher distributions.
+\item Design a teacher-scheduling strategy analogous to targeted refresh: after sequential distillation from all teachers, apply short targeted distillation passes on degraded teachers, guided by the conflict subspace diagnostic.
+\item Connect to ESR's~\cite{esr2026} early stopping insight: the Off-Policy Teacher Decay phenomenon may be a special case of the interference theory where the ``interfering domain'' is the student's own evolving policy.
+\end{enumerate}
+
+\paragraph{Feasibility.} Medium-high. The theoretical extension is direct---the perturbation framework applies to any loss landscape, not just RL rewards. Experimental validation requires a multi-teacher distillation setup with domain-specialized teachers, which is straightforward to construct.
+
+\section{Conclusion}
+
+Yang et al.\ establish that cross-domain interference in multi-domain RL is a localized, second-order geometric effect concentrated in a low-dimensional shared conflict subspace, invisible to standard gradient cosine diagnostics. The formal framework---second-order local damage (Proposition~1), low-dimensional conflict localization (Proposition~2), and exponential contraction under refresh (Theorem~1)---provides the first precise characterization of why selective degradation occurs and how short targeted refresh recovers it. The practical implication is immediate: sequential training + targeted refresh outperforms both joint training and CGPO while requiring minimal additional computation. For our research program, this paper fills a critical theoretical gap between the empirical observations of Geometry Conflict (gradient direction analysis) and the practical constraints of PEFT scaling (LoRA under RL), establishing that interference management must operate at the route-curvature level rather than the parameter or gradient level.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{yang2026perturbation}
+L.~Yang, S.~Ding, and D.~Xiong.
+\newblock A local perturbation theory for cross-domain interference and recovery in multi-domain {RL}.
+\newblock \emph{arXiv preprint arXiv:2606.02398}, 2026.
+
+\bibitem{geometry2026}
+Geometry Conflict: Explaining and controlling forgetting in {LLM} continual post-training.
+\newblock \emph{arXiv preprint arXiv:2605.09608}, 2026.
+
+\bibitem{mindlab2026peft}
+Mind Lab.
+\newblock On the scaling of {PEFT}: Towards million personal models of trillion parameters.
+\newblock \emph{arXiv preprint arXiv:2606.02437}, 2026.
+
+\bibitem{dvao2026}
+DVAO: Dynamic variance-adaptive advantage optimization for multi-reward reinforcement learning.
+\newblock \emph{arXiv preprint arXiv:2605.25604}, 2026.
+
+\bibitem{xu2026lora}
+Z.~Xu et~al.
+\newblock How {LoRA} remembers? {A} parametric memory law for {LLM} finetuning.
+\newblock \emph{arXiv preprint arXiv:2605.30260}, 2026.
+
+\bibitem{esr2026}
+Less is More: Early stopping rollout for on-policy distillation.
+\newblock \emph{arXiv preprint arXiv:2605.27028}, 2026.
+
+\bibitem{foresee2026}
+Learning to Foresee: Unveiling the unlocking efficiency of on-policy distillation.
+\newblock \emph{arXiv preprint arXiv:2605.11739}, 2026.
+
+\end{thebibliography}
+
+\end{document}
