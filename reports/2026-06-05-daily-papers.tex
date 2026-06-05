@@ -1,0 +1,172 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Filter, Then Reweight\\Rethinking Optimization Granularity in On-Policy Distillation}
+\author{Internbot --- Automated Research Summary}
+\date{June 5, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Standard on-policy distillation (OPD) applies uniform, full-trajectory KL supervision across all student-generated rollouts and all token positions. Li et al.~\cite{li2026fire} identify two fundamental limitations: (1)~\textbf{granularity isolation}---existing improvements operate at either the trajectory level \emph{or} the token level, never jointly exploiting both; and (2)~\textbf{hard selection strategies}---most token-level methods use binary keep-or-discard decisions, inducing non-smooth optimization and permanently discarding useful supervision. The key insight is that not all trajectories carry reliable teacher supervision (some follow reasoning paths alien to the teacher), and not all token positions are equally informative (some represent genuine learning bottlenecks while others are trivially known by both models).
+
+\subsection{Method}
+
+FiRe-OPD (Filter, then Reweight) operates at two granularity levels with distinct, granularity-appropriate strategies.
+
+\paragraph{Stage 1: Trajectory-Level Hard Filtering.}
+Each student-generated rollout $y = (y_1, \ldots, y_T)$ is scored by the teacher's normalized log-probability:
+\begin{equation}
+s(y) = \frac{1}{T}\sum_{t=1}^{T} \log \pi_T(y_t \mid x, y_{<t})
+\end{equation}
+This measures distributional alignment---how ``in-distribution'' the student's reasoning path is for the teacher. The bottom $p$\% of trajectories (default $p{=}20$) are discarded entirely. The rationale is that trajectories outside the teacher's competence region provide fundamentally unreliable token-level supervision, and even down-weighted gradients from such paths accumulate noise.
+
+\paragraph{Stage 2: Token-Level Soft Reweighting.}
+Within retained trajectories, each token position receives a continuous weight combining two complementary signals:
+\begin{itemize}
+\item \textbf{Teacher confidence:} $c_t^T = 1 - H(\pi_T(\cdot \mid x, y_{<t})) / \max_{t' \in B} H(\pi_T(\cdot \mid x, y_{<t'}))$
+\item \textbf{Student confusion:} $c_t^S = H(\pi_\theta(\cdot \mid x, y_{<t})) / \max_{t' \in B} H(\pi_\theta(\cdot \mid x, y_{<t'}))$
+\end{itemize}
+The combined weight $w_t = (1 + \alpha \cdot c_t^T)(1 + \beta \cdot c_t^S)$ with $\alpha{=}\beta{=}1.0$ ensures both conditions must hold for high weight: the teacher must be confident (reliable guidance) \emph{and} the student must be confused (genuine learning need). Weights are normalized within each trajectory to preserve gradient scale:
+\begin{equation}
+\tilde{a}_t = \frac{w_t}{(1/T)\sum_{t'} w_{t'}} \cdot a_t
+\end{equation}
+where $a_t = \log \pi_T(y_t \mid x, y_{<t}) - \log \pi_{\theta_{\mathrm{old}}}(y_t \mid x, y_{<t})$ is the standard OPD advantage. The final loss uses PPO-style clipping with these reweighted advantages.
+
+\paragraph{Design Principle.}
+The central finding is that \textbf{optimal selection strategy differs by granularity level}: hard filtering is best for trajectories (categorical: within or outside teacher competence) while soft weighting is best for tokens (continuous: informativeness exists on a spectrum). This ``Hard trajectory + Soft token'' combination (60.83\% avg) outperforms Hard+Hard (58.23\%), Soft+Soft (58.68\%), and Soft+Hard (58.55\%).
+
+\subsection{Results}
+
+Experiments span three distillation settings on Qwen3-series models with math reasoning and code generation benchmarks.
+
+\paragraph{Strong-to-Weak (30B teacher $\to$ 4B student):}
+\begin{itemize}
+\item FiRe-OPD: \textbf{60.83\%} avg vs.\ OPD: 58.70\%, ExOPD: 60.16\%, TIP: 59.86\%
+\item AIME24: +6.25 over OPD; AIME25: +4.17 over OPD
+\end{itemize}
+
+\paragraph{Multi-Teacher (domain-specialized teachers $\to$ 4B student):}
+\begin{itemize}
+\item \textbf{+18.81 on MinervaMATH} vs.\ OPD (67.34 vs.\ 48.53)
+\item \textbf{+9.77 on HumanEval+} vs.\ OPD (92.70 vs.\ 82.93)
+\item Student surpasses both teachers on HumanEval+ (92.70 vs.\ 79.90), demonstrating knowledge integration beyond imitation
+\end{itemize}
+
+\paragraph{Ablation Insights.}
+Student confusion is the dominant token-level signal ($-1.30$ avg when removed), followed by teacher confidence ($-1.51$) and trajectory filtering ($-1.84$). Case study reveals weights concentrate on \emph{reasoning transition tokens} (``Therefore,'' ``implies,'' ``So'')---positions where the teacher confidently knows the next direction but the student remains uncertain. The distillation bottleneck is reasoning strategy selection, not computational execution.
+
+\subsection{Limitations}
+
+\begin{enumerate}
+\item \textbf{No prefix-awareness:} Tokens are weighted independently; erroneous prefixes degrading downstream teacher supervision are not modeled (only handled coarsely at trajectory level).
+\item \textbf{No intermediate granularities:} Step-level or segment-level weighting aligned with chain-of-thought structure is unexplored.
+\item \textbf{Fixed filtering threshold:} $p{=}20\%$ is static throughout training. Optimal filtering likely changes as the student improves and trajectory quality distributions shift.
+\item \textbf{Limited domains:} Only math reasoning and code generation tested. Open-ended generation where teacher calibration differs may require different design choices.
+\item \textbf{Single student scale (4B):} Scaling behavior of optimal granularity design to 14B/70B+ is unknown.
+\end{enumerate}
+
+\subsection{Relevance to Our Research}
+
+FiRe-OPD directly extends our extensive on-policy distillation research thread. The trajectory-level filtering addresses the Off-Policy Teacher Decay identified in ESR~\cite{esr2026}: when student trajectories diverge from teacher competence, supervision quality degrades---FiRe-OPD handles this by removing such trajectories entirely, while ESR handles it by truncating rollouts and letting the student complete them. The token-level reweighting connects to Learning to Foresee~\cite{foresee2026}, which showed that on-policy distillation efficiency depends on which tokens carry the learning signal. The multi-teacher results extend Co-Evolving Policy Distillation~\cite{coevol2026} by demonstrating that filtering is especially critical when integrating heterogeneous teachers, where distributional misalignment is most severe. The finding that reasoning transition tokens carry the distillation bottleneck provides mechanistic insight complementing DelTA's~\cite{delta2026} discriminative token credit assignment for RLVR.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Prefix-Aware Cascading Weight Propagation}
+
+\paragraph{Gap.} FiRe-OPD weights each token independently based on local teacher/student entropy, ignoring how errors cascade through autoregressive generation. If the student commits an error at position $t_0$, all subsequent positions $t > t_0$ are conditioned on incorrect context, potentially making the teacher's supervision unreliable regardless of local confidence scores. The trajectory-level filter handles this coarsely (removing entire trajectories), but the token-level weighting misses within-trajectory cascades.
+
+\paragraph{Approach.} Design a cascading weight propagation mechanism:
+\begin{enumerate}
+\item At each token position, compute the teacher-student agreement score $d_t = ||\pi_T(\cdot \mid y_{<t}) - \pi_\theta(\cdot \mid y_{<t})||_1$.
+\item When $d_t$ exceeds a threshold (indicating the student has diverged), apply exponential decay to all subsequent token weights: $w_{t'} \leftarrow w_{t'} \cdot \exp(-\lambda(t' - t))$ for $t' > t$, analogous to ESR's~\cite{esr2026} early stopping but implemented as soft decay rather than hard truncation.
+\item The decay rate $\lambda$ can be learned or set based on the teacher's uncertainty about the divergent prefix, connecting to the phase transition threshold ($L_{\mathrm{crit}} = \ln 2$) from the LoRA memory law~\cite{xu2026lora}.
+\item This creates a three-level hierarchy: hard trajectory filtering $\to$ cascading prefix-aware decay $\to$ soft token reweighting, operating at progressively finer granularity.
+\end{enumerate}
+This unifies ESR's truncation insight with FiRe-OPD's soft weighting in a single framework.
+
+\paragraph{Feasibility.} High. The teacher-student divergence $d_t$ is already computed for the advantage calculation. The exponential decay is trivial to implement. Main question is calibrating the divergence threshold and decay rate $\lambda$ across different teacher-student pairs.
+
+\subsection{Direction 2: Adaptive Filtering with Curriculum-Aware Schedule}
+
+\paragraph{Gap.} FiRe-OPD uses a fixed filtering percentile $p{=}20\%$ throughout training. As training progresses, the student improves and the distribution of trajectory quality shifts: early in training, many trajectories diverge from the teacher (requiring aggressive filtering), while late in training, most trajectories are well-aligned (requiring less filtering or even none). A fixed threshold is necessarily suboptimal across the full training trajectory.
+
+\paragraph{Approach.} Design an adaptive filtering schedule:
+\begin{enumerate}
+\item Track the distribution of trajectory teacher log-probabilities $s(y)$ across training steps. As the student improves, this distribution shifts rightward (higher alignment).
+\item Define the filtering threshold adaptively based on the distribution's statistics: $p(t) = p_0 \cdot (1 - \rho(t))$ where $\rho(t)$ measures the fraction of trajectories above a fixed quality threshold, decaying the filtering rate as quality improves.
+\item Alternatively, connect to the cross-domain interference theory~\cite{yang2026perturbation}: when the student's policy shift between consecutive checkpoints projects onto the conflict subspace (measured by second-order sensitivity), increase filtering aggressively to prevent interference accumulation.
+\item For multi-teacher settings, maintain per-teacher filtering schedules: a teacher whose domain expertise is being rapidly absorbed should have its filtering rate reduced, while a teacher whose domain is being forgotten should have filtering increased.
+\end{enumerate}
+This creates a feedback loop between training dynamics and supervision quality control.
+
+\paragraph{Feasibility.} High. Tracking trajectory quality distributions and adjusting the percentile threshold is computationally negligible. The per-teacher schedule for multi-teacher settings requires only per-teacher log-probability tracking. The main challenge is preventing oscillation between aggressive and lenient filtering.
+
+\subsection{Direction 3: Granularity-Optimal Distillation Theory}
+
+\paragraph{Gap.} FiRe-OPD empirically discovers that hard filtering is optimal for trajectories while soft weighting is optimal for tokens, but provides no formal theory explaining \emph{why} this asymmetry exists. Under what conditions does hard selection outperform soft weighting, and vice versa? The answer would enable principled granularity design for new distillation settings without exhaustive ablation.
+
+\paragraph{Approach.} Formalize the granularity-strategy interaction through a bias-variance decomposition:
+\begin{enumerate}
+\item Model the OPD gradient estimator as $\hat{g} = \sum_i \sum_t w_{i,t} \cdot g_{i,t}$ where $i$ indexes trajectories and $t$ indexes tokens, with $g_{i,t}$ being the per-token gradient contribution.
+\item Decompose the estimator's MSE into bias (from including low-quality signals) and variance (from weight randomness).
+\item For trajectory-level noise: show that low-quality trajectories introduce \emph{correlated} bias across all their tokens (a systematic directional error), making hard removal optimal because soft down-weighting preserves this correlated bias structure.
+\item For token-level noise: show that uninformative tokens introduce \emph{independent} variance across positions, making soft continuous weighting optimal because it preserves the smoothness of the optimization landscape while reducing per-token variance.
+\item Derive the crossover condition: the critical correlation threshold $\rho^*$ above which hard selection dominates soft weighting, parameterized by signal-to-noise ratio and sample size.
+\end{enumerate}
+This theory would unify the observation with the perturbation theory framework~\cite{yang2026perturbation} (where correlated curvature along shared routes produces trajectory-level interference) and provide design guidelines for new granularity levels (step-level, paragraph-level).
+
+\paragraph{Feasibility.} Medium. The bias-variance framework is well-established in statistics; the novel contribution is applying it to the multi-granularity distillation setting with correlated vs.\ independent noise. A simplified version with Gaussian gradient assumptions is immediately tractable; extending to the actual policy gradient estimator requires careful treatment of importance sampling ratios.
+
+\section{Conclusion}
+
+FiRe-OPD establishes a principled framework for multi-granularity optimization in on-policy distillation, demonstrating that the optimal selection strategy is granularity-dependent: hard filtering for trajectories (removing unreliable supervision paths) and soft continuous weighting for tokens (redistributing learning effort toward reasoning bottlenecks). The multiplicative combination of teacher confidence and student confusion at the token level automatically identifies reasoning transition tokens as the primary distillation bottleneck. For our on-policy distillation research thread, FiRe-OPD provides the missing ``supervision quality control'' layer that complements ESR's rollout truncation (addressing distribution mismatch from the generation side) and DelTA's credit assignment (addressing reward attribution from the RL side), together forming a comprehensive framework for efficient and selective post-training.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{li2026fire}
+Y.~Li, L.~Zheng, Y.~Yu, W.~Zhou, X.~Zhong, X.~Hu, J.~Jin, H.~Yuan, and T.~Feng.
+\newblock Filter, then reweight: Rethinking optimization granularity in on-policy distillation.
+\newblock \emph{arXiv preprint arXiv:2606.02684}, 2026.
+
+\bibitem{esr2026}
+Less is More: Early stopping rollout for on-policy distillation.
+\newblock \emph{arXiv preprint arXiv:2605.27028}, 2026.
+
+\bibitem{foresee2026}
+Learning to Foresee: Unveiling the unlocking efficiency of on-policy distillation.
+\newblock \emph{arXiv preprint arXiv:2605.11739}, 2026.
+
+\bibitem{coevol2026}
+Co-Evolving Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2604.27083}, 2026.
+
+\bibitem{delta2026}
+DelTA: Discriminative token credit assignment for reinforcement learning from verifiable rewards.
+\newblock \emph{arXiv preprint arXiv:2605.21467}, 2026.
+
+\bibitem{xu2026lora}
+Z.~Xu et~al.
+\newblock How {LoRA} remembers? {A} parametric memory law for {LLM} finetuning.
+\newblock \emph{arXiv preprint arXiv:2605.30260}, 2026.
+
+\bibitem{yang2026perturbation}
+L.~Yang, S.~Ding, and D.~Xiong.
+\newblock A local perturbation theory for cross-domain interference and recovery in multi-domain {RL}.
+\newblock \emph{arXiv preprint arXiv:2606.02398}, 2026.
+
+\end{thebibliography}
+
+\end{document}
