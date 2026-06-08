@@ -1,0 +1,172 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Rethinking Continual Experience Internalization\\for Self-Evolving LLM Agents}
+\author{Internbot --- Automated Research Summary}
+\date{June 6, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Chen et al.~\cite{chen2026rethinking} address a fundamental challenge in self-evolving LLM agents: how to iteratively convert contextual experience (natural-language summaries of past successes/failures) into parametric capability---baking knowledge directly into model weights so the agent no longer requires explicit retrieval at inference time. The iterative process $\theta^{(k+1)} = \mathrm{Internalize}(\theta^{(k)}, E^{(k)})$ should yield compounding improvement, but the authors demonstrate that standard approaches exhibit \emph{progressive capability collapse}---performance \emph{degrades} after the first iteration rather than improving. Unlike traditional catastrophic forgetting (losing old task capability), this is a distinct phenomenon where the model loses its ability to \emph{use} experience effectively, manifesting as pathological trajectory inflation (2.5 turns $\to$ 21.9 turns) and premature answering (63.82\% failure rate).
+
+The paper challenges three implicit assumptions: (1)~more iterations always compound improvement; (2)~instance-level experience (specific URLs, numbers) is most informative; and (3)~on-policy context distillation is superior because it addresses train-inference mismatch. All three are shown to be false for iterative self-evolution.
+
+\subsection{Method}
+
+The paper provides a systematic three-dimensional taxonomy for experience internalization design:
+
+\paragraph{Dimension 1: Experience Granularity.}
+\begin{itemize}
+\item \textbf{Instance-level:} Specific trajectory details (74.4\% contain URLs, 57.3\% concrete numbers, 93.9\% query-specific strings). Provides transient single-iteration gains but becomes noise as the policy shifts.
+\item \textbf{Principle-level:} Abstract reusable strategies (84.0\% contain strategy statements). Remains valid across policy distribution shifts because it encodes \emph{how to reason} rather than \emph{what specific answer to retrieve}.
+\end{itemize}
+
+\paragraph{Dimension 2: Injection Pattern.}
+\begin{itemize}
+\item \textbf{Global:} Prepend all experience to the prompt. Causes 63.82\% premature-answer rate---the model skips tool usage and immediately outputs answers.
+\item \textbf{Step-wise:} A selector $R_\phi$ dynamically retrieves relevant experience at each reasoning step, state-aligned to the current decision point. Yields 0\% premature answering.
+\end{itemize}
+
+\paragraph{Dimension 3: Internalization Regime.}
+\begin{itemize}
+\item \textbf{On-policy context distillation:} Train on student-generated trajectories with teacher corrections ($\mathcal{L}_{\mathrm{on}} = \mathbb{E}_{H \sim \pi_\theta}\sum_t D_{\mathrm{KL}}(q_t \| p_t)$). Supervision is purely reactive to already-flawed states; trajectory inflation makes training increasingly expensive.
+\item \textbf{Off-policy context distillation:} Train on teacher-generated coherent trajectories ($\mathcal{L}_{\mathrm{off}} = \mathbb{E}_{H \sim \pi_T}\sum_t D_{\mathrm{KL}}(p_t \| q_t)$). The teacher (model augmented with experience as context) generates high-quality trajectories via rejection sampling; the student learns to replicate teacher behavior without the experience context.
+\end{itemize}
+
+\paragraph{The Winning Recipe.} Principle-level experience + step-wise injection + off-policy distillation yields stable improvement across 3 iterations without traditional continual learning machinery (no EWC, no replay buffers).
+
+\subsection{Results}
+
+Experiments on Qwen3-4B/8B with web-reasoning QA tasks (WebWalkerQA, GAIA, BrowseComp-ZH):
+
+\paragraph{Stable Self-Evolution (Best Recipe, Qwen3-4B):}
+\begin{itemize}
+\item Iter 1: WebWalkerQA 30.6\%, GAIA 29.8\%
+\item Iter 2: WebWalkerQA 30.7\%, GAIA 30.1\%
+\item Iter 3: WebWalkerQA \textbf{33.1\%}, GAIA \textbf{33.3\%}
+\item Sustained improvement---no collapse.
+\end{itemize}
+
+\paragraph{Progressive Collapse (Global + Off-policy):}
+\begin{itemize}
+\item Iter 1: WebWalkerQA 25.9\%, GAIA 25.9\%
+\item Iter 3: WebWalkerQA \textbf{12.8\%}, GAIA \textbf{13.6\%} --- below baseline, complete collapse.
+\end{itemize}
+
+\paragraph{Key Diagnostic Results:}
+\begin{itemize}
+\item Premature-answer rate: Global 63.82\% vs.\ Step-wise 0\%
+\item Trajectory inflation (on-policy): base 2.5 turns $\to$ teacher 4.5 turns $\to$ updated student 21.9 turns
+\item Step-wise injection preserves the ``experience-use gap'' (delta between context-aware and context-free performance) across iterations; global injection erodes it
+\item Self-generated teacher (Qwen3-4B as own teacher) also maintains stability: GAIA 22.7\% $\to$ 24.0\% $\to$ 24.6\%
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+\item \textbf{Domain scope:} Only web-reasoning/QA tasks tested. Code generation, embodied navigation, and open-ended tasks are unexplored.
+\item \textbf{Iteration depth:} Only 3 iterations shown. Long-horizon stability (10+ iterations) is unknown.
+\item \textbf{Scale:} Only 4B and 8B models tested; behavior at 70B+ is unknown.
+\item \textbf{Experience pool dynamics:} Pool size, redundancy, and saturation effects are not analyzed.
+\item \textbf{Safety:} Self-evolution loops could amplify biased or unsafe patterns without oversight.
+\item \textbf{Selector dependency:} Step-wise selection uses a frozen DeepSeek-V4; no jointly-trained lightweight selector is explored.
+\end{enumerate}
+
+\subsection{Relevance to Our Research}
+
+This paper is central to our continual learning research (Topic~3). The key insight---that iterative internalization fails not due to traditional forgetting but due to \emph{progressive capability collapse}---identifies a distinct failure mode that EWC-style regularization cannot address. The finding that principle-level abstraction enables distribution-shift robustness connects directly to SkillOpt~\cite{skillopt2026}, where bounded textual skill updates face similar distributional drift challenges. The step-wise injection pattern parallels Memanto's~\cite{memanto2026} typed semantic memory retrieval: both systems dynamically select relevant knowledge at each decision step rather than injecting everything globally. The on-policy failure (trajectory inflation and premature answering) extends FiRe-OPD's~\cite{fire2026} finding that not all student-generated trajectories deserve training signal---here the problem is even worse because the supervision itself (teacher corrections on bad states) becomes unreliable. The recipe of off-policy coherent trajectories connects to the cross-domain interference theory~\cite{yang2026perturbation}: using clean teacher trajectories avoids the second-order damage from training on degraded student states.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Capacity-Bounded Continual Internalization with Selective Forgetting}
+
+\paragraph{Gap.} The paper shows stable internalization across 3 iterations but does not address what happens when the parametric capacity is exhausted. The LoRA memory capacity law~\cite{xu2026lora} ($10^{-3}$ to $10^{-2}$ tokens per trainable parameter) implies hard limits on storable experience. As iterations accumulate, the model must eventually face a capacity ceiling, requiring principled decisions about what to retain and what to evict.
+
+\paragraph{Approach.} Design a capacity-aware internalization loop:
+\begin{enumerate}
+\item At each iteration, measure remaining capacity using the parametric memory law---estimate how many principle-level entries can still be internalized given current parameter utilization.
+\item When approaching capacity, invoke a \emph{selective forgetting} mechanism: identify internalized principles that are now redundant (subsumed by newer, more general principles) using the LoRA phase transition diagnostic ($L_{\mathrm{crit}} = \ln 2$) to detect which entries are near the boundary of being forgotten anyway.
+\item Implement a two-buffer system analogous to SkillOpt's~\cite{skillopt2026} rejected-edit buffer: principles pending internalization compete with already-internalized principles for limited parametric capacity, with a validation-gated promotion/eviction policy.
+\item Track internalization depth across iterations: do early-iteration principles remain stably encoded at iteration 10, or do they degrade? This directly extends the 3-iteration analysis to long-horizon stability.
+\end{enumerate}
+
+\paragraph{Feasibility.} High. The capacity monitoring requires only periodic loss evaluation on internalized principles (cheap). The selective forgetting mechanism reuses existing phase-transition diagnostics from~\cite{xu2026lora}. The two-buffer system is architecturally simple.
+
+\subsection{Direction 2: Multi-Domain Experience Internalization with Cross-Domain Interference Control}
+
+\paragraph{Gap.} The paper internalizes experience from a single domain (web-reasoning). Real-world agents must continually internalize experience from multiple domains simultaneously---web search, coding, data analysis, scheduling. The cross-domain interference theory~\cite{yang2026perturbation} predicts that internalizing experience from domain $B$ can selectively degrade previously internalized experience from domain $A$ through shared active-route curvature effects.
+
+\paragraph{Approach.} Extend the internalization framework to multi-domain settings:
+\begin{enumerate}
+\item Maintain domain-specific principle pools $E_A^{(k)}, E_B^{(k)}, \ldots$ and alternate internalization across domains following the sequential+refresh strategy from~\cite{yang2026perturbation}.
+\item After each domain's internalization iteration, use the proxy rollback diagnostic (Activation $\times$ Magnitude $\times$ Conflict scoring) to detect whether other domains' internalized skills have degraded.
+\item Apply targeted refresh when cross-domain damage is detected: a short distillation pass on the damaged domain's teacher trajectories, geometrically contracting the harmful component.
+\item Study whether principle-level abstraction naturally reduces cross-domain interference compared to instance-level (hypothesis: abstract strategies share fewer route-level conflicts than specific procedural knowledge).
+\end{enumerate}
+
+\paragraph{Feasibility.} Medium-high. The diagnostic framework exists from~\cite{yang2026perturbation}; the extension requires multi-domain task environments (available: web-reasoning + code + general QA). The main challenge is defining clean domain boundaries for real-world agents whose tasks blur domain lines.
+
+\subsection{Direction 3: Jointly Learned Experience Selector for Optimal Step-Wise Injection}
+
+\paragraph{Gap.} The step-wise injection pattern is critical for stable internalization (0\% premature answering vs.\ 63.82\% with global), but the selector $R_\phi$ is a frozen DeepSeek-V4 that is never optimized for the selection task. A jointly trained selector could learn which principles are most useful at which decision states, potentially improving both the quality of training signal (for internalization) and the efficiency of the experience-augmented teacher.
+
+\paragraph{Approach.} Design a learned step-wise selector:
+\begin{enumerate}
+\item Train a lightweight selector module (a small Transformer or cross-attention layer) that takes the current agent state $(x, y_{<t})$ and candidate principles as input, outputting relevance scores.
+\item Optimize the selector end-to-end with the internalization objective: the selector should retrieve principles that \emph{maximize the improvement} from experience-augmented teaching, measured by the divergence between teacher-with-experience and teacher-without-experience predictions.
+\item Use the multiplicative weighting insight from FiRe-OPD~\cite{fire2026}: weight retrieved principles by both their relevance to the current state (selector confidence) and the student's confusion at that state (student entropy), focusing experience injection where it has maximal learning impact.
+\item Study whether the learned selector can identify when the experience pool has saturated---when no available principle improves teaching at a given state, the selector should output empty retrieval, signaling that the pool needs expansion.
+\end{enumerate}
+
+\paragraph{Feasibility.} Medium. A cross-attention selector is lightweight and trainable via standard gradient descent. The end-to-end optimization through the teacher's predictions requires differentiable retrieval (soft attention over the principle pool). Main challenge is avoiding the selector collapsing to always retrieving the same ``safe'' generic principles rather than state-specific ones.
+
+\section{Conclusion}
+
+Chen et al.\ identify progressive capability collapse as the primary failure mode of iterative experience internalization for self-evolving agents---distinct from traditional catastrophic forgetting. The three-dimensional design taxonomy (granularity $\times$ injection $\times$ regime) isolates the recipe for stable self-evolution: principle-level abstraction removes distribution-shift-sensitive details, step-wise injection prevents premature answering and preserves experience-use ability, and off-policy distillation provides coherent supervision without trajectory inflation. For our research program, this provides the agent-level complement to our parameter-level continual learning analyses: where Geometry Conflict and the perturbation theory explain \emph{why} weight-space interference occurs, this paper explains \emph{how to structure the experience signal} so that iterative weight updates accumulate capability rather than accumulating noise.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{chen2026rethinking}
+J.~Chen, W.~Yang, S.~Fan, W.~Nie, C.~Sun, S.~Zheng, Y.~Hu, L.~Pan, K.~Zeng, and Y.~Lin.
+\newblock Rethinking continual experience internalization for self-evolving {LLM} agents.
+\newblock \emph{arXiv preprint arXiv:2606.04703}, 2026.
+
+\bibitem{skillopt2026}
+SkillOpt: Executive strategy for self-evolving agent skills.
+\newblock \emph{arXiv preprint arXiv:2605.23904}, 2026.
+
+\bibitem{memanto2026}
+Memanto: Typed semantic memory with information-theoretic retrieval for long-horizon agents.
+\newblock \emph{arXiv preprint arXiv:2604.22085}, 2026.
+
+\bibitem{fire2026}
+Y.~Li et~al.
+\newblock Filter, then reweight: Rethinking optimization granularity in on-policy distillation.
+\newblock \emph{arXiv preprint arXiv:2606.02684}, 2026.
+
+\bibitem{yang2026perturbation}
+L.~Yang, S.~Ding, and D.~Xiong.
+\newblock A local perturbation theory for cross-domain interference and recovery in multi-domain {RL}.
+\newblock \emph{arXiv preprint arXiv:2606.02398}, 2026.
+
+\bibitem{xu2026lora}
+Z.~Xu et~al.
+\newblock How {LoRA} remembers? {A} parametric memory law for {LLM} finetuning.
+\newblock \emph{arXiv preprint arXiv:2605.30260}, 2026.
+
+\end{thebibliography}
+
+\end{document}
