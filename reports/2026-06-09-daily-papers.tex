@@ -1,0 +1,173 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Data-Efficient Autoregressive-to-Diffusion\\Language Models via On-Policy Distillation}
+\author{Internbot --- Automated Research Summary}
+\date{June 9, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Diffusion language models (DLMs) offer inference-time parallelism through multi-token decoding, but pretraining from scratch requires trillions of tokens (LLaDA-8B: 1,500B tokens). Converting pretrained autoregressive LMs (ARLMs) to DLMs by switching to bidirectional attention and a diffusion objective is more practical, but prior methods still require 1--580B tokens. Su et al.~\cite{su2026opdlm} identify two distribution shifts causing this inefficiency: (1)~a \emph{knowledge-retention mismatch} where switching from next-token prediction to masked-token prediction weakens acquired knowledge, and (2)~a \emph{training-inference mismatch} where DLMs train on uniformly randomly masked states but decode via confidence-guided unmasking. The paper asks whether both shifts can be resolved simultaneously, enabling AR-to-DLM conversion as a lightweight post-training step analogous to instruction tuning.
+
+\subsection{Method}
+
+\paragraph{OPDLM: On-Policy Diffusion Language Model.}
+The core idea is \emph{self on-policy distillation}: the student DLM generates its own reverse diffusion trajectories, and the frozen original ARLM (same size, same weights) serves as teacher providing soft target logits. Teacher and student differ only in attention structure---causal vs.\ block-wise causal.
+
+\paragraph{Architecture.} OPDLM adopts Block Diffusion (BD3LM): absorbing-state masked diffusion within contiguous blocks with causal attention across blocks. Base models are Qwen3 (0.6B--8B), initialized from AR checkpoints with attention masks changed to block-wise causal.
+
+\paragraph{Generalized Trajectory Objective.} The unified framework (Eq.~4) parameterizes three choices:
+\begin{itemize}
+\item \textbf{Trajectory distribution $\Gamma$}: forward random masking (off-policy) vs.\ reverse decoding trajectories (on-policy).
+\item \textbf{Target distribution $\phi$}: hard ground-truth labels vs.\ soft ARLM teacher logits.
+\item \textbf{Time weight $w(t)$}: standard $1/t$ vs.\ uniform $w(t)=1$.
+\end{itemize}
+OPDLM selects: on-policy trajectories, soft ARLM teacher targets, and uniform weighting. The loss is forward KL divergence:
+\begin{equation}
+\mathcal{L}_{\mathrm{OPDLM}}(\theta) = \mathbb{E}_{\tau \sim \Gamma_\theta^{\mathrm{rev}}} \sum_b \sum_{i \in M(x_t^b)} D_{\mathrm{KL}}\!\left(p_{\mathrm{ARLM}}(\cdot \mid x_0^{<b}, x_0^{b,<i}) \;\|\; p_\theta^{b,i}(\cdot \mid x_0^{<b}, x_t^b)\right)
+\end{equation}
+where $x_0$ is the terminal (fully unmasked) sequence from the student's own rollout, and the teacher conditions on its causal decomposition.
+
+\paragraph{Resolving Both Distribution Shifts.}
+On-policy training eliminates the training-inference mismatch (the model trains on states matching inference). Distillation from the frozen ARLM preserves knowledge from the original model through soft distributional supervision rather than hard labels.
+
+\paragraph{Rollout-Length Curriculum.}
+Early rollouts are short ($L_{\min} = 100$ tokens), linearly increasing to $L_{\max} = 4000$ over warmup steps. This prevents early-training instability from long incoherent rollouts.
+
+\subsection{Results}
+
+\paragraph{Extreme Data Efficiency.} OPDLM-8B uses only \textbf{66M tokens} (62K prompts, 1 epoch) vs.\ LLaDA's 1,500B---a \textbf{22,727$\times$} token reduction and 17,143$\times$ FLOP reduction ($4.2 \times 10^{18}$ vs.\ $7.2 \times 10^{22}$).
+
+\paragraph{General-Purpose Performance (OPDLM-8B, 66M tokens):}
+\begin{itemize}
+\item MMLU: 70.9, MMLU-Pro: 53.7, CEval: 73.3 (no Chinese training data---pure knowledge retention)
+\item MATH-500: 71.2 vs.\ LLaDA 26.6 / Dream 39.2 (+32--45 points)
+\item AIME-24: 14.7 vs.\ LLaDA 2.1 / Dream 0.0 / SDAR 10.0
+\item GSM8K: 87.1, competitive with SDAR (91.3) using 833$\times$ fewer tokens
+\end{itemize}
+
+\paragraph{Math-Specialized with Thinking (OPDLM-MATH-8B-Thinking):}
+\begin{itemize}
+\item AIME-24: \textbf{50.0\%}---surpassing TraDo-8B-Thinking (35.5\%, RL-based) on only 8K training problems
+\item MATH-500: \textbf{92.4\%}, GSM8K: 93.8\%
+\end{itemize}
+
+\paragraph{Dynamic Decoding Robustness.} OPDLM shows minimal accuracy degradation under dynamic (multi-token) decoding: $-1.2$ on MATH-500 vs.\ SFT's $-4.2$. This directly validates that on-policy training produces models robust to their actual inference states.
+
+\paragraph{Zero-Shot Transfer.} Without any thinking-mode training data, prompting OPDLM-8B to think improves MATH-500 from 71.2 to 75.6 and AIME-25 from 12.4 to 19.4. Multilingual capabilities also transfer despite no multilingual training.
+
+\subsection{Limitations}
+
+\begin{enumerate}
+\item \textbf{Code generation gap:} HumanEval 59.8 vs.\ SDAR 82.3 at 8B, attributed to limited coding data in the 62K corpus.
+\item \textbf{Teacher size sensitivity:} Naive use of much larger teachers (32B) can hurt (AIME-24 drops from 23.3 to 10.0 for OPDLM-MATH-8B).
+\item \textbf{Block size ablation limited:} On-policy vs.\ off-policy comparison only done for block size 4.
+\item \textbf{No perplexity reporting:} Standard LM quality metric is absent.
+\item \textbf{Scale ceiling:} Only tested up to 8B; behavior at 70B+ unknown.
+\item \textbf{Thinking distillation limited to math:} Chain-of-thought OPDLM not tested on general domains.
+\end{enumerate}
+
+\subsection{Relevance to Our Research}
+
+This paper bridges two of our core research threads: diffusion LLMs (T4) and on-policy distillation (T1). The AR-to-DLM conversion via self-OPD directly extends our Turning the TIDE review~\cite{tide2026}, which studied cross-architecture distillation from AR to dLLMs but used off-policy training. OPDLM shows that on-policy training is the critical missing ingredient, reducing data requirements by orders of magnitude. The training-inference mismatch parallels FiRe-OPD's~\cite{fire2026} finding that student-generated trajectories require careful quality control---here, the rollout curriculum serves an analogous function to FiRe-OPD's trajectory filtering, stabilizing early training when student quality is poor. The dynamic decoding robustness connects to S2D2~\cite{s2d22026} (self-speculation for dLLM inference) and D$^2$-Monitor~\cite{d2monitor2026} (hesitation-aware routing): OPDLM produces models whose internal states are consistent with their decoding strategy, enabling reliable parallel token generation. The 50\% AIME-24 result for a dLLM is particularly significant---it demonstrates that diffusion models can match or exceed AR models on hard reasoning when properly initialized.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: On-Policy Distillation for Full-Sequence Diffusion LLMs}
+
+\paragraph{Gap.} OPDLM uses block diffusion with causal inter-block dependencies, preserving partial autoregressive structure. Full-sequence diffusion LLMs like LLaDA use global bidirectional attention without block structure, enabling true parallel decoding across the entire sequence. Whether on-policy distillation can achieve the same data efficiency for full-sequence architectures is unknown---the causal inter-block structure may be providing a training signal crutch that full-sequence models lack.
+
+\paragraph{Approach.}
+\begin{enumerate}
+\item Adapt OPDLM to the LLaDA architecture: replace block-wise causal attention with full bidirectional attention. The teacher remains a causal ARLM, but the student now has no causal structure whatsoever.
+\item The key challenge is constructing teacher targets: without block boundaries, there is no natural causal decomposition of the student's terminal sequence. Propose using the ARLM teacher's full left-to-right pass on $x_0$ as a sequence of conditional distributions, then matching the DLM's marginal predictions at each position to the corresponding ARLM conditional.
+\item Compare data efficiency: if full-sequence OPDLM matches block-OPDLM's 66M-token regime, this would establish on-policy distillation as architecture-agnostic. If it requires more data, characterize the gap and attribute it to specific structural differences.
+\item Evaluate parallel decoding throughput: full-sequence diffusion should achieve higher tokens/step than block diffusion since all positions can be unmasked simultaneously.
+\end{enumerate}
+This extends our Orthrus~\cite{orthrus2026} review (dual-view parallel generation) by providing a data-efficient path to full-sequence parallel decoding models.
+
+\paragraph{Feasibility.} Medium-high. The OPDLM codebase provides the self-OPD infrastructure; the main modification is the attention mask and the teacher-target construction. LLaDA's architecture is publicly available.
+
+\subsection{Direction 2: Combining OPDLM with RL for Reasoning-Optimized Diffusion LLMs}
+
+\paragraph{Gap.} OPDLM achieves 50\% on AIME-24 via thinking-mode distillation (supervised), while TraDo achieves 35.5\% via RL with verifiable rewards. These approaches are complementary: distillation provides a strong initialization but is bounded by the teacher's capability, while RL can push beyond the teacher via exploration. No method combines both for diffusion LLMs.
+
+\paragraph{Approach.}
+\begin{enumerate}
+\item Use OPDLM as the initialization stage: convert an ARLM to a DLM via self-OPD (66M tokens, lightweight).
+\item Apply RLVR (e.g., GRPO) directly to the resulting DLM, using verifiable math rewards. The DLM generates full solutions via its reverse diffusion process; correct solutions receive reward 1, incorrect receive 0.
+\item Address the unique RL challenge for DLMs: the policy gradient must propagate through the multi-step reverse diffusion trajectory, not just a single autoregressive pass. Use the V-GRPO framework~\cite{vgrpo2026} (which already handles denoising generative models under RL) adapted for discrete masked diffusion.
+\item Compare the OPDLM+RL pipeline against: (a) TraDo (RL-only, no distillation), (b) OPDLM-Thinking (distillation-only), and (c) a joint training approach where distillation and RL losses are combined.
+\item The hypothesis: OPDLM+RL should exceed both baselines because distillation provides a strong starting point in the policy space, and RL explores beyond the teacher's capability boundary.
+\end{enumerate}
+
+\paragraph{Feasibility.} Medium. V-GRPO provides the RL framework for diffusion models. The main challenge is stable RL training on the block diffusion architecture, where the policy is defined over multi-step denoising trajectories. The OPDLM initialization should help by providing a policy already well-calibrated to its own inference process.
+
+\subsection{Direction 3: Adaptive Block Size via On-Policy Confidence Monitoring}
+
+\paragraph{Gap.} OPDLM uses a fixed block size (4 tokens) throughout both training and inference. The paper acknowledges limited block-size ablation. In practice, different parts of a sequence have different parallelism potential: mathematical derivation steps may require sequential reasoning (small blocks), while boilerplate text can be generated in parallel (large blocks). No method adapts block size dynamically based on generation confidence.
+
+\paragraph{Approach.}
+\begin{enumerate}
+\item During OPDLM inference, monitor the per-token confidence scores at each denoising step. Define a ``confidence coherence'' metric: the minimum pairwise agreement among tokens within a block.
+\item When coherence is high (all tokens in the block agree), expand the block size for the next generation segment, enabling more parallel decoding.
+\item When coherence is low (tokens within the block disagree), contract the block size, falling back toward more sequential generation for difficult passages.
+\item Train the adaptive block-size policy jointly with OPDLM using a lightweight controller that maps confidence statistics to block-size decisions, optimized to maximize throughput subject to accuracy constraints.
+\item Connect to D$^2$-Monitor's~\cite{d2monitor2026} hesitation detection: ``hesitation'' (oscillating intermediate representations) signals that the current block size is too aggressive, triggering contraction.
+\end{enumerate}
+This creates a variable-throughput DLM that is fast on easy segments and careful on hard ones---the inference analog of FiRe-OPD's~\cite{fire2026} granularity-dependent optimization.
+
+\paragraph{Feasibility.} Medium. The confidence monitoring is trivial (already computed during dynamic decoding). The adaptive controller is a small learned module. The challenge is defining ``coherence'' precisely and preventing the controller from being too conservative (always choosing small blocks).
+
+\section{Conclusion}
+
+OPDLM reframes AR-to-DLM conversion from expensive continued pretraining to lightweight post-training, achieving a 22,727$\times$ token reduction over LLaDA through self on-policy distillation. The method simultaneously resolves two distribution shifts: on-policy training eliminates training-inference mismatch, while ARLM teacher distillation preserves pretrained knowledge. The 50\% AIME-24 result with thinking-mode distillation establishes that diffusion LLMs can match autoregressive models on hard reasoning when properly initialized. For our research program, OPDLM provides the missing efficiency link for diffusion LLM adoption: converting any ARLM to a parallel-decoding DLM now requires only 62K prompts and a few GPU-hours, making dLLMs practical building blocks for the inference-efficient systems our other research threads (speculative decoding, parallel generation, hesitation-aware routing) are designed to serve.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{su2026opdlm}
+X.~Su, J.~Helwig, S.~Parashar, A.~Chagi, L.~Jotsna, D.~Zhi, J.~Caverlee, D.~Kalathil, and S.~Ji.
+\newblock Data-efficient autoregressive-to-diffusion language models via on-policy distillation.
+\newblock \emph{arXiv preprint arXiv:2606.06712}, 2026.
+
+\bibitem{tide2026}
+Turning the {TIDE}: Cross-architecture distillation for diffusion large language models.
+\newblock \emph{arXiv preprint arXiv:2604.26951}, 2026.
+
+\bibitem{fire2026}
+Y.~Li et~al.
+\newblock Filter, then reweight: Rethinking optimization granularity in on-policy distillation.
+\newblock \emph{arXiv preprint arXiv:2606.02684}, 2026.
+
+\bibitem{s2d22026}
+S2D2: Fast decoding for diffusion {LLMs} via training-free self-speculation.
+\newblock \emph{arXiv preprint arXiv:2603.25702}, 2026.
+
+\bibitem{d2monitor2026}
+D$^2$-Monitor: Dynamic safety monitoring for diffusion {LLMs} via hesitation-aware routing.
+\newblock \emph{arXiv preprint arXiv:2605.25893}, 2026.
+
+\bibitem{orthrus2026}
+Orthrus: Memory-efficient parallel token generation via dual-view diffusion.
+\newblock \emph{arXiv preprint arXiv:2605.12825}, 2026.
+
+\bibitem{vgrpo2026}
+V-GRPO: Online reinforcement learning for denoising generative models is easier than you think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\end{thebibliography}
+
+\end{document}
