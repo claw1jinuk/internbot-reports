@@ -1,0 +1,122 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: On the Geometry of On-Policy Distillation}
+\author{Internbot --- Automated Research Summary}
+\date{June 10, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Three post-training paradigms now dominate LLM reasoning improvement: supervised fine-tuning (SFT), reinforcement learning with verifiable rewards (RLVR), and on-policy distillation (OPD). Prior geometric analysis~\cite{zhu2025path,liu2026lift} established a clear dichotomy: SFT induces \emph{dense, principal-aligned} weight updates that distort the pretrained spectral structure, while RLVR produces \emph{sparse, off-principal} updates that preserve it. OPD occupies an ambiguous middle ground---it uses dense token-level teacher supervision (SFT-like) but operates on self-generated rollouts with policy-gradient optimization (RLVR-like). Shen et al.~\cite{shen2026geometry} ask: \emph{where does OPD lie in the parameter-space spectrum between SFT and RLVR, what trajectory does it follow during training, and which component controls that trajectory?}
+
+\subsection{Method}
+
+\paragraph{Parameter-Space Diagnostics.} The authors develop four complementary diagnostics operating on the cumulative weight update $\Delta W = W_+ - W_0$ across 144 matrices (36 transformer layers $\times$ 4 attention projections):
+
+\begin{enumerate}
+\item \textbf{bf16-aware sparsity}: A scalar entry is unchanged when $|\hat{w}_i - w_i| \leq \eta \cdot \max(|w_i|, |\hat{w}_i|)$ with $\eta = 10^{-3}$. The sparsity $\mathrm{sp}(W_0, W_+) = 1 - \frac{1}{n}\sum_{i,j}\mathbf{1}[\text{changed}]$ measures how many weights visibly move.
+\item \textbf{Principal-angle rotation}: Measures rotation of dominant singular subspaces via $\cos\theta_i = \sigma_i(U_{0,k}^\top U_{+,k})$ for the top-$k$ ($k\!=\!512$) left/right singular subspaces, computed in float64.
+\item \textbf{Spectral drift}: Normalized spectral shift $\mathrm{NSS} = \|\boldsymbol{\sigma}(W_+) - \boldsymbol{\sigma}(W_0)\|_2 / \|\boldsymbol{\sigma}(W_0)\|_2$.
+\item \textbf{Update-mask overlap}: Compares the visible update mask against a principal mask (top-$\alpha$ fraction of rank-$r$ SVD entries) and a low-magnitude mask (bottom-$\alpha$ fraction by $|W_0|$). Sub-random principal overlap indicates off-principal updates; super-random low-magnitude overlap indicates concentration in small-weight regions.
+\end{enumerate}
+
+\paragraph{Three-Gate Extension.} The paper extends Zhu et al.'s Three-Gate account~\cite{zhu2025path} of RLVR to a \emph{unified score-weighted form}. All paradigms produce gradients $g = \sum_t a_t \phi_t$ where $\phi_t = \nabla_\theta \log p_\theta(y_t | x, y_{<t})$:
+\begin{itemize}
+\item \textbf{RLVR}: $a_t = A(y)$, a shared scalar advantage across all tokens.
+\item \textbf{OPD}: $a_t$ varies per token according to local teacher-student KL disagreement.
+\item \textbf{SFT}: implicitly $a_t = 1$ for all tokens.
+\end{itemize}
+Gate~I (distributional anchor) constrains $\|\Delta W\|_{\mathrm{F}}$; Gate~II (model geometry) determines directional support---OPD's heterogeneous token coefficients broaden the update covariance $C_{\mathrm{OPD}} = \mathbb{E}[\sum_{t,t'} a_t a_{t'} \phi_t \phi_{t'}^\top]$ relative to RLVR's rank-one coupling $C_{\mathrm{RLVR}} = \mathbb{E}[A(y)^2 s s^\top]$; Gate~III (bf16 precision realization) determines which coordinates become visible.
+
+\paragraph{Trajectory-Level Analysis.} Tracking cumulative updates $\Delta W_t = W_t - W_0$ across checkpoints using stable rank $\mathrm{srank}(\Delta W_t) = \|\Delta W_t\|_{\mathrm{F}}^2 / \|\Delta W_t\|_{\mathrm{op}}^2$, Frobenius norm, and the Hill tail estimator $\alpha_{\mathrm{Hill}}$ for spectral shape. A subspace similarity metric $\mathrm{Sim}_K(t, t_{\mathrm{end}}) = \frac{1}{K}\|V_K(t)^\top V_K(t_{\mathrm{end}})\|_{\mathrm{F}}^2$ measures when the final update channel emerges.
+
+\paragraph{Control Experiments.} Three perturbations isolate what controls the locked trajectory: (1)~\emph{token sparsification} retaining top-KL or random tokens at $\rho \in \{0.25, 0.50\}$; (2)~\emph{off-policy rollouts} from the teacher; (3)~\emph{objective interpolation} $A_i^{(\alpha)} = \alpha A_{i,\mathrm{OPD}} + (1\!-\!\alpha) A_{i,\mathrm{RLVR}}$ for $\alpha \in \{0.75, 0.50, 0.25, 0.05, 0.01\}$.
+
+\subsection{Results}
+
+\paragraph{The Relaxed Off-Principal Regime.} Across all four diagnostics on Qwen3-8B, OPD consistently falls between SFT and RLVR, biased toward the RLVR side:
+\begin{center}
+\begin{tabular}{lccc}
+\hline
+\textbf{Diagnostic} & \textbf{SFT} & \textbf{OPD} & \textbf{RLVR} \\
+\hline
+bf16-aware sparsity & 8.1\% & 51.6\% & 77.2\% \\
+Principal-angle rotation & $>10^\circ$ & $\sim\!1^\circ$ & $<0.5^\circ$ \\
+Spectral drift (NSS) & $10^{-3}$ & $10^{-4}$ & $10^{-5}$ \\
+Low-magnitude overlap & 31.9\% & 53.6\% & 73.5\% \\
+\hline
+\end{tabular}
+\end{center}
+OPD sparsity remains stable across teacher scales (48.6--57.1\%), student scales (4B--32B), and data domains (math, code).
+
+\paragraph{Subspace Locking.} OPD enters a persistent low-dimensional update channel ($\mathrm{srank} \approx 16$--$20$) from the first checkpoint and maintains it throughout training. This differs from SFT (which expands progressively) and RLVR (which contracts toward a low-dimensional endpoint). Critically, subspace similarity $\mathrm{Sim}_{16}$ reaches near~1 immediately, indicating the final update direction is set very early. A \emph{functional sufficiency test}---projecting gradients onto the rank-16 right singular subspace extracted at 20\% progress---preserves 95--98\% of baseline performance across AIME~2024, GSM8k, and MATH. SFT drops to 70--85\% under the same constraint.
+
+\paragraph{Objective Sensitivity.} Token sparsification (even 25\% random retention) and off-policy rollouts preserve the locked trajectory. Only \emph{objective mixing} breaks it: when $\alpha < 0.5$, the RLVR component dominates and the stable-rank trajectory enters a distinct spectral regime. The mechanistic explanation: token masking rescales the gradient second moment $\mathbb{E}[\tilde{g}\tilde{g}^\top] \approx c \cdot \mathbb{E}[g_{\mathrm{OPD}} g_{\mathrm{OPD}}^\top]$ without changing its principal directions, while objective mixing alters the covariance geometry itself via $\Sigma_\alpha \approx \alpha^2 \Sigma_{\mathrm{OPD}} + (1\!-\!\alpha)^2 \Sigma_{\mathrm{RLVR}} + \alpha(1\!-\!\alpha)\Sigma_{\mathrm{cross}}$.
+
+\subsection{Limitations}
+
+The analysis is restricted to the Qwen3 family in math/code reasoning settings. The diagnostics characterize checkpoint-level snapshots rather than continuous trajectories. The Three-Gate account is presented as a consistent mechanistic explanation, not a formal causal theory. Controlled comparisons (shared SFT anchor, same prompt distribution) may not capture naturalistic production differences.
+
+\subsection{Relevance to Our Research}
+
+This paper provides the \emph{theoretical geometric backbone} for the extensive line of on-policy distillation work we have been tracking. Our reviews of Flow-OPD~\cite{fu2026flowopd}, FiRe-OPD~\cite{li2026fireopd}, ESR~\cite{wang2026esr}, Learning to Foresee~\cite{chen2026foresee}, and OPDLM~\cite{su2026opdlm} studied OPD from algorithmic and empirical angles---token filtering, reward reweighting, early stopping, and architecture conversion. This paper reveals \emph{why} these methods work: OPD's gradient geometry inherits RLVR's off-principal structure (preserving pretrained knowledge) while its dense token-level supervision broadens the update subspace enough to enable efficient learning. The subspace-locking phenomenon explains why OPD converges rapidly regardless of specific token selection strategies, and the objective-sensitivity result suggests that mixing OPD with RL rewards (as in OPDLM's thinking mode or V-GRPO) requires careful $\alpha$-scheduling to avoid disrupting the locked geometry.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Geometry-Aware Adaptive Token Selection for OPD}
+
+\paragraph{Gap.} The paper shows token sparsification preserves OPD's locked trajectory even at 25\% retention, yet current methods like FiRe-OPD~\cite{li2026fireopd} and ESR~\cite{wang2026esr} design token selection heuristics without monitoring the actual update geometry. The subspace-locking result implies that existing token-level tricks may be geometrically redundant---they change magnitudes but not directions.
+
+\paragraph{Approach.} Design an adaptive token selector that monitors $\mathrm{Sim}_K(t, t_{\mathrm{end}})$ and stable rank online. When subspace similarity is high (locked regime), aggressively sparsify tokens to reduce compute. When it drops (e.g., during curriculum transitions or domain shifts), retain more tokens to re-establish the lock. This creates a \emph{geometry-aware compute schedule} that reduces unnecessary teacher forward passes by 50--70\% during the locked phase while preserving convergence quality.
+
+\paragraph{Feasibility.} The rank-16 subspace can be tracked cheaply via incremental SVD on accumulated gradient matrices. Sim$_K$ requires only the top-$K$ right singular vectors, which can be maintained with $O(Kd)$ storage per matrix. The computational overhead is negligible compared to teacher inference costs. Implementation requires modifying the training loop of existing OPD frameworks (e.g., OpenRLHF) to add periodic diagnostic checks and token-budget adjustment.
+
+\subsection{Direction 2: Principled OPD--RLVR Curriculum via Objective Composition Phase Diagrams}
+
+\paragraph{Gap.} The objective-mixing experiments reveal a phase transition near $\alpha = 0.5$: above this threshold, OPD geometry dominates; below it, RLVR geometry takes over. Current hybrid methods like OPDLM's thinking mode~\cite{su2026opdlm} or GRPO-augmented distillation combine objectives without understanding this geometric phase boundary. The covariance decomposition $\Sigma_\alpha = \alpha^2 \Sigma_{\mathrm{OPD}} + (1\!-\!\alpha)^2 \Sigma_{\mathrm{RLVR}} + \alpha(1\!-\!\alpha)\Sigma_{\mathrm{cross}}$ provides the analytical foundation for principled scheduling.
+
+\paragraph{Approach.} Map the full $(\alpha, t)$ phase diagram across training steps and model scales, identifying (a)~critical $\alpha^*$ where the spectral regime transitions, (b)~whether $\alpha^*$ shifts during training, and (c)~optimal $\alpha(t)$ schedules. The hypothesis is that starting with $\alpha \approx 1$ (pure OPD) to establish the locked subspace, then gradually decreasing $\alpha$ to inject RLVR signal for beyond-teacher reasoning, yields better reasoning performance than fixed-$\alpha$ or naive two-phase training. This connects to the parametric memory law from our LoRA review~\cite{gao2026lora}: the phase transition at $L_{\mathrm{crit}}$ may correspond to a geometric transition in the update subspace.
+
+\paragraph{Feasibility.} The control experiment infrastructure from this paper can be directly extended. The main cost is training Qwen3-8B variants across 10--15 $(\alpha, t)$ grid points, each for 300 steps. This is approximately $15 \times 300 = 4500$ OPD steps, feasible on 4--8 H100 GPUs in one week. The phase diagram would provide a reusable recipe for combining OPD and RLVR in future work.
+
+\subsection{Direction 3: Extending Geometric Diagnostics to Diffusion LLM Training}
+
+\paragraph{Gap.} All geometric analysis in this paper applies to autoregressive and OPD training of standard transformer LLMs. Whether the same relaxed off-principal regime and subspace-locking phenomena emerge in \emph{diffusion LLM} training---where the loss involves masked-token prediction across variable noise levels---is entirely open. Our reviews of discrete diffusion methods (LLaDA~2.0~\cite{nie2026llada2}, DMax~\cite{chen2026dmax}, Orthrus~\cite{kim2026orthrus}, OPDLM~\cite{su2026opdlm}) suggest that diffusion training may induce qualitatively different weight geometries due to the uniform masking distribution and bidirectional attention.
+
+\paragraph{Approach.} Apply the four-diagnostic framework (bf16-aware sparsity, principal-angle rotation, NSS, update-mask overlap) to DLM training trajectories: (a)~from-scratch DLM pretraining (LLaDA-style), (b)~AR-to-DLM conversion (OPDLM-style), (c)~DLM fine-tuning with V-GRPO~\cite{li2026vgrpo}. Compare stable-rank trajectories and subspace-locking behavior. The prediction is that AR-to-DLM conversion via on-policy self-distillation (OPDLM) will exhibit subspace locking similar to standard OPD, while from-scratch DLM training will show SFT-like expanding rank trajectories due to the absence of a pretrained autoregressive anchor.
+
+\paragraph{Feasibility.} The diagnostic code from this paper can be applied directly to saved DLM checkpoints. The main requirement is access to intermediate checkpoints from DLM training runs. OPDLM's 66M-token training produces checkpoints in hours on modest hardware. From-scratch LLaDA training at 1.5T tokens is more expensive but publicly available checkpoints exist. The analysis itself (SVD computation over 144 matrices) takes approximately 2 hours per checkpoint on a single GPU, making a trajectory study of 10--15 checkpoints feasible in a day.
+
+\section{Conclusion}
+
+Shen et al.\ provide the first systematic parameter-space characterization of on-policy distillation, establishing three key findings: (1)~OPD occupies a \emph{relaxed off-principal regime} between SFT and RLVR, inheriting RLVR's spectral preservation while broadening the update support through dense token-level supervision; (2)~OPD exhibits \emph{subspace locking}---a persistent, low-dimensional ($\mathrm{srank}\!\approx\!16$) update channel that emerges immediately and is functionally sufficient for 95--98\% of full performance; (3)~this locked trajectory is controlled by \emph{objective composition} rather than token selection or rollout policy, with a phase transition near $\alpha\!=\!0.5$ in OPD--RLVR mixing. The Three-Gate extension provides a unified mechanistic account connecting all three paradigms through their gradient coefficient structure. For our research program, this paper transforms our understanding of OPD from a collection of empirical recipes (token filtering, reward reweighting, early stopping) into a geometrically grounded framework where the update subspace---not the token-level details---determines convergence behavior. This has immediate implications for designing more efficient OPD algorithms and for extending geometric analysis to diffusion LLM training.
+
+\begin{thebibliography}{99}
+\bibitem{shen2026geometry} Shen, Z., Li, Y., Yin, Q., Leong, C.T., Wang, Z., Chen, Y., Han, R., Lee, S., and Fung, Y.R. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{zhu2025path} Zhu, Y., et al. ``The Path Not Taken: RLVR Provably Learns Off the Principals.'' \emph{arXiv preprint}, 2025.
+\bibitem{liu2026lift} Liu, Y., et al. ``LIFT the Veil for the Truth: Principal Weights Emerge after Rank Reduction for Reasoning-Focused Supervised Fine-Tuning.'' \emph{arXiv preprint}, 2026.
+\bibitem{fu2026flowopd} Fu, J., et al. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \emph{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{li2026fireopd} Li, Y., et al. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{wang2026esr} Wang, Z., et al. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\bibitem{chen2026foresee} Chen, X., et al. ``Learning to Foresee: Unveiling the Unlocking Efficiency of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.11739}, 2026.
+\bibitem{su2026opdlm} Su, Y., et al. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\bibitem{gao2026lora} Gao, Y., et al. ``How LoRA Remembers? A Parametric Memory Law for LLM Finetuning.'' \emph{arXiv preprint arXiv:2605.30260}, 2026.
+\bibitem{nie2026llada2} Nie, S., et al. ``LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.'' \emph{arXiv preprint arXiv:2604.20796}, 2026.
+\bibitem{chen2026dmax} Chen, R., et al. ``DMax: Aggressive Parallel Decoding for dLLMs.'' \emph{arXiv preprint arXiv:2604.08302}, 2026.
+\bibitem{kim2026orthrus} Kim, S., et al. ``Orthrus: Memory-Efficient Parallel Token Generation via Dual-View Diffusion.'' \emph{arXiv preprint arXiv:2605.12825}, 2026.
+\bibitem{li2026vgrpo} Li, Y., et al. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\end{thebibliography}
+
+\end{document}
