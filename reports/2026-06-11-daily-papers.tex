@@ -1,0 +1,118 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Flow-DPPO --- Divergence Proximal Policy\\Optimization for Flow Matching Models}
+\author{Internbot --- Automated Research Summary}
+\date{June 11, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Reinforcement learning fine-tuning of flow matching models (e.g., Stable Diffusion~3.5, FLUX) typically casts the denoising process as a finite-horizon MDP and applies PPO-style ratio clipping to enforce trust-region optimization~\cite{liu2025flowgrpo}. Ping et al.~\cite{ping2026flowdppo} identify a fundamental flaw: \emph{ratio clipping is a noisy, biased proxy for the true policy divergence}, and this problem is particularly severe in flow models' high-dimensional continuous action spaces. Since each per-step policy is Gaussian with mean $\mu_\theta(x_t, t)$ and fixed variance $\sigma^2 I$, the log-ratio decomposes as:
+\begin{equation}
+\log r_t^i(\theta) = \frac{\epsilon^\top d}{\sigma} - \frac{\|d\|^2}{2\sigma^2}, \quad d = \mu_\theta - \mu_{\mathrm{old}}
+\end{equation}
+where $\epsilon \sim \mathcal{N}(0, I)$ is the sampling noise. The first term is zero-mean noise with standard deviation $\|d\|/\sigma$, while the second is the deterministic signal $-D_{\mathrm{KL}}(\pi_{\mathrm{old}} \| \pi_\theta)$. Critically, the noise standard deviation $\sqrt{2 D_{\mathrm{KL}}}$ is of the \emph{same order} as the signal, causing individual ratio samples to fluctuate wildly. With a typical clip range $[0.8, 1.2]$, a significant fraction of samples are clipped purely due to noise rather than excessive divergence, producing a systematic left-shift in the ratio distribution that under-constrains positive-advantage updates (enabling reward hacking) and over-constrains negative-advantage updates.
+
+\subsection{Method}
+
+\paragraph{Exact Divergence Computation.} The key structural insight is that flow models with Gaussian per-step policies admit \emph{exact, deterministic} KL divergence at zero additional cost:
+\begin{equation}
+D_{\mathrm{KL}}(\pi_{\mathrm{old}}(\cdot|x_t) \| \pi_\theta(\cdot|x_t)) = \frac{\|\mu_{\mathrm{old}}(x_t, t) - \mu_\theta(x_t, t)\|^2}{2\sigma^2}
+\end{equation}
+Both means are already computed during the standard training forward pass, so the divergence is simply a squared norm of an available difference. This contrasts with the LLM setting where DPPO~\cite{qi2026dppo} must approximate divergence over vocabularies with $|V| > 100$K tokens via Binary or Top-K reductions.
+
+\paragraph{Flow-DPPO Objective.} The ratio clipping is replaced by a divergence-based binary mask:
+\begin{equation}
+\mathcal{L}^{\mathrm{Flow\text{-}DPPO}}(\theta) = \mathbb{E}\left[\frac{1}{G}\sum_i \frac{1}{T}\sum_t \left(M_t^i \cdot r_t^i(\theta) \cdot \hat{A}^i - \beta \cdot D_{\mathrm{KL}}(\pi_\theta \| \pi_{\mathrm{ref}})\right)\right]
+\end{equation}
+where the mask fires when the update would \emph{increase} divergence beyond threshold $\delta$:
+\begin{equation}
+M_t^i = 0 \iff \mathrm{sgn}(\hat{A}^i \cdot (r_t^i - 1)) > 0 \;\wedge\; D_t > \delta
+\end{equation}
+This is \emph{asymmetric by design}: updates moving the policy \emph{away} from $\theta_{\mathrm{old}}$ are blocked when divergence exceeds $\delta$, but corrective updates moving \emph{toward} $\theta_{\mathrm{old}}$ are \emph{never blocked}, accelerating recovery from drift.
+
+\paragraph{Theoretical Foundation.} The paper establishes a policy improvement bound for flow model MDPs (Theorem~2):
+\begin{equation}
+J(\pi_\theta) - J(\pi_{\mathrm{old}}) \geq L'_{\theta_{\mathrm{old}}}(\pi_\theta) - 2\xi(K\!-\!1)(K\!-\!2) \cdot D_{\mathrm{TV}}^{\max}(\pi_{\mathrm{old}} \| \pi_\theta)^2
+\end{equation}
+where $\xi = \max|R|$ and $K$ is the number of denoising steps. Since KL and TV are both monotone functions of $\|\mu_{\mathrm{old}} - \mu_\theta\|/\sigma$ in the Gaussian equal-covariance setting (via Pinsker's inequality $D_{\mathrm{TV}}^2 \leq \frac{1}{2}D_{\mathrm{KL}}$), constraining KL below $\delta$ provides a valid trust region.
+
+\paragraph{CPS Compatibility.} Flow-DPPO is fully compatible with Coefficients-Preserving Sampling (CPS)~\cite{wang2025cps}, which reduces noise injection relative to the standard Flow-SDE conversion. A key technical difference: CPS previously dropped the $2\sigma_{\mathrm{CPS}}^2$ normalization for numerical stability; Flow-DPPO retains it because $\sigma_{\mathrm{CPS}}^2 \sim (t\!-\!\mathrm{d}t)^2$ shrinks at later steps, and the $\sigma^{-2}$ factor appropriately amplifies divergence where small velocity changes most affect the output.
+
+\paragraph{Predictive Mask Hierarchy.} First-order analysis of how a gradient step changes $D_t$ yields three masks of increasing fidelity: (1)~the current mask $\mathrm{sgn}(\hat{A}(r_t\!-\!1))$, valid in the small-divergence regime; (2)~a first-order predictive mask $\mathrm{sgn}(\hat{A}(\log r_t - D_t))$; (3)~a full predictive mask checking whether $D_t^{\mathrm{new}} > \delta$ after one gradient step. Only the simplest mask is used in experiments.
+
+\subsection{Results}
+
+\paragraph{Multi-Reward Training.} On SD3.5-Medium with GenEval2/CLIP/PickScore/HPSv2 rewards: Flow-DPPO+CPS achieves \textbf{51.6} GenEval2 (+3.8 over GRPO-Guard's 47.8), \textbf{0.369} CLIP, \textbf{25.72} PickScore, and \textbf{0.415} HPSv2, leading on all metrics. On FLUX2-9B: Flow-DPPO reaches \textbf{57.7} GenEval2 (+8.7 over best baseline), while Flow-DPPO+CPS leads on CLIP (0.386), PickScore (26.15), and HPSv2 (0.427).
+
+\paragraph{Single-Reward Training.} Flow-DPPO+CPS achieves \textbf{92.6} GenEval2 on FLUX2-9B (+9.8 over Flow-GRPO's 84.5). Notably, GRPO-Guard collapses on OOD metrics (PickScore drops to 18.45, below the pretrained 20.05), while Flow-DPPO maintains strong OOD preservation (PickScore 21.27).
+
+\paragraph{KL Efficiency.} Flow-DPPO achieves dramatically lower KL drift: $0.17 \times 10^{-3}$ vs.\ Flow-GRPO's $0.77 \times 10^{-3}$ on FLUX2-9B single-reward (4.5$\times$ reduction), meaning it extracts more reward improvement per unit of distribution shift.
+
+\paragraph{Multi-Epoch Stability.} Baseline methods (Flow-GRPO, Flow-CPS) plateau or degrade under multi-epoch training with sample reuse. Flow-DPPO variants show \emph{continued improvement}, as the divergence mask constrains updates within the trust region even when samples are reused across optimization epochs.
+
+\subsection{Limitations}
+
+The analysis is restricted to image generation at 512$\times$512 resolution with LoRA fine-tuning; no video generation experiments despite this being a stated motivation. The predictive mask hierarchy (first-order and full predictive variants) remains theoretically derived but empirically unvalidated. A single divergence threshold $\delta$ is applied uniformly across all timesteps despite KL scaling varying significantly. Total compute is approximately 140K H20 GPU hours.
+
+\subsection{Relevance to Our Research}
+
+This paper is the \emph{continuous-space counterpart} to V-GRPO~\cite{li2026vgrpo}, which applied GRPO to discrete diffusion language models. Together they establish that domain-specific policy structure---Gaussian per-step policies for flow models, categorical distributions for discrete diffusion---enables fundamentally better trust-region enforcement than generic ratio clipping. The geometric analysis from our recent review~\cite{shen2026geometry} showed that OPD's update geometry is controlled by the gradient coefficient structure; Flow-DPPO provides the optimization-theoretic complement, showing that the \emph{constraint mechanism} (clipping vs.\ divergence mask) equally determines training stability. The connection to DPPO for LLMs~\cite{qi2026dppo} also bridges this work to our RL line (BandPO, DelTA, DVAO): the ratio-noise decomposition $\mathrm{Var}[\log r_t] = 2D_{\mathrm{KL}}$ likely holds in LLM settings too, suggesting that LLM-DPPO's approximate divergence reductions could be improved by better exploiting per-token distributional structure. Finally, the multi-epoch stability result connects to our distillation coverage (Flow-OPD~\cite{fu2026flowopd}, FiRe-OPD~\cite{li2026fireopd}): if divergence-based masks stabilize RL sample reuse, they may equally stabilize multi-epoch on-policy distillation where student rollouts become stale.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Divergence-Based Trust Regions for Discrete Diffusion LLM RL}
+
+\paragraph{Gap.} V-GRPO~\cite{li2026vgrpo} applies GRPO with standard ratio clipping to discrete diffusion language models, inheriting the same ratio-noise problem identified by Flow-DPPO. In discrete diffusion, each per-step policy is categorical over vocabulary $|V|$, not Gaussian. While exact KL computation over $|V| > 100$K tokens is expensive (the reason LLM-DPPO~\cite{qi2026dppo} uses approximate reductions), discrete diffusion LLMs like LLaDA~\cite{nie2026llada2} and OPDLM~\cite{su2026opdlm} often use \emph{masked token prediction} where only a subset of positions are active at each step, potentially making exact per-step divergence tractable.
+
+\paragraph{Approach.} Exploit the masked diffusion structure: at each reverse step, only $|M_t|$ positions are unmasked, each with an independent categorical distribution. The per-step KL decomposes as $D_{\mathrm{KL}} = \sum_{i \in M_t} D_{\mathrm{KL}}(p_{\mathrm{old}}^i \| p_\theta^i)$, where each term is a sum over $|V|$ entries. For absorbing-state diffusion, early steps unmask few tokens ($|M_t|$ small), making exact computation feasible. For later steps with many unmasked positions, use top-$K$ truncation per position. Implement the asymmetric divergence mask from Flow-DPPO and benchmark against V-GRPO on AIME-24 and MATH-500 using LLaDA-8B and OPDLM-8B.
+
+\paragraph{Feasibility.} The masked diffusion structure naturally reduces computational cost: with absorbing-state schedules, $|M_t| \sim t \cdot L$ where $L$ is sequence length, and most compute concentrates on early steps where $|M_t|$ is small. Per-position KL over $|V|$ requires $O(|V|)$ operations per position, which is $O(|M_t| \cdot |V|)$ per step---comparable to the logit computation already performed. Implementation requires modifying V-GRPO's training loop (publicly available) to add divergence computation and masking logic, feasible in 2--3 weeks.
+
+\subsection{Direction 2: Timestep-Adaptive Divergence Thresholds via Spectral Analysis}
+
+\paragraph{Gap.} Flow-DPPO uses a single scalar threshold $\delta$ across all denoising steps, despite the KL scaling factor $\sigma^{-2}$ varying dramatically across timesteps. For CPS, $\sigma_{\mathrm{CPS}}^2 \sim (t\!-\!\mathrm{d}t)^2 \sin^2(\eta\pi/2)$ shrinks quadratically toward $t=0$, meaning the same velocity change produces orders-of-magnitude larger KL at later steps. This uniform threshold either under-constrains early steps (where $\sigma^2$ is large) or over-constrains late steps (where $\sigma^2$ is small). The paper's own ablation shows sensitivity to $\delta$, suggesting finer-grained control could help.
+
+\paragraph{Approach.} Define a timestep-adaptive threshold $\delta(t) = \delta_0 \cdot f(t)$ where $f(t)$ is calibrated so that the trust-region constraint corresponds to a \emph{uniform bound on output-space displacement}. Using the velocity-to-output Jacobian $\partial x_0 / \partial v_\theta$, the output displacement from a velocity perturbation $\Delta v$ is $\|\partial x_0 / \partial v_\theta \cdot \Delta v\|$. Setting $\delta(t)$ proportional to $\sigma^2(t) / \|\partial x_0 / \partial v_\theta\|^2$ ensures equal output-space impact across all timesteps. This connects to the subspace-locking phenomenon from our geometric OPD review~\cite{shen2026geometry}: if the update subspace is locked early, the Jacobian structure should be approximately constant, making the adaptive threshold a simple function of $\sigma^2(t)$.
+
+\paragraph{Feasibility.} The Jacobian $\partial x_0 / \partial v_\theta$ can be estimated empirically from a few training batches at different timesteps, then fixed as a schedule. No additional per-step computation is needed during training---only the threshold schedule changes. This can be implemented as a one-line modification to Flow-DPPO's masking logic and validated on the existing SD3.5/FLUX benchmarks.
+
+\subsection{Direction 3: Divergence Masks for Multi-Epoch On-Policy Distillation}
+
+\paragraph{Gap.} On-policy distillation methods like Flow-OPD~\cite{fu2026flowopd}, FiRe-OPD~\cite{li2026fireopd}, and ESR~\cite{wang2026esr} generate student rollouts and train on them with teacher supervision. In practice, rollout generation is the computational bottleneck (requiring full denoising or autoregressive generation). Multi-epoch training on the same rollouts would reduce cost, but student rollouts become stale as the policy updates, introducing off-policy drift. Flow-DPPO's multi-epoch stability result (baselines degrade but DPPO improves with sample reuse) suggests that divergence-based masks could stabilize multi-epoch OPD.
+
+\paragraph{Approach.} Adapt the asymmetric divergence mask to on-policy distillation: replace the reward-based advantage $\hat{A}^i$ with the teacher-student KL signal $a_t = D_{\mathrm{KL}}(p_{\mathrm{teacher}} \| p_{\mathrm{student}})$, and apply the mask $M_t^i = 0$ when the student has drifted too far from its rollout-time policy on a given sample. This allows reusing each batch of rollouts for 2--4 optimization epochs before re-generating, reducing teacher forward-pass costs by 50--75\%. The geometric OPD analysis~\cite{shen2026geometry} predicts this should work: since OPD's update subspace locks early, multi-epoch updates within the locked subspace should remain stable as long as the trust region is respected.
+
+\paragraph{Feasibility.} Requires storing rollout-time policy means $\mu_{\mathrm{old}}$ alongside the rollout data (one additional tensor per sample). The divergence computation is the same squared norm as in Flow-DPPO. For LLM OPD, the per-token KL is already computed for the distillation loss, so the divergence mask adds negligible overhead. Can be implemented in existing OPD frameworks (OpenRLHF, TRL) and validated on Qwen3-8B with DAPO-Math-17k, directly comparable to our geometric OPD review's experimental setup.
+
+\section{Conclusion}
+
+Flow-DPPO replaces PPO's ratio clipping with exact divergence-based trust regions for flow matching models, exploiting the Gaussian per-step policy structure to compute KL divergence at zero additional cost. The asymmetric mask---blocking divergence-increasing updates while always permitting corrective ones---achieves state-of-the-art results across SD3.5, FLUX2-9B, and FLUX.1-dev (92.6 GenEval2 on FLUX2-9B single-reward, +9.8 over best baseline) while maintaining 4.5$\times$ lower KL drift and stable multi-epoch training. The theoretical foundation through a flow-model policy improvement bound and the ratio-noise decomposition $\mathrm{Var}[\log r_t] = 2D_{\mathrm{KL}}$ provides rigorous justification for moving beyond ratio clipping. For our research program, this paper completes a methodological bridge between RL for continuous flow models and RL for discrete diffusion LLMs, and the multi-epoch stability result opens a promising direction for reducing the computational cost of on-policy distillation through divergence-constrained sample reuse.
+
+\begin{thebibliography}{99}
+\bibitem{ping2026flowdppo} Ping, B., Zhou, X., Qi, P., Luo, M., Bo, L., and Pang, T. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{liu2025flowgrpo} Liu, J., et al. ``Flow-GRPO: Training Flow Matching Models via Online RL.'' \emph{arXiv preprint}, 2025.
+\bibitem{qi2026dppo} Qi, P., et al. ``Rethinking the Trust Region in LLM Reinforcement Learning.'' \emph{arXiv preprint}, 2026.
+\bibitem{wang2025cps} Wang, Z. and Yu, D. ``Coefficients-Preserving Sampling for Flow Matching.'' \emph{arXiv preprint}, 2025.
+\bibitem{li2026vgrpo} Li, Y., et al. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{fu2026flowopd} Fu, J., et al. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \emph{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{li2026fireopd} Li, Y., et al. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{wang2026esr} Wang, Z., et al. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\bibitem{nie2026llada2} Nie, S., et al. ``LLaDA2.0-Uni: Unifying Multimodal Understanding and Generation with Diffusion Large Language Model.'' \emph{arXiv preprint arXiv:2604.20796}, 2026.
+\bibitem{su2026opdlm} Su, Y., et al. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\end{thebibliography}
+
+\end{document}
