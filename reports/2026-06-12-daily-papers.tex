@@ -1,0 +1,123 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Beyond Scalar Rewards by Internalizing\\Reasoning into Score Distributions}
+\author{Internbot --- Automated Research Summary}
+\date{June 12, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Reward models for text-to-image (T2I) post-training face a fundamental tension: high-quality visual scoring demands \emph{reasoning and uncertainty awareness}, but scalable deployment demands \emph{fast, direct, and differentiable} reward signals. Jin et al.~\cite{jin2026zreward} identify three gaps in existing paradigms: (1)~scalar/pairwise reward models (ImageReward, PickScore, HPSv2) compress preference into a single value, discarding annotator uncertainty; (2)~reasoning-based generative reward models (DeepSeek-GRM, GenRM-CoT) produce higher-quality judgments but are expensive ($\sim$750 output tokens) and non-differentiable; (3)~explicit distribution models (DEQA, NIMA) require \emph{multiple annotations per sample}, which is difficult to scale. The paper's key insight: ``Reward models do not need to reproduce \emph{how} a teacher reasons; they need to reproduce \emph{how a reasoning teacher judges}.''
+
+\subsection{Method}
+
+\paragraph{Score Distributions as Core Representation.} Given prompt $p$, image $I$, and reward dimension $d \in \mathcal{D}$ (text-image alignment, realism, aesthetics, physical plausibility), the teacher generates a reasoning trace $\rho$ and predicts a distribution over nine rubric-aligned score bins $s \in \mathcal{S} = \{1.0, 1.5, \ldots, 5.0\}$:
+\begin{equation}
+q_\theta(s \mid p, I, d, \rho), \quad \mu_\theta = \textstyle\sum_{s \in \mathcal{S}} s \cdot q_\theta(s \mid p, I, d, \rho)
+\end{equation}
+The distribution is decoded via a Q-Align-style score decoder and learned as a \emph{latent variable} from single rubric-calibrated annotations---not requiring explicit multi-annotator observations.
+
+\paragraph{GDSO: Group-wise Direct Score Optimization.} The teacher (Qwen3.5-27B) is trained via GDSO, which augments GRPO with direct supervised gradients on score distributions and score gaps. For each winning/losing pair $(x_w, x_l)$ with annotated scores $(\hat{s}_w, \hat{s}_l)$, the teacher samples $G$ reasoning-and-score outputs per side. Three loss components:
+
+\emph{Pointwise score reward}: $r_{j,i}^{\mathrm{pt}} = 1 - |\mu_{j,i} - \hat{s}_j| / (S_{\max} - S_{\min})$, encouraging absolute score calibration.
+
+\emph{Pointwise distribution loss}: $\mathcal{L}_{\mathrm{CE}}^{\mathrm{pt}} = -\frac{1}{2G}\sum_{j}\sum_{i=1}^{G} \log q_{j,i}(\hat{s}_j)$, anchoring the score-bin probability to the annotated bin.
+
+\emph{Pairwise gap reward}: $r_{j,i}^{\mathrm{pw}} = 1 - \frac{1}{G(S_{\max} - S_{\min})}\sum_{k=1}^{G} |(\mu_{j,i} - \mu_{\bar{j},k}) - \Delta\hat{s}_{j,\bar{j}}|$, preserving both \emph{direction and magnitude} of score differences between same-prompt candidates.
+
+\emph{Pairwise gap loss}: $\mathcal{L}^{\mathrm{pw}} = \frac{1}{2G^2(S_{\max} - S_{\min})}\sum_{j}\sum_{i}\sum_{k} |(\mu_{j,i} - \mu_{\bar{j},k}) - \Delta\hat{s}_{j,\bar{j}}|$
+
+The combined objective is:
+\begin{equation}
+\mathcal{L}_{\mathrm{GDSO}} = \mathcal{L}_{\mathrm{GRPO}}(\{r_{j,i}\}) + \alpha_{\mathrm{pt}} \mathcal{L}_{\mathrm{CE}}^{\mathrm{pt}} + \alpha_{\mathrm{pw}} \mathcal{L}^{\mathrm{pw}}
+\end{equation}
+where $r_{j,i} = \lambda_{\mathrm{pt}} r_{j,i}^{\mathrm{pt}} + \lambda_{\mathrm{pw}} r_{j,i}^{\mathrm{pw}}$. The paper explicitly argues against Bradley-Terry: $\mathcal{L}_{\mathrm{BT}} = -\log \sigma(\mu_w - \mu_l)$ keeps enlarging margins without bound, inconsistent with rubric-calibrated absolute scores.
+
+\paragraph{RISD: Reasoning-Internalized Score Distillation.} The student (Qwen3.5-9B) is trained to predict the teacher's reasoning-conditioned score distribution \emph{without generating reasoning tokens}:
+\begin{equation}
+\mathcal{L}_{\mathrm{RISD}} = \mathbb{E}_{(p,I,d)}\left[D_{\mathrm{KL}}\!\left(q_T(s \mid p, I, d, \rho_T) \;\|\; q_\phi(s \mid p, I, d)\right)\right]
+\end{equation}
+Unlike on-policy distillation (OPD)~\cite{agarwal2024opd}, which transfers \emph{how} the teacher reasons (trajectory-level), RISD transfers \emph{what} the teacher concludes (outcome-level). The student produces a single output token with a differentiable score expectation $\mu_\phi = \sum_s s \cdot q_\phi(s \mid p, I, d)$, enabling gradient backpropagation for T2I optimization.
+
+\subsection{Results}
+
+\paragraph{Teacher Performance (27B).} GDSO achieves \textbf{89.56\%} Human Preference Accuracy (HPA), outperforming SFT (+8.21pp), RewardDance (+5.31pp), and GRPO (+3.52pp). On correlation metrics: PLCC=0.762 (+0.042 over GRPO), SRCC=0.713 (+0.030 over GRPO).
+
+\paragraph{Student Performance (9B).} RISD achieves \textbf{88.64\%} HPA with a \emph{single output token}, nearly matching the 27B teacher (89.56\%) while requiring $\sim$750$\times$ fewer output tokens than reasoning-based alternatives. Compared to 9B baselines: +14.05pp over SFT, +10.47pp over RewardDance, +11.61pp over GRPO, +4.69pp over 9B GDSO.
+
+\paragraph{RISD vs.\ OPD.} OPD reaches 83.11\% HPA with $\sim$750 tokens; RISD reaches 88.64\% HPA with 1~token (+5.53pp, 750$\times$ fewer tokens). The paper argues OPD is fundamentally limited because a 9B student cannot explore the same reasoning trajectories as the 27B teacher, while RISD provides distribution-level supervision independent of exploration capability.
+
+\paragraph{Score Distribution vs.\ Text Parsing.} Using score distribution expectations as rewards consistently outperforms parsed text scores for both GRPO and GDSO. Text parsing quantizes predictions (3.8 and 4.2 both emit token ``4''), removing fine-grained signal.
+
+\paragraph{T2I Optimization.} When used for reward-guided optimization via multi-dimensional reward backpropagation, Z-Reward achieves a \textbf{41.3\% net GSB} (Good-Same-Bad) improvement over the SFT baseline in blind human evaluation on 400 held-out prompts.
+
+\subsection{Limitations}
+
+The GDSO objective's supervised loss components may occasionally make scores depend more on direct supervision than on generated reasoning (reasoning-score decoupling). All evaluation uses internal annotation data with no public benchmarks. The framework is validated only on T2I generation. Training data uses single annotations per sample, with distributions learned as latent variables rather than from ground-truth multi-annotator distributions. The multi-dimensional reward aggregation function is not specified in detail.
+
+\subsection{Relevance to Our Research}
+
+This paper directly connects to our RL research line (T2) through its novel reward modeling paradigm. The GDSO training algorithm extends GRPO---which we have tracked through BandPO~\cite{li2026bandpo}, DelTA~\cite{wang2026delta}, and DVAO~\cite{chen2026dvao}---with direct score distribution supervision, establishing that \emph{policy-gradient rewards alone are insufficient for calibrated scoring}. The score-gap supervision principle (constraining both direction and magnitude of score differences) provides a counterpoint to Bradley-Terry-based approaches and connects to our review of cross-domain RL interference~\cite{liu2026crossdomain}, where preserving relative magnitudes across domains was critical for stable training.
+
+The RISD distillation paradigm---transferring \emph{what} the teacher concludes rather than \emph{how} it reasons---offers a new lens on our extensive on-policy distillation coverage. Our geometric OPD review~\cite{shen2026geometry} showed that OPD's update subspace locks early and is controlled by the objective composition rather than token-level details. RISD suggests an even more radical compression: skip the reasoning trajectory entirely and distill the distributional judgment. This ``outcome-level vs.\ trajectory-level'' distillation distinction could apply equally to LLM reasoning distillation, where current OPD methods (FiRe-OPD~\cite{li2026fireopd}, ESR~\cite{wang2026esr}) transfer reasoning traces but might benefit from directly distilling the answer distribution conditioned on reasoning.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Score Distribution Rewards for LLM Reasoning RL}
+
+\paragraph{Gap.} Current LLM RLVR methods (GRPO, BandPO~\cite{li2026bandpo}, DelTA~\cite{wang2026delta}) use binary or scalar rewards from verifiable tasks (math correctness, code execution). This collapses rich quality information into $\{0, 1\}$, discarding partial credit, solution elegance, and reasoning quality. Z-Reward's score distribution framework shows that distributional rewards provide denser gradients and better calibration for visual scoring; the same principle should apply to LLM reasoning evaluation where multiple valid solution paths exist with varying quality.
+
+\paragraph{Approach.} Train a reasoning reward model that outputs score distributions over rubric-aligned bins for dimensions like correctness, efficiency, clarity, and generalizability. Use GDSO to train a 27B teacher on annotated math/code solutions, then distill via RISD into a 7B student that produces differentiable distributional rewards. Replace binary RLVR rewards with the student's multi-dimensional score expectations. The pairwise gap supervision from GDSO is particularly important here: for math problems with multiple solution approaches, the gap loss preserves relative quality differences that binary rewards destroy.
+
+\paragraph{Feasibility.} GDSO builds on standard GRPO infrastructure (available in OpenRLHF/TRL). The main cost is curating rubric-annotated math/code solutions---existing datasets like PRM800K provide step-level annotations that can be aggregated into solution-level distributions. Training a 27B teacher on $\sim$50K annotated solutions and distilling to 7B is feasible on 8 H100 GPUs in 1--2 weeks. Evaluation against standard RLVR on AIME-24 and MATH-500 would directly measure whether distributional rewards improve reasoning beyond binary verification.
+
+\subsection{Direction 2: Reasoning-Internalized Distillation for LLM On-Policy Training}
+
+\paragraph{Gap.} Our OPD reviews (Flow-OPD~\cite{fu2026flowopd}, FiRe-OPD~\cite{li2026fireopd}, ESR~\cite{wang2026esr}, OPDLM~\cite{su2026opdlm}) all transfer reasoning trajectories from teacher to student, requiring the student to generate long chain-of-thought sequences ($\sim$750--2000 tokens). Z-Reward's RISD shows that for scoring tasks, outcome-level distillation (+5.53pp HPA, 750$\times$ fewer tokens) dramatically outperforms trajectory-level OPD. For LLM reasoning, an analogous question arises: can we distill the teacher's \emph{answer distribution conditioned on reasoning} rather than the reasoning process itself, producing a ``thinking-free'' student that internalizes reasoning capability into direct answer generation?
+
+\paragraph{Approach.} Given a teacher that produces reasoning chain $\rho$ followed by answer distribution $q_T(a \mid x, \rho)$, train a student via $D_{\mathrm{KL}}(q_T(a \mid x, \rho) \| q_\phi(a \mid x))$ to predict the answer distribution without reasoning tokens. For mathematical reasoning, $a$ could be a distribution over candidate answers or intermediate step correctness. This connects to the subspace-locking result from our geometric OPD review~\cite{shen2026geometry}: if OPD's effective update dimensionality is only $\sim$16, the reasoning process may be highly compressible, and outcome-level distillation could capture the same information more efficiently.
+
+\paragraph{Feasibility.} Implementation mirrors RISD: freeze a strong reasoning teacher (e.g., Qwen3-32B with CoT), collect $(x, \rho_T, q_T(a \mid x, \rho_T))$ triplets, and train a smaller student on the KL loss. The key challenge is defining the right ``outcome distribution''---for open-ended generation, this is the full next-token distribution (expensive to store), but for structured outputs (math answers, code solutions, classifications), it reduces to a manageable categorical distribution. Start with math (GSM8k, MATH) where answers are numerical and the outcome distribution is compact, then extend to code generation.
+
+\subsection{Direction 3: Multi-Dimensional Distributional Rewards for Diffusion LLM Alignment}
+
+\paragraph{Gap.} Diffusion LLM alignment methods like DARE~\cite{xu2026dare} and V-GRPO~\cite{li2026vgrpo} use scalar rewards (math accuracy, code correctness). Z-Reward demonstrates that multi-dimensional distributional rewards (text-image alignment, realism, aesthetics, physical plausibility) provide more stable and fine-grained optimization signals for visual generation. Diffusion LLMs generate text through iterative denoising, and different quality dimensions (fluency, factuality, reasoning depth, style) may benefit from separate distributional reward channels, analogous to Z-Reward's four visual dimensions.
+
+\paragraph{Approach.} Define four LLM quality dimensions: factuality, reasoning quality, fluency, and instruction following. Train a GDSO teacher on multi-dimensionally annotated text outputs, distill via RISD into an efficient student, and use the multi-dimensional distributional reward for V-GRPO training of diffusion LLMs (LLaDA, OPDLM~\cite{su2026opdlm}). The key advantage over scalar rewards: the distributional representation naturally handles the uncertainty inherent in diffusion LLM outputs (where multiple denoising trajectories can produce different quality profiles), and separate dimension channels prevent reward hacking on a single metric. Flow-DPPO's~\cite{ping2026flowdppo} divergence-based trust regions could be combined with distributional rewards for even tighter optimization control.
+
+\paragraph{Feasibility.} Requires multi-dimensional text quality annotations ($\sim$20K samples across 4 dimensions). Existing datasets like AlpacaEval and MT-Bench provide holistic quality scores that can be decomposed into dimensions. GDSO teacher training and RISD distillation follow the same infrastructure as Z-Reward (publicly available Qwen3.5 models). Integration with V-GRPO requires modifying the reward computation to accept distributional inputs---the differentiable score expectation from RISD makes this straightforward. Validation on AIME-24 and MATH-500 with LLaDA-8B would test whether distributional rewards improve over binary accuracy.
+
+\section{Conclusion}
+
+Z-Reward introduces a principled teacher-student framework for reward modeling that represents visual preferences as score distributions rather than scalar values. The teacher (GDSO, 27B) achieves 89.56\% HPA through reasoning-conditioned distributional scoring with both pointwise calibration and pairwise gap preservation. The student (RISD, 9B) internalizes the teacher's distributional judgment without reasoning tokens, achieving 88.64\% HPA with a single output token---nearly matching the teacher while being $\sim$750$\times$ more efficient than reasoning-based alternatives. The core distinction between \emph{outcome-level} distillation (what the teacher concludes) and \emph{trajectory-level} distillation (how the teacher reasons) provides a new design axis for knowledge transfer that extends beyond reward modeling to LLM reasoning distillation. The framework's multi-dimensional distributional rewards, validated by 41.3\% net human-preference improvement in T2I optimization, suggest that moving beyond scalar rewards could similarly benefit LLM and diffusion LLM alignment.
+
+\begin{thebibliography}{99}
+\bibitem{jin2026zreward} Jin, X., Cai, H., Li, Z., Zhan, Z., Jiang, D., Hao, A., Jiang, Y., Guo, C., Gao, P., Cheng, M.-M., and Hoi, S.C.H. ``Beyond Scalar Rewards by Internalizing Reasoning into Score Distributions.'' \emph{arXiv preprint arXiv:2606.09076}, 2026.
+\bibitem{agarwal2024opd} Agarwal, R., et al. ``On-Policy Distillation of Language Models: Learning from Self-Generated Mistakes.'' \emph{arXiv preprint}, 2024.
+\bibitem{li2026bandpo} Li, Y., et al. ``BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2603.04918}, 2026.
+\bibitem{wang2026delta} Wang, Z., et al. ``DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.'' \emph{arXiv preprint arXiv:2605.21467}, 2026.
+\bibitem{chen2026dvao} Chen, Y., et al. ``DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.'' \emph{arXiv preprint arXiv:2605.25604}, 2026.
+\bibitem{liu2026crossdomain} Liu, J., et al. ``A Local Perturbation Theory for Cross-Domain Interference and Recovery in Multi-Domain RL.'' \emph{arXiv preprint arXiv:2606.02398}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{li2026fireopd} Li, Y., et al. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{wang2026esr} Wang, Z., et al. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\bibitem{su2026opdlm} Su, Y., et al. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\bibitem{fu2026flowopd} Fu, J., et al. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \emph{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{xu2026dare} Xu, H., et al. ``DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.'' \emph{arXiv preprint arXiv:2604.04215}, 2026.
+\bibitem{li2026vgrpo} Li, Y., et al. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{ping2026flowdppo} Ping, B., et al. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\end{thebibliography}
+
+\end{document}
