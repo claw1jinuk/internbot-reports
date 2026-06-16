@@ -1,0 +1,129 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: APPO --- Agentic Procedural\\Policy Optimization}
+\author{Internbot --- Automated Research Summary}
+\date{June 16, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Agentic RL based on RLVR provides feedback only at the \emph{trajectory level}---a single outcome reward for an entire multi-step interaction---creating a fundamental credit assignment problem. Wang et al.~\cite{wang2026appo} argue that existing approaches attempt to extract finer credit by branching trajectories at intermediate locations, but rely on \emph{coarse-grained heuristic units}: workflow-level approaches (ReAct, Reflexion) treat entire stages as atomic, while tool-call-level approaches (ARPO, Tree-GRPO) branch only at tool-call boundaries, compressing all reasoning between tool calls into monolithic ``thinking'' blocks. A pilot study reveals that (1)~the highest-uncertainty positions are \emph{not} concentrated at tool-call boundaries but are broadly distributed throughout the thinking span; (2)~token entropy alone does not reliably indicate decision significance (high-entropy tokens may reflect lexical rarity rather than task-relevant choices); (3)~the paper's proposed Branching Score (BS) correlates much better with actual outcome divergence than entropy-based selection.
+
+\subsection{Method}
+
+\paragraph{APPO Architecture: Three Phases.}
+
+\emph{Phase 1---Initialization}: Given input $x$ and global rollout budget $M$, generate $N$ full rollouts from behavior policy $\pi_{\mathrm{old}}$ as tree roots.
+
+\emph{Phase 2---Procedural Rollout Branching}: For each token $H_{n,i}$ in rollout $H_n$, compute two quantities:
+
+\textbf{Future Value} ($\Omega$): The accumulated decayed importance sampling ratio measuring downstream distributional shift:
+\begin{equation}
+\Omega_{n,i} = \exp\!\left(\sum_{i' \geq i} \gamma^{i'-i} \log \frac{\pi_\theta(H_{n,i'} \mid H_{n,<i'}, x)}{\pi_{\mathrm{old}}(H_{n,i'} \mid H_{n,<i'}, x)}\right)
+\end{equation}
+where $\gamma = 2^{-1/\tau}$ with $\tau\!=\!32$ suppresses distant tokens. Large $\Omega$ indicates the policy has shifted its downstream behavior at that reasoning juncture.
+
+\textbf{Branching Score} (BS): The \emph{multiplicative} combination of z-score-normalized, clipped $\Omega$ and z-score-normalized entropy:
+\begin{equation}
+\mathrm{BS}_{n,i} = Z\!\left(\mathrm{clip}(\Omega_{n,i}, 1\!-\!\epsilon', 1\!+\!\epsilon'); H_n\right) \cdot Z\!\left(\mathcal{H}_{n,i}; H_n\right)
+\end{equation}
+The multiplicative form ensures selected tokens are \emph{both locally uncertain AND consequential downstream}---entropy alone selects rare nouns (vocabulary long-tail), while $\Omega$ alone selects confirmation tokens with high influence but no training value. Top-$B$ tokens per rollout are selected, and branches are generated from the \emph{current policy} $\pi_\theta$ (not $\pi_{\mathrm{old}}$).
+
+\emph{Phase 3---Procedural Advantage Estimation and Optimization}:
+
+\textbf{Dual-Group Advantage}: Since initial rollouts come from $\pi_{\mathrm{old}}$ and branches from $\pi_\theta$, mixing them introduces distributional bias. APPO normalizes rewards \emph{separately} within each group, then averages:
+\begin{equation}
+A^{\mathrm{base}}_{n,i} = \mathrm{avg}\left\{\frac{R_n - \bar{R}_{T_*}}{\sigma_{T_*}} \;\middle|\; T_* \in \{T_{\mathrm{init}}, T_{\mathrm{branch}}\}\right\}
+\end{equation}
+
+\textbf{Future-Aware Advantage Scaling}: Amplifies credit at high-impact decision points:
+\begin{equation}
+A_{n,i} = A^{\mathrm{base}}_{n,i} \cdot (1 + b \cdot A^{\mathrm{fut}}_{n,i})
+\end{equation}
+where $A^{\mathrm{fut}}_{n,i} = \mathrm{clip}_{\epsilon'}(\Omega_{n,i})$ and $b\!=\!0.5$ controls the contribution. The final objective is a PPO-style clipped surrogate with KL regularization.
+
+\paragraph{Theoretical Guarantees.} \emph{Theorem~1 (Variance Reduction)}: Under a monotonicity assumption between BS and conditional reward variance, APPO's BS-guided allocation achieves $\mathrm{Var}(g_{\mathrm{APPO}}) \leq \mathrm{Var}(g_{\mathrm{base}}) - \Delta_\Omega(\mathrm{BS})$ where $\Delta_\Omega \geq 0$, via Lagrange-optimal sample allocation.
+
+\emph{Theorem~2 (Policy Improvement Bound)}: Under KL and clipping constraints, $J(\pi_{\mathrm{new}}) - J(\pi_{\mathrm{old}}) \geq L_{\mathrm{APPO}}(\pi_{\mathrm{new}}) - C\epsilon/(1\!-\!\gamma)^2$, where $L_{\mathrm{APPO}}$ is the $\omega(s)$-weighted surrogate that focuses improvement on procedurally important states.
+
+\subsection{Results}
+
+\paragraph{Deep Reasoning (10 benchmarks).} On Qwen2.5-7B: APPO achieves \textbf{62.2\%} average (+8.9\% over GRPO's 56.5\%, +3.9\% over ARPO's 58.3\%). On Llama3.1-8B: \textbf{57.4\%} average (+7.9\% over GRPO). Key gains vs.\ ARPO on Qwen2.5-7B: AIME24 +6.7pp, HotpotQA +7.7pp, 2Wiki +5.4pp, Bamboogle +6.1pp.
+
+\paragraph{Deep Search (GAIA, HLE, Xbench).} On Qwen3-8B: APPO achieves \textbf{42.7} GAIA average, \textbf{33.8} HLE, \textbf{13.4} Xbench (+3.9, +1.8, +4.6 over ARPO). On Qwen3-14B: \textbf{46.6} GAIA, \textbf{43.4} HLE, \textbf{12.3} Xbench. Notably, APPO with Qwen3-14B (46.6 GAIA) massively exceeds DeepSeek-R1-671B (25.2 GAIA)---a model $\sim$48$\times$ larger.
+
+\paragraph{Budget Efficiency.} At budget $M\!=\!4$, APPO matches ARPO at $M\!=\!16$ (52.7 vs.\ 52.7 on knowledge-intensive tasks), demonstrating \textbf{4$\times$ budget efficiency}. Balanced allocation ($N\!=\!4, B\!=\!3$ at $M\!=\!16$) outperforms both extreme breadth ($N\!=\!8, B\!=\!1$) and extreme depth ($N\!=\!2, B\!=\!7$).
+
+\paragraph{Ablation.} All three components contribute non-redundant gains. Average degradation when removed (across both backbones): $A^{\mathrm{fut}}$ most impactful ($-$1.4 to $-$3.4pp), dual-group advantage ($-$1.1 to $-$2.1pp), BS vs.\ entropy ($-$0.9 to $-$1.8pp).
+
+\subsection{Limitations}
+
+No theoretical optimality guarantee for BS as a branching criterion. Limited tool diversity (search and Python only). Scale behavior at 32B+ untested. KL regularization disabled ($\beta\!=\!0$) throughout training, raising questions about the applicability of the policy improvement bound. Computational overhead of BS computation (requiring forward passes through both $\pi_\theta$ and $\pi_{\mathrm{old}}$) not quantified. Dependence on ARPO's strong SFT initialization pipeline.
+
+\subsection{Relevance to Our Research}
+
+APPO introduces \emph{procedure-level} credit assignment for agentic RL, occupying a semantic middle ground between the token-level analysis we reviewed in DelTA~\cite{wang2026delta} and the trajectory-level GRPO approaches in BandPO~\cite{li2026bandpo} and DVAO~\cite{chen2026dvao}. The Branching Score---which multiplies future value ($\Omega$, measuring downstream distributional shift) by local entropy---operationalizes the ``sparse and critical'' token insight from our geometric OPD review~\cite{shen2026geometry}, where we saw that OPD's update subspace locks early to a low-dimensional channel. APPO's $\Omega$ formulation essentially identifies tokens that \emph{break} this lock---positions where the policy's downstream trajectory diverges most from its previous behavior.
+
+The dual-group advantage design connects to Flow-DPPO's~\cite{ping2026flowdppo} asymmetric masking: both recognize that mixing on-policy and off-policy data requires careful distributional separation. APPO's 4$\times$ budget efficiency through principled branching parallels the finding from ESR~\cite{wang2026esr} and FiRe-OPD~\cite{li2026fireopd} that targeted sample selection dramatically reduces computational waste in on-policy methods. The future-aware advantage scaling ($A^{\mathrm{fut}}$) provides a concrete mechanism for the credit assignment problem identified in our cross-domain RL interference review~\cite{liu2026crossdomain}: amplifying gradients at decision points where interference is most consequential.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Procedural Branching for On-Policy Distillation}
+
+\paragraph{Gap.} Current OPD methods (FiRe-OPD~\cite{li2026fireopd}, ESR~\cite{wang2026esr}) generate student rollouts and apply teacher supervision uniformly or with token-level reweighting. Our geometric OPD review~\cite{shen2026geometry} showed token sparsification preserves the locked update subspace, but the selection criteria (top-KL, random) are heuristic. APPO's BS provides a principled alternative: identify tokens where alternative continuations would diverge most, and concentrate teacher supervision there.
+
+\paragraph{Approach.} Adapt APPO's Branching Score to OPD: compute $\Omega$ as the accumulated student-teacher KL ratio (rather than $\pi_\theta/\pi_{\mathrm{old}}$), multiply by local entropy, and allocate teacher forward passes only at high-BS positions. At these positions, generate branch continuations from the student and compute teacher KL supervision. For low-BS positions, use a cheaper proxy (cached teacher logits or no supervision). This creates a \emph{procedure-aware distillation} scheme where teacher compute scales with the decision complexity of each token, potentially reducing teacher inference costs by 60--80\% while matching full-supervision quality.
+
+\paragraph{Feasibility.} The $\Omega$ computation reuses the student's log-probabilities already available during rollout. BS computation adds one z-score normalization per rollout. Teacher forward passes at high-BS positions only require caching the student rollout prefix. Implementation on Qwen3-8B (student) / Qwen3-32B (teacher) with DAPO-Math-17k, directly comparable to the geometric OPD experimental setup. Estimated timeline: 2--3 weeks.
+
+\subsection{Direction 2: Branching Score for Diffusion LLM Denoising Credit Assignment}
+
+\paragraph{Gap.} RL fine-tuning of diffusion LLMs (V-GRPO~\cite{li2026vgrpo}, DARE~\cite{xu2026dare}) applies trajectory-level rewards to iterative denoising processes, facing the same credit assignment problem APPO addresses for autoregressive agents. Each denoising step is a ``decision point'' where the model unmasks tokens, but current methods assign equal credit to all steps. Flow-DPPO~\cite{ping2026flowdppo} introduced per-step divergence masking but did not identify which denoising steps are most consequential for the final output quality.
+
+\paragraph{Approach.} Adapt BS to the diffusion denoising MDP: at each reverse step $t$, compute $\Omega_t$ as the accumulated importance ratio across future denoising steps, measuring how much the current policy's remaining trajectory differs from the reference. Multiply by per-step entropy (which is naturally high at early denoising steps where many tokens are masked). The resulting $\mathrm{BS}_t$ identifies ``critical denoising steps'' where branching would produce the largest outcome divergence. Use this for: (a)~targeted GRPO branching in V-GRPO training (branch at high-BS steps rather than uniformly), (b)~future-aware advantage scaling ($A^{\mathrm{fut}}_t$) to amplify credit at these steps. The hypothesis is that early denoising steps (high uncertainty, many masked tokens) will have high BS, while later refinement steps will have low BS---providing natural adaptive credit allocation.
+
+\paragraph{Feasibility.} The denoising MDP has $K\!=\!10$--50 steps (vs.\ hundreds of tokens in autoregressive rollouts), making $\Omega$ computation trivial. BS requires two forward passes per step (current and old policy), which are already performed in V-GRPO. Branch generation at high-BS denoising steps reuses the existing reverse sampling infrastructure. Validation on LLaDA-8B with AIME-24/MATH-500 using V-GRPO + BS-guided branching. Estimated compute: comparable to standard V-GRPO training.
+
+\subsection{Direction 3: Self-Evolving Agents with Procedure-Level Skill Memory}
+
+\paragraph{Gap.} Our self-evolving agent reviews (SkillOS~\cite{chen2026skillos}, SkillOpt~\cite{li2026skillopt}, Continual Experience Internalization~\cite{liu2026continual}) and EvoArena~\cite{xu2026evoarena} identify two complementary challenges: (a)~skill accumulation (learning reusable procedures from experience) and (b)~memory evolution (tracking what changed and what persists). APPO's procedure concept---latent decision points identified by BS---provides a natural unit for skill extraction. Rather than accumulating entire trajectories or workflow stages as skills, extract the \emph{high-BS segments} as reusable procedural patterns that represent the agent's learned decision-making at critical junctures.
+
+\paragraph{Approach.} After APPO training, for each successful trajectory, extract segments around the top-$k$ BS positions (prefix context + decision token + continuation). Cluster these segments by semantic similarity to form a \emph{procedural skill library}. Each skill entry includes: the decision context (what situation triggers this procedure), the chosen action (what the agent decided), the outcome impact ($\Omega$ magnitude), and EvoMem-style version patches when skills are updated. At inference, retrieve relevant procedural skills as in-context exemplars when the agent encounters similar decision contexts. This creates a bridge between APPO's training-time procedure identification and deployment-time skill reuse, with EvoArena-style version tracking for robustness under environment evolution.
+
+\paragraph{Feasibility.} BS computation is already available from APPO training---extracting high-BS segments requires only post-processing of training logs. Semantic clustering can use embedding similarity (e.g., UMAP + DBSCAN as in APPO's own diversity analysis). The procedural skill library is lightweight (one segment per decision pattern, not full trajectories). Integration with existing agent frameworks (OpenHands, Terminus2) requires adding a retrieval step at high-entropy inference positions. Validation on EvoArena's Terminal-Bench-Evo (chain-level accuracy as metric) would directly test whether procedural skills improve consistency across evolving environments.
+
+\section{Conclusion}
+
+APPO introduces procedure-level credit assignment for agentic RL by identifying latent decision points through the Branching Score---a multiplicative combination of local entropy and future value ($\Omega$) that selects tokens both locally uncertain and consequential downstream. The three-phase architecture (initialization, BS-guided branching, dual-group advantage with future-aware scaling) achieves state-of-the-art results across 13 benchmarks spanning math reasoning, knowledge-intensive QA, and deep search, with 4$\times$ budget efficiency over ARPO. The theoretical framework provides variance reduction and policy improvement guarantees grounding the BS-guided branching in trust-region optimization. For our research program, APPO establishes ``procedures'' as the natural granularity for agentic RL---finer than tool-call stages but coarser than individual tokens---and the BS scoring mechanism provides a principled bridge between our token-level credit assignment work (DelTA) and trajectory-level optimization (GRPO variants), with direct applications to on-policy distillation, diffusion LLM denoising, and self-evolving agent skill extraction.
+
+\begin{thebibliography}{99}
+\bibitem{wang2026appo} Wang, X., Ma, Z., Wang, Y., Ji, Y., Yang, S., Chen, G., Wang, P., and Chu, X. ``APPO: Agentic Procedural Policy Optimization.'' \emph{arXiv preprint arXiv:2606.12384}, 2026.
+\bibitem{wang2026delta} Wang, Z., et al. ``DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.'' \emph{arXiv preprint arXiv:2605.21467}, 2026.
+\bibitem{li2026bandpo} Li, Y., et al. ``BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2603.04918}, 2026.
+\bibitem{chen2026dvao} Chen, Y., et al. ``DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.'' \emph{arXiv preprint arXiv:2605.25604}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{ping2026flowdppo} Ping, B., et al. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{wang2026esr} Wang, Z., et al. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\bibitem{li2026fireopd} Li, Y., et al. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{liu2026crossdomain} Liu, J., et al. ``A Local Perturbation Theory for Cross-Domain Interference and Recovery in Multi-Domain RL.'' \emph{arXiv preprint arXiv:2606.02398}, 2026.
+\bibitem{li2026vgrpo} Li, Y., et al. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{xu2026dare} Xu, H., et al. ``DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.'' \emph{arXiv preprint arXiv:2604.04215}, 2026.
+\bibitem{chen2026skillos} Chen, X., et al. ``SkillOS: Learning Skill Curation for Self-Evolving Agents.'' \emph{arXiv preprint arXiv:2605.06614}, 2026.
+\bibitem{li2026skillopt} Li, Y., et al. ``SkillOpt: Executive Strategy for Self-Evolving Agent Skills.'' \emph{arXiv preprint arXiv:2605.23904}, 2026.
+\bibitem{liu2026continual} Liu, J., et al. ``Rethinking Continual Experience Internalization for Self-Evolving LLM Agents.'' \emph{arXiv preprint arXiv:2606.04703}, 2026.
+\bibitem{xu2026evoarena} Xu, J., et al. ``EvoArena: Tracking Memory Evolution for Robust LLM Agents in Dynamic Environments.'' \emph{arXiv preprint arXiv:2606.13681}, 2026.
+\end{thebibliography}
+
+\end{document}
