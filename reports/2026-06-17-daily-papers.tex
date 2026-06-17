@@ -1,0 +1,143 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Who Should Lead Decoding Now?\\Tracking Reliable Trajectories for Ensembling\\Masked Diffusion Language Models}
+\author{Internbot --- Automated Research Summary}
+\date{June 17, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+As Masked Diffusion Language Models (MDLMs) diversify---with architectures like LLaDA~\cite{nie2026llada}, Dream~\cite{dream2026}, DreamCoder, and DiffuCoder exhibiting different strengths across tasks---the question of how to combine their complementary capabilities at inference time becomes critical. Yun et al.~\cite{yun2026tie} identify a fundamental incompatibility between MDLMs and existing ensemble methods: autoregressive (AR) ensemble techniques (logit averaging, confidence-based routing) rely on a shared ``next-token'' concept defined by a fixed left-to-right generation order, but MDLMs denoise tokens in a flexible, confidence-determined order. At any given denoising step, two different MDLMs will generally have different tokens unmasked at different positions, making token-level or span-level fusion impossible.
+
+The paper establishes two empirical observations that motivate their solution. First, \emph{correct samples exhibit more stable confidence dynamics on answer tokens}: the Token Change Count (TCC) metric---counting how many times the top-1 predicted token at masked answer positions changes between consecutive denoising steps---is roughly $2\times$ higher for incorrect samples than correct ones (e.g., on MMLU: LLaDA correct $C=1.81$ vs.\ incorrect $C=4.27$; Dream correct $C=2.32$ vs.\ incorrect $C=6.19$). Second, \emph{reliable partial trajectories from one model can correct another}: injecting as little as 33\% of a correct model's denoising trajectory into an incorrect model yields a 56--81\% correction rate, demonstrating that cross-model trajectory sharing can rescue failing generations.
+
+\subsection{Method}
+
+\paragraph{Background: MDLM Forward/Reverse Process.}
+The forward process corrupts clean tokens $x$ into noisy states $z_t$ via:
+\begin{equation}
+q(z_t \mid x) = \mathrm{Cat}(z_t;\; \alpha_t \cdot x + (1 - \alpha_t) \cdot m)
+\end{equation}
+where $\alpha_t$ is a noise schedule and $m$ is the mask token. The reverse process is parameterized by a neural network $f_\theta$ that estimates the clean-token distribution at each masked position, trained by minimizing the negative ELBO over masked positions.
+
+\paragraph{TIE: Trajectory-based Iterative Ensembling.}
+TIE operates over $M$ constituent MDLMs in a recurring three-step cycle:
+
+\emph{Step 1---Trajectory Generation}: Each model $m$ independently decodes from its current state for $n$ steps (the ``ensemble interval''), producing a partial trajectory $T_m^{(n)}$. A critical design choice enforces that answer-token positions are unmasked \emph{only after} all reasoning-token positions are fully resolved, ensuring reasoning precedes answers.
+
+\emph{Step 2---Trajectory Assessment}: Four scoring metrics evaluate trajectory quality, all computed exclusively over masked answer-token positions $\mathcal{A}_m^{(t)}$:
+
+\textbf{(a) Negative Token Change Count (history-based):}
+\begin{equation}
+\mathrm{Score}(T_m^{(n)}) = -\tilde{C}_m^{(n)} = -\sum_{t=T-n+1}^{T-1} \frac{1}{|\mathcal{A}_m^{(t)}|} \sum_{a \in \mathcal{A}_m^{(t)}} \mathbf{1}\!\left[\arg\max p_a^{(t)} \neq \arg\max p_a^{(t+1)}\right]
+\end{equation}
+The normalization by $|\mathcal{A}_m^{(t)}|$ is essential because models may have different numbers of masked answer positions at each step, preventing unfair penalization of models with more remaining masks.
+
+\textbf{(b--d) Cross-model scoring for logit-based metrics} (top-1 probability, entropy, probability margin):
+\begin{equation}
+\mathrm{Score}(T_m^{(n)}) = \frac{1}{M} \sum_{m'=1}^{M} f(T_m^{(n)};\; m')
+\end{equation}
+Each trajectory is forwarded through \emph{all} constituent models and scored using averaged confidence. This cross-model evaluation corrects for calibration differences---a single model might be systematically overconfident, biasing source-model-only scoring.
+
+\emph{Step 3---Trajectory Relay}: The best trajectory is selected and broadcast to all models:
+\begin{equation}
+m^* = \arg\max_{m \in [M]} \mathrm{Score}(T_m^{(n)}), \qquad T_m^{(n)} \leftarrow T_{m^*}^{(n)} \;\;\forall\, m \in [M]
+\end{equation}
+After relay, trajectory scores are reset and each model resumes independent decoding for the next $n$ steps. This exploits a key property of MDLMs: since any model can resume denoising from any intermediate partially-unmasked state, the entire sequence can be shared as a ``checkpoint'' between models.
+
+\paragraph{Final Response Selection.} After decoding terminates, the $M$ candidate responses are ranked by lowest normalized TCC over the entire generation, with ties broken by highest top-1 probability.
+
+\paragraph{Implementation Details.} Semi-autoregressive generation with block size 16 and low-confidence remasking with greedy decoding. Default ensemble interval $n=16$ (32 for TCC on complex tasks). All models execute in parallel on separate GPUs, so wall-clock latency is comparable to a single model.
+
+\subsection{Results}
+
+\paragraph{LLaDA + Dream Ensemble.} TIE consistently outperforms both individual models and post-generation ensembling across diverse benchmarks. Key results: MMLU 67.55 (vs.\ 67.46 Dream, 61.23 LLaDA), ARC-C \textbf{89.16} (+2.47 over best individual), GSM8K \textbf{83.62} (+4.85 over best individual), MATH500 48.6 (matching Dream), MBPP \textbf{64.17} (+0.94 over Dream). The TCC scoring function is the most robust, achieving the best results on 4 of 8 benchmarks.
+
+\paragraph{Dynamic Leadership.} The model producing the highest-scoring trajectory changes dynamically (44.80\% change rate on GSM8K, 44.43\% on Countdown), confirming that no single model dominates---different models contribute most at different denoising stages.
+
+\paragraph{Code-Specialized Models.} TIE generalizes to domain-specific MDLMs (DreamCoder + DiffuCoder), improving MBPP from 75.88 to \textbf{76.58} with top-1 scoring.
+
+\paragraph{Compatibility with Acceleration.} TIE maintains improvements under both threshold-based unmasking ($\tau=0.9$) and top-$k$ unmasking ($k=2$), confirming compatibility with existing decoding acceleration techniques.
+
+\subsection{Limitations}
+
+\textbf{Large capability gaps degrade performance}: When one model substantially underperforms (gap $>$15\%), TIE can hurt rather than help. On HumanEval, where LLaDA (45.73) is far weaker than Dream (61.59), TIE underperforms Dream alone---the weaker model introduces noisy trajectory signals.
+
+\textbf{Limited to two-model ensembles}: All experiments use $M=2$. Scaling behavior with larger ensembles is unexplored.
+
+\textbf{Answer-position dependence}: The framework requires clear delineation between ``reasoning tokens'' and ``answer tokens'' (via ``Answer:'' suffix), which may not generalize to open-ended generation tasks without structured output formats.
+
+\textbf{No learning component}: While training-free is presented as a strength, TIE cannot learn to correct its own trajectory selection biases from past experience.
+
+\subsection{Relevance to Our Research}
+
+TIE addresses the MDLM ensembling problem by operating at the \emph{trajectory level} rather than the token level---a natural choice given MDLMs' flexible generation order. This connects directly to our extensive body of diffusion LLM reviews. Our DMax review~\cite{huang2026dmax} and Orthrus review~\cite{wang2026orthrus} explored parallel decoding strategies that accelerate single-model MDLM inference; TIE complements these by showing how to combine \emph{multiple} models during the same denoising process. The trajectory relay mechanism---where one model's partially-denoised sequence serves as a ``checkpoint'' for all models---is conceptually similar to the remasking strategies analyzed in S2D2~\cite{chen2026s2d2}, but applied across models rather than within a single model's speculative decoding loop.
+
+The TCC metric (stability of answer-token predictions across denoising steps) provides an empirical quality signal complementary to the D$^2$-Monitor's~\cite{liu2026d2monitor} hesitation-aware routing, which detects safety-critical positions by measuring prediction entropy spikes. TIE's cross-model scoring (Eq.~3) also relates to our TIDE review~\cite{li2026tide}, where cross-architecture distillation transfers knowledge between AR and diffusion LLMs---here, cross-model evaluation during inference achieves knowledge fusion without any training.
+
+The observation that injecting just 33\% of a correct trajectory suffices for 56--81\% correction rate has strong implications for on-policy distillation: in the geometric OPD framework~\cite{shen2026geometry}, we found that the student's update subspace locks early in training. TIE suggests that even partial teacher trajectories at critical denoising steps could break these locks, motivating \emph{trajectory-level} (not just token-level) teacher intervention in OPD.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Trajectory-Guided On-Policy Distillation for MDLMs}
+
+\paragraph{Gap.} Current OPD methods for diffusion LLMs (OPDLM~\cite{ye2026opdlm}, geometric OPD~\cite{shen2026geometry}, FiRe-OPD~\cite{li2026fireopd}) operate at the token level: teacher supervision is applied uniformly or with per-token reweighting across all denoising steps. TIE's 56--81\% trajectory correction finding suggests that \emph{which denoising steps} receive teacher supervision matters far more than how much supervision each token gets. Yet no OPD method for MDLMs exploits trajectory-level teacher intervention.
+
+\paragraph{Approach.} Adapt TIE's assessment-relay mechanism to OPD: during student denoising, evaluate partial trajectories using TCC computed against teacher predictions (rather than cross-model scoring). At denoising steps where student TCC exceeds a threshold (indicating unstable, likely-incorrect token predictions), inject the teacher's partial trajectory via relay and let the student resume from the teacher's state. This creates an \emph{adaptive trajectory injection} scheme where teacher compute is allocated to denoising steps where the student struggles most. Key distinction from uniform OPD: the teacher only needs to run forward passes at high-TCC steps (estimated 20--30\% of total steps based on TIE's finding that trajectory changes cluster at specific phases), reducing teacher inference cost by 3--5$\times$ while concentrating supervision where it matters.
+
+\paragraph{Feasibility.} TCC computation reuses student logits already available during denoising---no additional forward passes. Teacher trajectory generation at high-TCC steps uses standard MDLM sampling. Validation on LLaDA-8B (student) / LLaDA-70B (teacher) with MMLU and GSM8K, directly comparable to OPDLM's experimental setup. The $n=16$ ensemble interval from TIE provides a validated default for the injection frequency.
+
+\subsection{Direction 2: Self-Improving MDLM Ensembles via Learned Trajectory Selection}
+
+\paragraph{Gap.} TIE uses fixed, hand-designed scoring functions (TCC, top-1 probability, entropy, margin) for trajectory assessment, with no mechanism to learn which scoring function works best for which task or denoising phase. Table~3 of the paper shows significant scoring function sensitivity---TCC wins on 4/8 benchmarks, entropy on 3/8, top-1 on 1/8---but TIE cannot adapt its selection strategy from experience. This connects to the skill curation challenge identified in our SkillOS~\cite{chen2026skillos} and SkillOpt~\cite{li2026skillopt} reviews, where agents learn to select and compose skills over time.
+
+\paragraph{Approach.} Replace TIE's fixed scoring with a lightweight \emph{meta-selector} trained to predict which scoring function (or convex combination thereof) will yield the best trajectory at each relay step. Input features: current denoising step $t/T$, number of remaining masked tokens, cross-model agreement (fraction of answer positions where both models predict the same top-1 token), and the four scoring metrics themselves. The meta-selector is a small MLP ($<$1M parameters) trained on a held-out set of tasks where ground-truth correctness is available, using a simple binary reward (did the selected trajectory lead to a correct final answer?). This learns task-phase-dependent scoring preferences---e.g., preferring entropy-based scoring at early denoising steps (high uncertainty) and TCC at later steps (stability matters more). The meta-selector can be updated continually as new tasks are encountered, creating a \emph{self-improving} ensemble that accumulates trajectory selection experience, addressing the continual learning dimension of our research~\cite{liu2026continual}.
+
+\paragraph{Feasibility.} The meta-selector is extremely lightweight (forward pass $<$0.1ms, negligible compared to model inference). Training data is generated automatically from TIE runs with known ground truth. The four scoring metrics are already computed in TIE, so the meta-selector only adds feature extraction and a single MLP forward pass per relay step. Validation: compare meta-selector TIE vs.\ fixed-scoring TIE on the same benchmark suite, measuring both accuracy and the learned scoring preferences across denoising phases.
+
+\subsection{Direction 3: Divergence-Aware Trajectory Relay for Flow-Based Diffusion Models}
+
+\paragraph{Gap.} TIE is designed specifically for \emph{masked} diffusion (discrete state space with mask tokens), but the rapidly growing family of \emph{flow-based} diffusion models (LangFlow~\cite{ye2026langflow}, Flow-DPPO~\cite{ping2026flowdppo}, Flow-OPD~\cite{wu2026flowopd}) operates in continuous latent spaces where the ``trajectory'' concept is fundamentally different. In flow matching, denoising follows ODE/SDE paths in continuous space rather than discrete unmasking sequences. No ensemble method exists for combining multiple flow-based diffusion LLMs during inference.
+
+\paragraph{Approach.} Extend TIE to continuous flow matching by redefining trajectory assessment in terms of \emph{velocity field divergence}. At each ODE step $t$, compute the cross-model velocity disagreement: $D_t = \|v_{\theta_1}(z_t, t) - v_{\theta_2}(z_t, t)\|_2$, where $v_{\theta_i}$ are the velocity fields of two flow models. High $D_t$ indicates the models disagree on the denoising direction---analogous to high TCC in masked diffusion. For trajectory relay: at each ensemble interval, project both models' intermediate latents $z_t^{(1)}, z_t^{(2)}$ to token space via the nearest-neighbor decoder, score using cross-model log-likelihood (each model evaluates the other's projected tokens), and relay the higher-scoring latent to both models. The key technical challenge is that flow models operate in continuous space, so ``relay'' requires mapping between potentially different latent representations. Our approach uses the shared vocabulary decoder as a common projection space, inspired by TIDE's cross-architecture distillation~\cite{li2026tide}. This would also leverage Flow-DPPO's~\cite{ping2026flowdppo} ratio-noise decomposition ($\mathrm{Var}[\log r_t] = 2D_{\mathrm{KL}}$) as an alternative trajectory quality metric---trajectories with lower accumulated KL drift are more reliable.
+
+\paragraph{Feasibility.} Velocity field evaluation reuses model forward passes already performed during ODE solving. The nearest-neighbor decoding projection is a single matrix multiply. Main risk: continuous-space relay may introduce discretization artifacts when projecting to token space and back. Validation on LangFlow-7B variants with different training seeds (creating heterogeneous models), measuring perplexity and downstream task accuracy on LAMBADA and HellaSwag.
+
+\section{Conclusion}
+
+TIE introduces the first ensembling framework specifically designed for Masked Diffusion Language Models, addressing the fundamental incompatibility between MDLMs' flexible generation order and existing AR-based ensemble methods. The three-step cycle---independent trajectory generation, cross-model trajectory assessment (via TCC, top-1 probability, entropy, or margin scoring), and trajectory relay---exploits MDLMs' unique property that any model can resume denoising from any partially-unmasked state. The empirical finding that correct generations exhibit $2\times$ lower token change count than incorrect ones provides a principled basis for trajectory quality assessment, while the 56--81\% correction rate from partial trajectory injection demonstrates the power of cross-model knowledge sharing during inference. For our research program, TIE establishes trajectory-level fusion as the natural ensembling granularity for diffusion LLMs, complementing our prior work on token-level OPD (OPDLM, geometric OPD), step-level RL (V-GRPO, Flow-DPPO), and architecture-level distillation (TIDE). The trajectory relay mechanism suggests a new paradigm for on-policy distillation where teacher intervention operates at the trajectory checkpoint level rather than per-token supervision, potentially unifying the efficiency gains of selective distillation with the corrective power of full trajectory sharing.
+
+\begin{thebibliography}{99}
+\bibitem{yun2026tie} Yun, H., Park, J., Kim, J., and Yang, E. ``Who Should Lead Decoding Now? Tracking Reliable Trajectories for Ensembling Masked Diffusion Language Models.'' \emph{arXiv preprint arXiv:2606.16281}, 2026.
+\bibitem{nie2026llada} Nie, S., et al. ``LLaDA: Large Language Diffusion with mAsking.'' \emph{arXiv preprint arXiv:2502.09992}, 2025.
+\bibitem{dream2026} Dream. ``Dream: Discrete Rectified Flow Models for Generation.'' \emph{arXiv preprint}, 2025.
+\bibitem{huang2026dmax} Huang, S., et al. ``DMax: Aggressive Parallel Decoding for dLLMs.'' \emph{arXiv preprint arXiv:2604.08302}, 2026.
+\bibitem{wang2026orthrus} Wang, Z., et al. ``Orthrus: Memory-Efficient Parallel Token Generation via Dual-View Diffusion.'' \emph{arXiv preprint arXiv:2605.12825}, 2026.
+\bibitem{chen2026s2d2} Chen, X., et al. ``S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.'' \emph{arXiv preprint arXiv:2603.25702}, 2026.
+\bibitem{liu2026d2monitor} Liu, J., et al. ``D$^2$-Monitor: Dynamic Safety Monitoring for Diffusion LLMs via Hesitation-Aware Routing.'' \emph{arXiv preprint arXiv:2605.25893}, 2026.
+\bibitem{li2026tide} Li, Y., et al. ``Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.'' \emph{arXiv preprint arXiv:2604.26951}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{ye2026opdlm} Ye, H., et al. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\bibitem{li2026fireopd} Li, Y., et al. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{chen2026skillos} Chen, X., et al. ``SkillOS: Learning Skill Curation for Self-Evolving Agents.'' \emph{arXiv preprint arXiv:2605.06614}, 2026.
+\bibitem{li2026skillopt} Li, Y., et al. ``SkillOpt: Executive Strategy for Self-Evolving Agent Skills.'' \emph{arXiv preprint arXiv:2605.23904}, 2026.
+\bibitem{liu2026continual} Liu, J., et al. ``Rethinking Continual Experience Internalization for Self-Evolving LLM Agents.'' \emph{arXiv preprint arXiv:2606.04703}, 2026.
+\bibitem{ye2026langflow} Ye, J., et al. ``LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling.'' \emph{arXiv preprint arXiv:2604.11748}, 2026.
+\bibitem{ping2026flowdppo} Ping, B., et al. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{wu2026flowopd} Wu, Y., et al. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \emph{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{li2026vgrpo} Li, Y., et al. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\end{thebibliography}
+
+\end{document}
