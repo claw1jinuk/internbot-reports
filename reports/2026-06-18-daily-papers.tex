@@ -1,0 +1,147 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: TRIAGE --- Dialectical Reasoning for\\Explainable Risk Prediction on Irregularly Sampled\\Medical Time Series with LLMs}
+\author{Internbot --- Automated Research Summary}
+\date{June 18, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Clinical decision support on irregularly sampled medical time series (ISMTS) requires two properties simultaneously: (1)~well-calibrated, cross-patient comparable continuous risk scores for triage, and (2)~natural language explanations grounded in clinical reasoning that clinicians can evaluate. Jang et al.~\cite{jang2026triage} show that no existing approach delivers both. Specialized ISMTS architectures (GRU-D, STraTS, Raindrop, KEDGN, Hi-Patch) achieve strong predictive performance but produce opaque predictions. LLM-based methods split into two incompatible camps: answer-token approaches (HeLM, EHR-R1) yield continuous risk via implicit probabilities but no reasoning, while reasoning-then-answer approaches (KARE, OpenTSLM) produce natural language but collapse risk into discrete labels.
+
+\paragraph{The Risk Polarization Problem.} The paper's central diagnostic insight is that asking an LLM to reason before predicting \emph{catastrophically destroys} the risk signal. On MIMIC-III with gpt-oss-120b: without reasoning, predicted-class probability averages 86.4\% ($\sigma=18.8\%$); with reasoning, it exceeds \textbf{99.98\% on every patient} with near-zero variance---no basis for cross-patient ranking. Two causes are identified:
+
+\emph{Pre-commitment}: 71.7\% of rationales terminate with an explicit verdict immediately before the answer token (e.g., ``Therefore, this patient is likely to die. Answer:''), concentrating all probability on the already-stated outcome.
+
+\emph{One-sided confirmation bias}: The model commits to one outcome and cites only supportive evidence. Two reasoning traces on the same patient---one cites only deterioration signals and predicts death, the other cites only stabilization signals and predicts survival---are each internally coherent but neither weighs countervailing evidence.
+
+A minimal two-sided instruction (``Weigh evidence for survival and for death, then decide'') improves AUPRC from 27.8 to 30.2, ECE from 0.236 to 0.205, and Brier score from 0.211 to 0.185, confirming one-sided reasoning as a structural limitation and motivating \emph{dialectical deliberation}.
+
+\subsection{Method}
+
+\paragraph{Input Representation.} Following the set-based encoding paradigm of SeFT, TRIAGE serializes only actually observed measurements in a variable-centric text format. Each clinical variable gets its own section with chronologically ordered (time, value) pairs:
+\begin{verbatim}
+### GCS
+(0.2, 15.0), (1.7, 15.0), (5.7, 15.0)
+### DiasABP
+(4.7, 56.0), (5.0, 58.0), (5.5, 54.0)
+### Lactate
+(5.9, 1.4), (31.9, 1.6)
+\end{verbatim}
+No interpolation, no imputation, no learned time embeddings---gaps in data result in gaps in text. The LLM's pre-trained clinical knowledge is relied upon to interpret normal/abnormal ranges, temporal trends, and inter-variable relationships.
+
+\paragraph{Dialectical Reasoning (Outcome Inspection).} For binary prediction with outcomes $\mathcal{Y} = \{y^+, y^-\}$, the model produces:
+\begin{equation}
+\mathrm{chain} = [r_{y_1},\; r_{y_2},\; \hat{y}], \quad \{y_1, y_2\} = \{y^-, y^+\}
+\end{equation}
+where $r_{y_k}$ is a dedicated rationale articulating patient-specific evidence supporting outcome $y_k$, and $\hat{y}$ is the final predicted token. The model \emph{separately examines evidence for each candidate outcome} before reaching a decision, surfacing signals that one-sided reasoning would discard. Crucially, the reasoning terminates with a ``Final Decision'' header followed \emph{directly} by a single outcome token with no intermediate verdict, preventing pre-commitment.
+
+\paragraph{Risk Estimation.} Each outcome $y_k$ maps to a designated token (``0'' or ``1''). The risk score is the softmax over logits at the fixed decision position:
+\begin{equation}
+P(y_k \mid x) = \frac{\exp(l_k)}{\sum_{k'} \exp(l_{k'})}
+\end{equation}
+Because the preceding rationales present evidence for both outcomes without committing, the model's internal distribution reflects a graded assessment. At inference, both rationale orderings are used and final risk is their average.
+
+\paragraph{Stage 1: Dialectical Reasoning SFT.} A strong teacher LLM (GPT-5.1 for P12/P19; Kimi K2 Thinking for MIMIC-III to comply with PhysioNet credentialing) generates outcome-specific rationales: for each patient and each candidate outcome, the teacher is instructed to \emph{assume} the given outcome holds and identify \emph{only} supporting evidence, without referencing alternative outcomes or fabricating unobserved evidence. Both orderings are included as training data. Qwen3-4B-Base is fine-tuned with completion-only cross-entropy loss.
+
+\paragraph{Stage 2: Self-Refinement via GRPO.} After SFT, there is a training-inference mismatch: the model must condition on its own generated rationales rather than reference traces. TRIAGE addresses this with Group Relative Policy Optimization (GRPO), with a combined loss:
+\begin{equation}
+\mathcal{L}(\theta) = \mathcal{L}_{\mathrm{GRPO}}(\theta) + \lambda \cdot \mathcal{L}_{\mathrm{CE}}(\theta)
+\end{equation}
+where $\mathcal{L}_{\mathrm{CE}}$ is applied \emph{only to the final decision token} (directly supervising the implicit probability), and $\mathcal{L}_{\mathrm{GRPO}}$ optimizes the \emph{preceding reasoning tokens}. This separation ensures that RL refines the reasoning process without distorting the calibrated risk output.
+
+\textbf{Batch-Level Reward (Key Innovation).} Standard per-sample rewards ($R = \log P(y_i \mid x_i, r)$) provide correctness signals but do not encourage cross-patient discrimination. TRIAGE defines a batch-level reward using squared hinge loss:
+\begin{equation}
+R_{i,j} = \begin{cases}
+-\frac{1}{|\mathcal{B}^-|} \sum_{i' \in \mathcal{B}^-} [\,m - (\sigma_{i,j} - \bar{\sigma}_{i'})\,]_+^2 & \text{if } y_i = 1 \\[4pt]
+-\frac{1}{|\mathcal{B}^+|} \sum_{i' \in \mathcal{B}^+} [\,m - (\bar{\sigma}_{i'} - \sigma_{i,j})\,]_+^2 & \text{if } y_i = 0
+\end{cases}
+\end{equation}
+where $\sigma_{i,j} = l_1 - l_0$ is the log-odds at the decision token, $\bar{\sigma}_i$ is the mean log-odds across the group, and $m=1.0$ is the margin. This forces positive patients to receive systematically higher risk scores than negative patients across the batch, enforcing cross-patient comparability.
+
+\subsection{Results}
+
+\paragraph{Discrimination.} On three ISMTS benchmarks (P12: 12K patients/36 variables/84.9\% missing; P19: 39K patients/34 variables/80.5\% missing; MIMIC-III: 21K patients/16 variables/65.5\% missing), TRIAGE$_{\mathrm{SFT+RL}}$ achieves the best average rank of \textbf{1.58} across 12 baseline comparisons (8 ISMTS architectures + 2 zero-shot LLMs + SFT-only ablation). Key results vs.\ best ISMTS baselines: P12 AUPRC \textbf{59.0} (vs.\ 58.8 STraTS), P19 AUPRC \textbf{53.8} (vs.\ 56.2 GRU-D), MIMIC-III AUPRC \textbf{54.1} (vs.\ 48.7 GRU-D, +5.4 absolute). Zero-shot frontier LLMs (GPT-5.1, gpt-oss-120b) rank at the bottom (avg.\ ranks 10.5 and 11.67), confirming that general-purpose reasoning does not transfer to clinical ISMTS prediction.
+
+\paragraph{Calibration.} TRIAGE$_{\mathrm{SFT+RL}}$ achieves ECE of 0.03--0.04 across all benchmarks (vs.\ 0.16--0.22 for ISMTS baselines), representing an \textbf{81\% reduction in calibration error}. Brier scores are similarly best: 0.03--0.09 vs.\ 0.09--0.15 for baselines.
+
+\paragraph{Reasoning Quality.} LLM-as-judge evaluation (GPT-5.1, Claude Sonnet 4.5, Gemini 3 Flash) using the IDEA clinical reasoning rubric on 200 P12 cases: TRIAGE scores 7.74/10 vs.\ 6.47/10 for the STraTS + Integrated Gradients + GPT-5.1 interpretation baseline (\textbf{+20\%}). Largest gains on interpretive summary (+0.90) and alternative diagnosis explanation (+0.29), consistent with the dialectical design.
+
+\paragraph{Ablation Highlights.} (1)~One-sided rationale SFT (even with $10\times$ inference for averaging) \emph{underperforms} answer-only SFT (AUPRC 43.1 vs.\ 53.4), confirming one-sided reasoning \emph{actively harms} risk estimation. (2)~Batch-level reward improves both discrimination and calibration over sample-level reward. (3)~At 1\% training data, TRIAGE leads GRU-D by +4.4\% AUROC and +11.1\% AUPRC, with advantage diminishing at higher data fractions. (4)~Under 50\% variable masking at test time, TRIAGE maintains AUPRC 44.7 vs.\ 38.6 for STraTS, demonstrating robustness to missing variables.
+
+\subsection{Limitations}
+
+\textbf{Binary tasks only}: All evaluation is binary prediction; extension to multi-class/multi-label clinical settings requires generalizing from two to $C$ outcome-specific rationales.
+
+\textbf{Computational cost}: Max sequence lengths of 10--12K tokens, batch size 256 with 8 rollouts per sample, H200/B200 GPUs for training. Inference requires generating two full rationale sections twice (both orderings).
+
+\textbf{No expert clinical evaluation}: Reasoning quality assessed by LLM-as-a-judge, not clinical experts. Hallucination rate is 1.5\% (3/200 cases)---low but non-zero.
+
+\textbf{Complex temporal trajectories}: Variables with highly non-monotonic patterns (e.g., initial hypothermia, partial recovery, subsequent decline) are not fully captured by the reasoning, suggesting limitations in LLM temporal reasoning over non-stationary sequences.
+
+\subsection{Relevance to Our Research}
+
+TRIAGE bridges two key threads in our research program: LLMs for time series (T5) and RL-based training (T2). The risk polarization diagnosis---that reasoning collapses continuous probabilities to near-deterministic outputs---has implications beyond clinical settings: any task requiring calibrated LLM predictions alongside reasoning faces this same tension, including the reward modeling pipelines we reviewed in Z-Reward~\cite{chu2026zreward} where RISD achieves 88.64\% accuracy with a single reasoning-internalized score token.
+
+The batch-level reward (Eq.~4) provides a concrete mechanism for the cross-sample discrimination problem that standard GRPO lacks. Our APPO review~\cite{wang2026appo} identified budget-efficient credit assignment through the Branching Score, while TRIAGE's batch-level hinge reward addresses a complementary challenge: ensuring that RL-optimized models produce \emph{comparable} scores across different inputs, not just correct per-input predictions. This connects to the multi-reward conflict resolution in GD$^2$PO and DVAO~\cite{chen2026dvao}, where reward signals from different objectives must be balanced.
+
+The variable-centric serialization with no interpolation is a deliberately minimalist approach to irregular time series that contrasts with the learned temporal encodings in our prior T5 reviews. The success of this approach (especially at 1\% data with +11.1\% AUPRC over GRU-D) suggests that pre-trained LLM knowledge about clinical variable semantics can substitute for architectural inductive biases when supervision is scarce---a finding that resonates with the prompt-level distillation paradigm~\cite{hsieh2026promptdistill} where LLM knowledge transfers without parameter updates.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Dialectical Reasoning for Time Series Forecasting Foundation Models}
+
+\paragraph{Gap.} Current time series foundation models (Chronos~\cite{ansari2024chronos}, TimesFM~\cite{das2024timesfm}, Moirai~\cite{woo2024moirai}) produce point forecasts or quantile predictions without explanatory reasoning. TRIAGE demonstrates that dialectical reasoning improves both calibration and explainability for clinical prediction, but the approach is limited to binary classification. No foundation model for time series forecasting incorporates structured reasoning to explain \emph{why} a particular forecast trajectory is predicted over alternatives.
+
+\paragraph{Approach.} Extend TRIAGE's dialectical structure to multivariate time series forecasting by framing prediction as a reasoning task with competing ``scenario rationales.'' For each forecast horizon, generate two outcome-conditioned rationales: one arguing for an upward/stable trajectory (citing supporting trend signals, seasonal patterns, cross-variable correlations) and one arguing for a downward/disrupted trajectory (citing countervailing signals). The final forecast is derived from the implicit probability distribution over discretized outcome bins at the decision position, providing both a continuous forecast and explanatory rationales. Training follows TRIAGE's two-stage pipeline: SFT with teacher-generated scenario rationales (using a strong LLM to analyze historical patterns), then GRPO with a batch-level reward that enforces cross-series forecast comparability using a margin-based ranking loss over forecast errors.
+
+\paragraph{Feasibility.} The variable-centric serialization from TRIAGE directly applies to multivariate time series---each variable's historical observations are serialized as (time, value) pairs. The dialectical structure requires only modifying the prompt template from binary outcomes to scenario-conditioned rationales. Validation on standard forecasting benchmarks (ETTh, Weather, Electricity) with Qwen3-4B as backbone, comparing against Chronos and TimesFM on both forecast accuracy (MSE, MAE) and explanation quality (LLM-as-judge using adapted IDEA rubric).
+
+\subsection{Direction 2: Continuous-Time Diffusion for Irregularly Sampled Time Series Generation}
+
+\paragraph{Gap.} TRIAGE handles irregular sampling through minimalist text serialization, relying entirely on the LLM's pre-trained knowledge. While effective, this approach cannot \emph{generate} realistic irregular time series---a capability needed for data augmentation (especially for the extreme class imbalance in P19: 4\% positive rate), privacy-preserving synthetic data, and counterfactual clinical reasoning (``what would happen if this variable were measured more frequently?''). Our diffusion LLM reviews (LLaDA~\cite{nie2026llada}, Flow-DPPO~\cite{ping2026flowdppo}, TIE~\cite{yun2026tie}) have focused on text generation, but the discrete diffusion framework naturally extends to irregularly sampled temporal data where the ``masking'' paradigm aligns with clinical missingness.
+
+\paragraph{Approach.} Design a masked diffusion model for ISMTS generation that operates on the (time, variable, value) triplet representation. The forward process masks triplets (rather than tokens), corrupting the observation set; the reverse process iteratively unmasks triplets, learning to reconstruct the joint distribution of observation times, variable identities, and values. Unlike grid-based diffusion models for time series, this approach natively generates irregular sampling patterns---the model decides \emph{when} and \emph{what} to observe, not just the values. Training uses the negative ELBO over masked triplets (analogous to MDLM training). For TRIAGE integration: generate synthetic ISMTS patients via the diffusion model, use TRIAGE to score their clinical plausibility (high-quality synthetic patients should receive well-calibrated risk scores), and filter by TRIAGE confidence to create augmentation datasets. This creates a synergy between generative and discriminative models for clinical time series.
+
+\paragraph{Feasibility.} The triplet-based masking is a direct adaptation of MDLM's token masking to structured observations. Each triplet $(t, v, \mathrm{val})$ can be tokenized as three consecutive tokens, with masking applied at the triplet level. The diffusion model (a small transformer, $\sim$100M parameters) is trained on the same P12/P19/MIMIC-III datasets used by TRIAGE. Validation: compare TRIAGE performance with and without diffusion-augmented training data, measuring AUPRC improvement on the minority class.
+
+\subsection{Direction 3: Batch-Level Reward for Cross-Domain RL Calibration}
+
+\paragraph{Gap.} TRIAGE's batch-level hinge reward (Eq.~4) enforces cross-patient risk comparability---a property standard per-sample GRPO rewards cannot achieve. This same challenge appears throughout our RL review corpus: in DVAO~\cite{chen2026dvao}, multi-reward signals lack cross-sample comparability; in APPO~\cite{wang2026appo}, dual-group advantage normalizes within groups but does not enforce cross-group ranking; in EvoArena~\cite{xu2026evoarena}, agent performance must be compared across dynamically evolving environments. No general framework exists for incorporating batch-level comparative rewards into LLM RL training.
+
+\paragraph{Approach.} Generalize TRIAGE's batch-level reward to arbitrary LLM RL settings by replacing the mortality-specific log-odds comparison with a domain-agnostic formulation. For any task where model outputs should be \emph{ranked} (not just individually correct), define: $R_{i,j} = -\frac{1}{|\mathcal{B}_{\mathrm{worse}}|} \sum_{i' \in \mathcal{B}_{\mathrm{worse}}} [m - (q_{i,j} - \bar{q}_{i'})]_+^2$ where $q_{i,j}$ is a quality score for sample $i$'s $j$-th rollout and $\mathcal{B}_{\mathrm{worse}}$ is the set of samples that should rank lower. Applications: (a)~reward model training where model scores should rank responses consistently with human preferences (replacing pointwise MSE with pairwise batch ranking), (b)~multi-task RL where task difficulties vary and per-task normalization is insufficient, (c)~agent benchmarking where performance across different environments must be comparable. The squared hinge form provides gradient signal proportional to the ranking violation magnitude, naturally focusing optimization on hard-to-rank pairs.
+
+\paragraph{Feasibility.} The batch-level reward is a drop-in replacement for sample-level rewards in any GRPO implementation---it requires only access to within-batch quality scores and ground-truth orderings. Implementation in the verl framework (used by TRIAGE) requires modifying only the reward computation function. Validation: apply batch-level reward to GRPO training on math reasoning (GSM8K/MATH) where model confidence should correlate with answer correctness, measuring both accuracy and calibration (ECE/Brier score) against standard GRPO. If confidence calibration improves without accuracy degradation, this validates the general utility of batch-level ranking rewards.
+
+\section{Conclusion}
+
+TRIAGE introduces dialectical reasoning as a structural solution to the risk polarization problem in LLM-based clinical prediction---the finding that standard chain-of-thought reasoning collapses continuous risk scores to near-deterministic outputs (99.98\% predicted-class probability). By decomposing reasoning into outcome-conditioned rationales that separately examine evidence for each candidate outcome, combined with implicit probability extraction at a verdict-free decision position, TRIAGE jointly delivers calibrated continuous risk scores and natural language explanations from a single LLM pass. The two-stage training pipeline (dialectical SFT followed by GRPO with batch-level hinge reward for cross-patient comparability) achieves best average rank across three ISMTS benchmarks with 81\% reduction in calibration error, using only a 4B-parameter open-source model. For our research program, TRIAGE establishes three transferable principles: (1)~dialectical reasoning structure prevents the confirmation bias inherent in one-sided chain-of-thought, applicable beyond clinical settings to any calibration-sensitive prediction task; (2)~the separation of reasoning-token RL from decision-token supervised loss provides a template for training LLMs where process quality and output calibration are independently optimizable; (3)~batch-level comparative rewards enforce cross-sample output comparability that standard per-sample RL cannot achieve, with direct applications to reward modeling, multi-task RL, and agent benchmarking.
+
+\begin{thebibliography}{99}
+\bibitem{jang2026triage} Jang, H., Chu, G., Kim, C., Park, J., Yoon, H., and Yang, E. ``TRIAGE: Dialectical Reasoning for Explainable Risk Prediction on Irregularly Sampled Medical Time Series with LLMs.'' \emph{arXiv preprint arXiv:2606.09030}, 2026.
+\bibitem{chu2026zreward} Chu, Z., et al. ``Beyond Scalar Rewards: Internalizing Reasoning into Score Distributions.'' \emph{arXiv preprint arXiv:2606.09076}, 2026.
+\bibitem{wang2026appo} Wang, X., et al. ``APPO: Agentic Procedural Policy Optimization.'' \emph{arXiv preprint arXiv:2606.12384}, 2026.
+\bibitem{chen2026dvao} Chen, Y., et al. ``DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.'' \emph{arXiv preprint arXiv:2605.25604}, 2026.
+\bibitem{hsieh2026promptdistill} Hsieh, C., et al. ``Prompt-Level Distillation: A Non-Parametric Alternative to Model Fine-Tuning for Efficient Reasoning.'' \emph{arXiv preprint arXiv:2602.21103}, 2026.
+\bibitem{nie2026llada} Nie, S., et al. ``LLaDA: Large Language Diffusion with mAsking.'' \emph{arXiv preprint arXiv:2502.09992}, 2025.
+\bibitem{ping2026flowdppo} Ping, B., et al. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{yun2026tie} Yun, H., et al. ``Who Should Lead Decoding Now? Tracking Reliable Trajectories for Ensembling Masked Diffusion Language Models.'' \emph{arXiv preprint arXiv:2606.16281}, 2026.
+\bibitem{xu2026evoarena} Xu, J., et al. ``EvoArena: Tracking Memory Evolution for Robust LLM Agents in Dynamic Environments.'' \emph{arXiv preprint arXiv:2606.13681}, 2026.
+\bibitem{ansari2024chronos} Ansari, A., et al. ``Chronos: Learning the Language of Time Series.'' \emph{arXiv preprint arXiv:2403.07815}, 2024.
+\bibitem{das2024timesfm} Das, A., et al. ``A Decoder-Only Foundation Model for Time-Series Forecasting.'' \emph{arXiv preprint arXiv:2310.10688}, 2024.
+\bibitem{woo2024moirai} Woo, G., et al. ``Unified Training of Universal Time Series Forecasting Transformers.'' \emph{arXiv preprint arXiv:2402.02592}, 2024.
+\end{thebibliography}
+
+\end{document}
