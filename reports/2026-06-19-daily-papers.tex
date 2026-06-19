@@ -1,0 +1,134 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Sumi --- Open Uniform Diffusion\\Language Model from Scratch}
+\author{Internbot --- Automated Research Summary}
+\date{June 19, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Discrete diffusion language models have diversified into two principal corruption strategies: \emph{masked diffusion} (LLaDA~\cite{nie2026llada}, MDLM) replaces tokens with a special [MASK] token and freezes filled positions permanently, while \emph{uniform diffusion} replaces tokens with uniformly random vocabulary tokens and allows any position to be revised at any denoising step. At the 7--8B parameter scale, masked diffusion has LLaDA (8B, 2.3T tokens) trained from scratch, and uniform diffusion has DiffusionGemma---but the latter was \emph{adapted from a pretrained AR model}, not trained natively. Ye et al.~\cite{ye2026sumi} argue that distillation-based approaches confound the question of which behaviors are intrinsic to uniform diffusion versus inherited from the AR teacher. They present Sumi: the first uniform diffusion language model (UDLM) pretrained from scratch at both large parameter (7B) and large token (1.5T) scale, providing a clean reference point for studying the paradigm.
+
+\subsection{Method}
+
+\paragraph{Uniform Diffusion Process.} Unlike masked diffusion where corruption is absorbing ($x \to \mathrm{[MASK]}$, one-directional recovery), uniform diffusion corrupts tokens by replacing them with uniformly random tokens from the full vocabulary. The forward process is parameterized through the signal-to-noise ratio (SNR) with log-SNR restricted to $\lambda \in [-9, 9]$. During denoising, \emph{any token can be updated at any step}---including previously ``denoised'' tokens---theoretically enabling self-correction.
+
+\paragraph{Architecture.} Sumi uses a bidirectional time-agnostic Transformer (36 layers, hidden size 4096, $\sim$7B parameters) with LLaMA-style blocks: SwiGLU MLPs (FFN size 12288), grouped-query attention (32 query heads, 8 KV groups, head dim 128), RMSNorm, RoPE ($\theta=500{,}000$), untied embeddings, off-by-one softmax~\cite{miller2023} for attention sink mitigation, and no biases or dropout. The model is ``time-agnostic''---it does not receive the diffusion timestep as an explicit input, unlike continuous diffusion models. Built on Megatron-LM with the OLMo~3 tokenizer (vocabulary size 100,278).
+
+\paragraph{Training Objective.} Sumi is trained with the GIDD (Generalized Interpolating Discrete Diffusion) objective~\cite{vonrutte2025,vonrutte2026} in its SNR-reparameterized form. The unweighted ELBO is minimized as a surrogate loss during training, with a $z$-loss (coefficient $10^{-5}$) added for stability.
+
+\paragraph{Three-Stage Training (1.55T tokens total).}
+\begin{itemize}
+\item \emph{Pre-training} (1.3T tokens): sequence length 1184, batch size 4608, English subset of llm-jp-corpus-v4 plus StarCoder and FineWeb documents scored for educational quality using a classifier distilled from Qwen3-32B annotations.
+\item \emph{Mid-training Stage~1} (130B tokens): same sequence length, domain-specific data with coding (32.5\%), math (29.7\%), general (21.0\%), and reasoning (16.8\%) buckets.
+\item \emph{Mid-training Stage~2} (120B tokens): extended sequence length 4864 for long-context capability.
+\end{itemize}
+Learning rate follows WSD (Warmup-Stable-Decay): 2000-step warmup to $2\times10^{-4}$, constant through all three stages, 2000-step linear cooldown to $2\times10^{-5}$. Total compute: 43,308 H100 GPU-hours (288 GPUs). All training data is from publicly available corpora with full documentation.
+
+\paragraph{Inference Strategies.} Two decoding modes are explored:
+
+\emph{Ancestral sampling}: Standard; tokens commit in unstructured order.
+
+\emph{Confidence-based (adaptive) sampling}: At each step, selects positions where the model assigns high probability to a token different from the current one ($\max_{z'} p_\theta(x=z' \mid z_t) - p_\theta(x=z_t \mid z_t)$ is large). This ``substantially improves'' generation and induces a \emph{self-organized commitment order}---the model commits easy/determinate positions first and defers harder ones, despite having no built-in notion of generation order.
+
+A fixed canvas of 2048 tokens is used for all tasks, with an $\langle\mathrm{EOS}\rangle\langle\mathrm{BOS}\rangle$ boundary between the generation region and trailing random tokens.
+
+\subsection{Results}
+
+\paragraph{Benchmark Performance.} Evaluated under a unified protocol against AR baselines at comparable token budgets (Falcon-7B/1.5T, Llama~2-7B/2T, OLMo-7B/2.5T):
+
+\emph{Strong categories}: MMLU \textbf{51.1} (vs.\ 46.0 Llama~2, 28.0 OLMo), GSM8K \textbf{32.8} (vs.\ 13.5 Llama~2), HumanEval \textbf{22.6} (vs.\ 12.8 Llama~2), TruthfulQA \textbf{46.6} (vs.\ 38.8 Llama~2), MBPP \textbf{26.6} (vs.\ 23.2 Llama~2).
+
+\emph{Competitive categories}: ARC-Easy 70.0 (vs.\ 73.8 Llama~2), ARC-Challenge 43.0 (vs.\ 45.1 Llama~2), BBH 31.8 (vs.\ 39.6 Llama~2).
+
+\emph{Weak category}: Commonsense---PIQA 60.0 (vs.\ 80.5 Falcon), HellaSwag 60.0 (vs.\ 76.3 Falcon), WinoGrande 60.0 (vs.\ 74.7 Llama~2). The $\sim$15--20 point gap is attributed partly to education-heavy data filtering but acknowledged as too large for data composition alone to explain.
+
+\paragraph{Parallel Decoding.} Committing $k$ tokens per step: coding tasks preserve accuracy through $k=4$ (within 1--2 points of single-token baseline), MBPP degrades at $k=8$, GSM8K degrades immediately at $k=2$ (arithmetic is inherently order-sensitive).
+
+\paragraph{Self-Correction (Negative Result).} Running generation for $1\times$--$8\times$ the canvas length (giving 0--7 extra revision passes): 58--100\% of revision steps \emph{do} overwrite committed tokens, but only 0.1--1\% of final tokens differ from the first pass. Overwrites are predominantly \emph{A $\to$ B $\to$ A round trips}, not directed corrections. Accuracy is unchanged on every task. \textbf{Self-correction does not emerge from naive over-denoising.}
+
+\paragraph{Canvas-Length Sensitivity.} Generation quality depends on a task-specific ``fluent band'' of canvas lengths. GSM8K is the most fragile---outside the training range, perplexity explodes and the model emits near-random text.
+
+\subsection{Limitations}
+
+\textbf{Commonsense gap}: $\sim$15--20 points below AR baselines on PIQA, HellaSwag, WinoGrande---too large for data effects alone. Whether this reflects a fundamental limitation of uniform diffusion or a training artifact remains unclear.
+
+\textbf{No self-correction}: Despite uniform diffusion's theoretical revisability, practical self-correction fails---the model oscillates rather than improving. This is a key negative result suggesting that the ability to revise tokens does not automatically confer the ability to \emph{improve} them.
+
+\textbf{Canvas-length fragility}: Task-dependent fluent bands create deployment challenges; incorrect canvas sizing produces degenerate outputs.
+
+\textbf{No instruction tuning}: Released as a base model only. No safety filtering or alignment.
+
+\textbf{Small evaluation samples}: Inference-time analyses use only 30 questions per task, making results ``directional rather than conclusive.''
+
+\textbf{Protocol confounds}: Direct comparison with LLaDA-8B (2.3T tokens, different eval protocol) and Llama~3-8B (15T tokens) is confounded, making it difficult to draw firm conclusions about uniform vs.\ masked diffusion paradigms.
+
+\subsection{Relevance to Our Research}
+
+Sumi provides the first clean baseline for understanding uniform diffusion LLMs without AR initialization confounds. Several findings have direct implications for our T4 review corpus:
+
+The \emph{self-correction failure} is perhaps the most significant result. Our DMax review~\cite{huang2026dmax} and Orthrus review~\cite{wang2026orthrus} explored parallel decoding strategies that exploit MDLMs' flexible generation order, and S2D2~\cite{chen2026s2d2} used self-speculative decoding with remasking. Sumi shows that uniform diffusion's theoretical advantage over masked diffusion---the ability to revise any token at any step---does not translate to practical self-improvement. The A$\to$B$\to$A oscillation pattern suggests the model lacks a ``direction'' for improvement, potentially because the training objective (ELBO) does not provide signal about which revisions are beneficial vs.\ harmful.
+
+The \emph{self-organized commitment order} under confidence-based sampling connects to TIE's~\cite{yun2026tie} trajectory assessment framework: TIE scores denoising trajectories by token prediction stability (Token Change Count), while Sumi's confidence-based sampling implicitly selects positions with the most stable predictions first. Both findings suggest that tracking prediction stability across denoising steps is a fundamental quality signal for diffusion LLMs, regardless of whether the corruption is masked or uniform.
+
+The competitive performance against AR baselines on knowledge/coding tasks despite the commonsense gap raises questions about what inductive biases AR pretraining provides that diffusion pretraining lacks. Our TIDE review~\cite{li2026tide} explored cross-architecture distillation from AR to diffusion; Sumi's results suggest the transfer may specifically address the commonsense gap rather than providing general improvement.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: RL-Guided Self-Correction for Uniform Diffusion LLMs}
+
+\paragraph{Gap.} Sumi demonstrates that uniform diffusion's theoretical token revisability does not produce practical self-correction---over-denoising creates A$\to$B$\to$A oscillations rather than directed improvements. The fundamental issue is that the ELBO training objective provides no signal about \emph{which direction} to revise tokens. Our V-GRPO review~\cite{li2026vgrpo} showed that RL fine-tuning can improve diffusion LLM outputs on verifiable tasks, but V-GRPO was applied to masked diffusion (LLaDA) where tokens cannot be revised once placed. Uniform diffusion's revisability creates a unique opportunity: RL can teach the model not just \emph{what} to generate, but \emph{how to iteratively improve} its own outputs across denoising steps.
+
+\paragraph{Approach.} Fine-tune a UDLM (Sumi or DiffusionGemma) with a revision-aware RL objective. During training rollouts, generate an initial output, then run additional denoising passes and compute rewards at each revision step. Define a step-level advantage: $A_t = R(x_{t+1}) - R(x_t)$ where $R$ is a verifiable reward (math correctness, code execution). The RL loss encourages revisions that increase reward and discourages oscillatory revisions (where $|A_t| \approx 0$ but token edits occur). This transforms over-denoising from a neutral operation into a learned self-improvement process. The revision-aware training could also incorporate Flow-DPPO's~\cite{ping2026flowdppo} per-step divergence monitoring to prevent KL drift during the revision phase.
+
+\paragraph{Feasibility.} The infrastructure exists: V-GRPO's denoising MDP formulation applies directly, with the modification that uniform diffusion allows token updates at already-committed positions. The step-level advantage requires computing rewards at intermediate denoising states, which is cheap for verifiable tasks (run code, check math). Validation on GSM8K and HumanEval using Sumi-7B, comparing standard over-denoising (Sumi's negative result) vs.\ RL-guided revision, measuring accuracy improvement per revision pass.
+
+\subsection{Direction 2: Masked-Uniform Hybrid Diffusion for Selective Revisability}
+
+\paragraph{Gap.} Masked diffusion (LLaDA) commits tokens permanently, preventing self-correction but providing training stability. Uniform diffusion (Sumi) allows revision but fails to self-correct in practice and shows a commonsense gap. Neither paradigm optimally balances commitment and revisability. Our D$^2$-Monitor review~\cite{liu2026d2monitor} identified that certain token positions are ``hesitation-aware''---they exhibit high prediction entropy spikes indicating the model is uncertain. A hybrid approach could use masked (permanent) commitment for high-confidence positions while maintaining uniform (revisable) noise for uncertain positions.
+
+\paragraph{Approach.} Design a position-adaptive corruption scheme: at each denoising step, classify positions into ``confident'' (high top-1 probability, low TCC from TIE~\cite{yun2026tie}) and ``uncertain'' (low confidence, high TCC). Confident positions use absorbing (masked) transitions---once committed, they freeze. Uncertain positions use uniform transitions---they remain revisable for future steps. The forward process mixes masked and uniform noise per-position based on a learned confidence threshold. Training uses a hybrid ELBO that combines the masked diffusion loss at frozen positions with the GIDD loss at revisable positions. This preserves masked diffusion's training stability and commitment efficiency for easy tokens while maintaining uniform diffusion's theoretical revisability exactly where it could help most---at uncertain positions. The confidence classifier can be initialized from Sumi's own prediction entropy statistics.
+
+\paragraph{Feasibility.} Both the masked and uniform diffusion forward processes are well-characterized (MDLM and GIDD frameworks). The hybrid requires implementing a position-wise routing mechanism at each denoising step, which adds minimal computation (a confidence threshold comparison). The mixed ELBO is a weighted sum of two established losses. Validation: train a 1.7B hybrid model on the same data as Sumi's pre-training subset, comparing against pure masked (LLaDA-style) and pure uniform (Sumi-style) baselines on both benchmark accuracy and self-correction capability under over-denoising.
+
+\subsection{Direction 3: Cross-Paradigm Ensembling via TIE for Uniform + Masked Diffusion LLMs}
+
+\paragraph{Gap.} TIE~\cite{yun2026tie} introduced trajectory-based iterative ensembling for MDLMs, demonstrating that relaying the best partial trajectory between two masked diffusion models (LLaDA + Dream) yields consistent improvements. However, TIE was limited to ensembling models within the \emph{same} diffusion paradigm. Sumi shows that uniform and masked diffusion models have complementary strengths: Sumi excels on knowledge/coding tasks while LLaDA excels on commonsense tasks. Can TIE-style ensembling combine a UDLM and an MDLM to exploit these complementary strengths?
+
+\paragraph{Approach.} Extend TIE's relay mechanism to cross-paradigm ensembling. The key challenge: an MDLM's intermediate state contains [MASK] tokens while a UDLM's contains random vocabulary tokens---the state representations are incompatible for direct relay. Propose a \emph{projection relay}: at each ensemble interval, project both models' partially-denoised sequences into a shared ``committed token'' representation---positions where either model has high confidence (above threshold $\tau$) in a specific token are treated as committed, while remaining positions are set to [MASK] for the MDLM branch and random tokens for the UDLM branch. Score trajectories using TIE's cross-model evaluation (each model evaluates the other's projected sequence), and relay the better trajectory after re-encoding into each model's native noise format. This leverages Sumi's strength on knowledge-intensive positions (where it commits first under confidence-based sampling) while deferring commonsense-heavy positions to LLaDA.
+
+\paragraph{Feasibility.} The projection relay adds only a confidence thresholding step and format conversion (mask $\leftrightarrow$ random token) at each relay point. Both Sumi-7B and LLaDA-8B are publicly available. TIE's assessment metrics (TCC, top-1 probability, entropy) apply directly to both paradigms. Validation on mixed benchmarks spanning Sumi's strengths (MMLU, GSM8K, HumanEval) and weaknesses (PIQA, HellaSwag, WinoGrande), measuring whether cross-paradigm ensembling outperforms same-paradigm TIE (LLaDA+Dream) and individual models.
+
+\section{Conclusion}
+
+Sumi establishes the first clean baseline for uniform diffusion language modeling at scale---7B parameters, 1.55T tokens, fully open training data and recipe---uncontaminated by AR model initialization. The model achieves competitive or superior performance to comparably-budgeted AR models on knowledge, reasoning, and coding benchmarks, while revealing a notable $\sim$15--20 point commonsense gap. Two inference-time findings are particularly significant for the diffusion LLM research program: the \emph{negative result on self-correction} (uniform diffusion's theoretical token revisability produces A$\to$B$\to$A oscillations, not directed improvements) and the \emph{positive result on self-organized commitment order} (confidence-based sampling discovers structured generation patterns without explicit ordering). For our research, Sumi delineates the frontier between masked and uniform diffusion: masked diffusion provides stable, efficient commitment (our DMax, S2D2, and TIE reviews exploit this), while uniform diffusion offers revisability that currently lacks the training signal to be useful. Bridging this gap---through RL-guided revision, hybrid corruption schemes, or cross-paradigm ensembling---represents a natural next step for the field.
+
+\begin{thebibliography}{99}
+\bibitem{ye2026sumi} Ye, M., Kudo, K., Ikeda, W., Matsuda, R., Sakaguchi, K., and Suzuki, J. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{nie2026llada} Nie, S., et al. ``LLaDA: Large Language Diffusion with mAsking.'' \emph{arXiv preprint arXiv:2502.09992}, 2025.
+\bibitem{vonrutte2025} von Rutte, D., et al. ``Generalized Interpolating Discrete Diffusion.'' \emph{arXiv preprint}, 2025.
+\bibitem{vonrutte2026} von Rutte, D., et al. ``Scaling Behavior of Discrete Diffusion Language Models.'' \emph{arXiv preprint}, 2026.
+\bibitem{miller2023} Miller, J. ``Attention Is Off By One.'' 2023.
+\bibitem{huang2026dmax} Huang, S., et al. ``DMax: Aggressive Parallel Decoding for dLLMs.'' \emph{arXiv preprint arXiv:2604.08302}, 2026.
+\bibitem{wang2026orthrus} Wang, Z., et al. ``Orthrus: Memory-Efficient Parallel Token Generation via Dual-View Diffusion.'' \emph{arXiv preprint arXiv:2605.12825}, 2026.
+\bibitem{chen2026s2d2} Chen, X., et al. ``S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.'' \emph{arXiv preprint arXiv:2603.25702}, 2026.
+\bibitem{yun2026tie} Yun, H., et al. ``Who Should Lead Decoding Now? Tracking Reliable Trajectories for Ensembling Masked Diffusion Language Models.'' \emph{arXiv preprint arXiv:2606.16281}, 2026.
+\bibitem{li2026tide} Li, Y., et al. ``Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.'' \emph{arXiv preprint arXiv:2604.26951}, 2026.
+\bibitem{liu2026d2monitor} Liu, J., et al. ``D$^2$-Monitor: Dynamic Safety Monitoring for Diffusion LLMs via Hesitation-Aware Routing.'' \emph{arXiv preprint arXiv:2605.25893}, 2026.
+\bibitem{li2026vgrpo} Li, Y., et al. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{ping2026flowdppo} Ping, B., et al. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\end{thebibliography}
+
+\end{document}
