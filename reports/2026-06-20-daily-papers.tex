@@ -1,0 +1,138 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: EvoEmbedding --- Evolvable Representations\\for Long-Context Retrieval and Agentic Memory}
+\author{Internbot --- Automated Research Summary}
+\date{June 20, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Existing embedding models are \emph{inherently static}---they encode text segments in isolation, ignoring both surrounding context and temporal order. Nie et al.~\cite{nie2026evoembedding} identify two fundamental failures in long-context and agentic retrieval scenarios:
+
+\emph{Contextual fragmentation}: Standard RAG pipelines chunk documents and encode each chunk independently, destroying temporal continuity, coreference chains, and cross-segment state updates. Information that depends on what came before or after a chunk is lost at encoding time.
+
+\emph{Static training objective}: Contrastive learning on short, static samples teaches semantic discrimination but not contextual reasoning---coreference resolution, temporal ordering, or tracking how facts evolve over a conversation.
+
+The motivating example is striking: when a user schedules a meeting then later postpones it, a static embedding model retrieves the \emph{original} (outdated) schedule for ``What time is the meeting?'' because both the old and new schedule are semantically similar to the query. Agentic RAG pipelines compensate with additional modules (query rewriting, rerankers, knowledge graphs, memory architectures), but these add computational overhead without fixing the root cause: the underlying representation is context-blind.
+
+\subsection{Method}
+
+\paragraph{Core Principle: Stateful Embedding.} EvoEmbedding maintains a \emph{continuously updated latent memory} $M_t$ as it sequentially processes input segments. When encoding any segment $x_t$, the model conditions on both the raw text \emph{and} the accumulated memory from all prior segments. The same text produces \emph{different embeddings} depending on accumulated context---embedding becomes a sequential process rather than a parallel one.
+
+\paragraph{Architecture.} Built on a frozen LLM backbone (Qwen3-4B) with two separate LoRA adapters ($\theta_m$ for memory evolution, $\theta_r$ for retrieval), EvoEmbedding performs two parallel operations per segment:
+
+\emph{Memory Evolution}: Activate $\theta_m$, project previous memory $M_{t-1}$ through a LatentProjector into input-space tokens $m_{\mathrm{in}}$, concatenate $[m_{\mathrm{in}}; x_t; r_l]$ (where $r_l$ are $K=16$ learnable tokens), feed through the backbone, and extract the last $K$ hidden states as new latent tokens $\tilde{M}_t$. Update the memory queue: $M_t = \mathrm{Queue}(M_{t-1}, f_m(\tilde{M}_t))$.
+
+\emph{Representation Generation}: Activate $\theta_r$, project $M_{t-1}$ the same way, concatenate $[m_{\mathrm{in}}; x_t; \langle\mathrm{EOS}\rangle]$, and extract the EOS hidden state projected through an EmbeddingProjector to produce the 1024-dimensional embedding $v_t$.
+
+\paragraph{Latent Memory Queue (FIFO).} The memory $M_t$ is a fixed-capacity matrix of size $C \times D$ (default $C=512$ tokens), organized as a First-In-First-Out queue. At each step, $K=16$ new latent tokens replace the oldest $K$ tokens. This design provides two critical properties:
+
+\emph{Bounded re-encoding}: Any historical token is re-encoded at most $L = C/K = 32$ times before eviction, preventing the ``recurrent encoding collapse'' where repeated encoding of latent representations degrades them into noise. This is why EvoEmbedding can train on variable-length samples \emph{without} curriculum learning (unlike RMT).
+
+\emph{Principled forgetting}: The FIFO policy provides a clean stability-plasticity trade-off---new information continuously enters while old context is cleanly evicted rather than degraded through repeated re-encoding.
+
+\paragraph{Multi-LoRA Capability Decoupling.} Separate LoRA adapters ($r=64$) isolate training dynamics between memory evolution and retrieval. The frozen backbone preserves generation capabilities---no catastrophic forgetting of the base model.
+
+\paragraph{Joint Training with Dual Loss.}
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{\mathrm{mem}} + \mathcal{L}_{\mathrm{con}}
+\end{equation}
+
+\emph{Memory Generation Loss} ($\mathcal{L}_{\mathrm{mem}}$): The latent memory $M_t$, combined with a query $q$, is used to predict a target answer $y$ through the \emph{frozen} backbone (all LoRA adapters deactivated). By freezing the decoder, gradients flow entirely into $M_t$, forcing the memory module to produce latent states in the base LLM's native semantic space---a form of ``representation anchoring'' analogous to EWC but implemented architecturally.
+
+\emph{Length-Weighted Multi-Positive Contrastive Loss} ($\mathcal{L}_{\mathrm{con}}$): Aligns query embeddings with correct target segments. A $\log(N+1)$ weighting factor calibrates loss scale based on the number of negative distractors $N$, which varies significantly with context length, preventing bias toward shorter sequences.
+
+\paragraph{Training Data: EvoTrain-180K.} A synthetic dataset of 184,137 samples constructed via three stages: raw context construction (web texts, LLM-synthesized dialogues), dynamic QA generation (40+ template types), and retrieval formulation verified by Gemini-3.1-Pro. Average training sample length is only 1.2K tokens, yet the model generalizes to 128K contexts ($100\times$ longer). Total training: 26.6 hours on 8$\times$ H800 GPUs, single epoch.
+
+\paragraph{Dynamic Segment-Batching.} Instead of encoding segments one-by-one, $k$ consecutive segments are processed in parallel (dynamic $k$ such that total length $\leq$ 2048 tokens), yielding $3.8\times$ training speedup and actually \emph{improving} performance (+1.9\% overall) by encouraging inter-segment dependency learning.
+
+\subsection{Results}
+
+\paragraph{Retrieval.} On 8 retrieval benchmarks, EvoEmbedding-4B achieves best overall Recall@10 = \textbf{80.5} and NDCG@10 = \textbf{65.2}. It outperforms KaLM-Embedding-Gemma3-12B ($3\times$ larger) by +7.8\% R@10, and Qwen3-Embedding-8B ($2\times$ larger) by +11.5\% R@10. Even EvoEmbedding-0.8B beats all baselines including 12B models on overall R@10 (76.7 vs.\ 72.7). Uses only 1024-dimensional embeddings vs.\ 3840--4096 for competitors.
+
+\paragraph{Generation (Agentic Memory).} On LongMemEval: \textbf{77.6\%} accuracy---new SOTA, surpassing LightMem (70.2\%), A-MEM (65.2\%), MemoryOS (49.6\%), and full-context baseline (54.8\%) by +22.8\%. On LoCoMo: 74.3\% overall, approaching the full-context upper bound (74.9\%) with only 0.6\% gap. Near-perfect on single-turn subtasks: 98.6\% Single-User, 100.0\% Single-Assistant on LongMemEval.
+
+\paragraph{Plug-and-Play Enhancement.} When integrated into existing agentic memory systems: A-MEM +19.2\%, MemoryOS +20.5\%, LightMem +13.5\% overall improvement. Consistently outperforms Qwen3-Reranker-4B as an alternative enhancement.
+
+\paragraph{Emergent Temporal Awareness.} EvoEmbedding naturally develops sensitivity to temporal position. When tested with temporal keywords (``firstly,'' ``lastly,'' ``in the middle''), similarity curves show clear chronological patterns: ``lastly'' queries peak at final segments, ``firstly'' queries peak at initial segments. This is \emph{not explicitly trained} but emerges from the sequential memory architecture.
+
+\paragraph{Efficiency.} Peak VRAM: 20.9 GB (vs.\ 32.3 GB Qwen3-4B, 69.3 GB KaLM-12B). Trade-off: context encoding is slower (22.08s vs.\ 3.80s) due to sequential memory construction. Only 180K training samples ($<$1\% of competitors like KaLM's 100M+).
+
+\subsection{Limitations}
+
+\textbf{Sequential encoding overhead}: 22.08s vs.\ 3.80s for parallel static models---inherent to the evolving memory architecture. Segment-batching mitigates but cannot eliminate this.
+
+\textbf{Memory capacity saturation}: Performance saturates at $C=512$; increasing queue capacity gives diminishing returns. For very long contexts with critical details spread across thousands of segments, the fixed-capacity memory may lose important early information.
+
+\textbf{Temporal and open-domain weaknesses}: On the hardest LoCoMo subtasks (Temporal, Open-domain), EvoEmbedding falls slightly behind the specialized LightMem system.
+
+\textbf{Out-of-domain degradation}: The 180K training set, while effective, is limited in domain coverage. Performance may degrade on out-of-distribution scenarios.
+
+\textbf{Text-only}: No multimodal support. Extending to visual/audio modalities would require larger queue capacities and dimensional alignment.
+
+\subsection{Relevance to Our Research}
+
+EvoEmbedding addresses the agentic memory challenge from a fundamentally different angle than the systems we have previously reviewed. Our EvoArena review~\cite{xu2026evoarena} identified the ``state collapse'' problem in dynamic environments---agents fail when environment state changes invalidate cached information---and proposed EvoMem's git-like patch-based memory as a solution. EvoEmbedding attacks the same problem at the \emph{representation layer}: rather than building explicit state-tracking infrastructure on top of static embeddings, it makes the embeddings themselves context-aware. The comparison is illuminating: EvoMem maintains structured version patches (explicit, interpretable), while EvoEmbedding maintains latent memory states (implicit, compressed). These approaches are complementary---EvoMem's patches could inform EvoEmbedding's memory updates, and EvoEmbedding's representations could improve EvoMem's retrieval.
+
+The FIFO queue's bounded re-encoding ($L=32$ maximum passes) provides a concrete mechanism for the forgetting problem we analyzed in Geometry Conflict~\cite{wu2026geometry}. Geometry Conflict showed that continual post-training creates gradient conflicts in parameter space; EvoEmbedding sidesteps this entirely by keeping parameters frozen and implementing forgetting at the \emph{representation level}---old latent tokens are cleanly evicted rather than overwritten through conflicting gradients.
+
+The provocative finding that ``simple RAG + better embeddings $>$ complex agentic memory systems'' (+19--21\% when integrated into A-MEM/MemoryOS/LightMem) challenges the trajectory of our T3 research. Our SkillOS~\cite{chen2026skillos}, SkillOpt~\cite{li2026skillopt}, and Memanto~\cite{aoki2026memanto} reviews explored increasingly sophisticated memory architectures. EvoEmbedding suggests the community may have been over-engineering the pipeline when the representation layer was the bottleneck---a finding that could redirect effort toward better foundations rather than better superstructures.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: EvoEmbedding for Skill Memory in Self-Evolving Agents}
+
+\paragraph{Gap.} Our SkillOS~\cite{chen2026skillos} and SkillOpt~\cite{li2026skillopt} reviews identified skill retrieval as a critical bottleneck for self-evolving agents: as agents accumulate hundreds of procedural skills, retrieving the right skill for a novel situation requires understanding not just semantic similarity but the \emph{context of skill acquisition} (what worked, what failed, what conditions applied). Current skill retrieval uses static embeddings that cannot capture this contextual evolution. APPO~\cite{wang2026appo} showed that procedural decision points identified by the Branching Score could serve as reusable skill units, but no mechanism exists for evolving skill representations as the agent's experience grows.
+
+\paragraph{Approach.} Integrate EvoEmbedding into the skill memory pipeline: when an agent completes a task, encode the skill trajectory through EvoEmbedding's sequential memory process, producing embeddings that capture not just the skill's semantics but its position in the agent's learning history (what skills preceded it, what failures motivated it, what environment state applied). The latent memory $M_t$ at skill encoding time becomes a ``skill context vector'' that captures the evolutionary history. At retrieval time, the query embedding is conditioned on the agent's current memory state, enabling context-dependent skill retrieval: the same query retrieves different skills depending on what the agent has already tried. This leverages EvoEmbedding's emergent temporal awareness to implement a form of ``skill recency bias'' that naturally prefers recently-acquired (likely more relevant) skills.
+
+\paragraph{Feasibility.} EvoEmbedding-4B is plug-and-play (+19\% demonstrated on existing memory systems). Skill trajectories from SkillOS/SkillOpt are standard text sequences that can be directly encoded. Validation: compare static vs.\ evolvable skill retrieval on EvoArena's Terminal-Bench-Evo, measuring chain-level accuracy and skill reuse rate across evolving environments. The key metric is whether context-dependent retrieval reduces ``stale skill'' invocations (retrieving outdated procedures that no longer work in evolved environments).
+
+\subsection{Direction 2: Evolvable Embeddings for Diffusion LLM Trajectory Assessment}
+
+\paragraph{Gap.} Our TIE review~\cite{yun2026tie} introduced trajectory-based ensembling for masked diffusion LLMs, using Token Change Count (TCC) to assess trajectory quality during denoising. However, TCC is a purely local metric---it tracks prediction stability at individual positions without considering the global trajectory context (what tokens were committed earlier, what patterns are emerging). Similarly, our Sumi review~\cite{ye2026sumi} showed that uniform diffusion's self-organized commitment order prioritizes easy positions first, but the ordering emerges implicitly without explicit quality tracking. Neither approach maintains an evolving representation of the denoising trajectory that could inform future token commitments.
+
+\paragraph{Approach.} Apply EvoEmbedding's sequential memory architecture to diffusion LLM denoising. At each denoising step $t$, encode the current partially-denoised sequence through EvoEmbedding, producing an embedding $v_t$ conditioned on the latent memory $M_{t-1}$ of all prior denoising states. The evolving memory captures the ``trajectory context''---which tokens were committed, in what order, with what confidence. Use $v_t$ as an auxiliary signal for: (a)~TIE's trajectory assessment (replacing or augmenting TCC with context-aware quality scoring), (b)~adaptive step size selection (commit more tokens when the trajectory embedding is stable, fewer when it is changing rapidly), and (c)~self-correction detection (in Sumi's uniform diffusion, detect when the trajectory embedding $v_t$ diverges from the trajectory at step $t-1$, signaling meaningful revision vs.\ A$\to$B$\to$A oscillation).
+
+\paragraph{Feasibility.} EvoEmbedding processes sequences segment-by-segment, which maps naturally to denoising steps (each step = one segment of the evolving sequence). The EvoEmbedding-0.8B variant adds minimal overhead compared to the 7--8B diffusion model. Training data: collect denoising trajectories from LLaDA/Sumi with ground-truth quality labels (correct/incorrect final answers on GSM8K/MATH), and train the embedding model to produce trajectory representations that distinguish convergent from divergent denoising paths.
+
+\subsection{Direction 3: Latent Memory Distillation for Efficient Context Compression}
+
+\paragraph{Gap.} EvoEmbedding's latent memory queue $M_t$ ($C=512$ tokens, dimension $D$) successfully compresses arbitrarily long contexts into a fixed-size representation that the base LLM can ``read.'' This is conceptually similar to context distillation---reducing a long context to a short, information-dense representation---but achieved at the embedding level rather than the text level. Our on-policy distillation reviews (geometric OPD~\cite{shen2026geometry}, FiRe-OPD~\cite{li2026fireopd}, ESR~\cite{wang2026esr}) focus on distilling model \emph{capabilities} (knowledge from teacher to student), while EvoEmbedding distills \emph{context} (compressing long histories into fixed-size latent states). No work has combined these: using capability distillation to improve context distillation quality.
+
+\paragraph{Approach.} Train a smaller ``memory student'' model to produce latent memory states that match a larger ``memory teacher's'' compressed representations. Concretely: run EvoEmbedding-4B as the teacher to produce high-quality latent memories $M_t^{\mathrm{teacher}}$ for each context, then train an EvoEmbedding-0.8B student to minimize $\|M_t^{\mathrm{student}} - M_t^{\mathrm{teacher}}\|_2$ across denoising steps, following the on-policy distillation paradigm (student generates its own trajectories, teacher provides supervision at the representation level). Apply FiRe-OPD's filter-then-reweight strategy: only distill memory states where the student's retrieval performance degrades most relative to the teacher (high-impact memories), skipping states where the student already performs well. This creates an efficient training curriculum that focuses on the hardest memory compression challenges.
+
+\paragraph{Feasibility.} EvoEmbedding-0.8B already achieves competitive results (76.7 R@10 vs.\ 80.5 for 4B). The memory state $M_t$ is a fixed-size matrix---$L_2$ distance is directly computable. FiRe-OPD's filtering criteria (reward gap between teacher and student) translate to retrieval accuracy gap per segment. Training on EvoTrain-180K with teacher-generated memory targets. Expected outcome: close the 3.8\% R@10 gap between 0.8B and 4B while maintaining the smaller model's inference efficiency.
+
+\section{Conclusion}
+
+EvoEmbedding introduces stateful, context-aware embeddings that maintain a continuously updated latent memory as they sequentially process input segments, fundamentally reconceptualizing text embedding as a sequential rather than parallel operation. The FIFO memory queue with bounded re-encoding prevents representation collapse while providing a principled forgetting mechanism, and the dual-loss training (memory generation through a frozen decoder + length-weighted contrastive learning) anchors latent states in the base model's semantic space without catastrophic forgetting. The results are striking: a 4B model with 180K training samples and 1024-dimensional embeddings outperforms 12B models trained on 100M+ samples across retrieval and agentic memory benchmarks, and simple RAG with EvoEmbedding surpasses dedicated agentic memory architectures by 13--21\%. For our research program, EvoEmbedding provides a foundational challenge to the trajectory of increasingly complex memory architectures: if the representation layer is the true bottleneck, then our SkillOS, EvoMem, and Memanto memory systems may benefit more from better embeddings than from more sophisticated memory structures---a finding that could redirect effort toward evolvable foundations rather than elaborate superstructures.
+
+\begin{thebibliography}{99}
+\bibitem{nie2026evoembedding} Nie, C., Fu, C., Feng, J., and Shan, C. ``EvoEmbedding: Evolvable Representations for Long-Context Retrieval and Agentic Memory.'' \emph{arXiv preprint arXiv:2606.21649}, 2026.
+\bibitem{xu2026evoarena} Xu, J., et al. ``EvoArena: Tracking Memory Evolution for Robust LLM Agents in Dynamic Environments.'' \emph{arXiv preprint arXiv:2606.13681}, 2026.
+\bibitem{wu2026geometry} Wu, Z., et al. ``Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.'' \emph{arXiv preprint arXiv:2605.09608}, 2026.
+\bibitem{chen2026skillos} Chen, X., et al. ``SkillOS: Learning Skill Curation for Self-Evolving Agents.'' \emph{arXiv preprint arXiv:2605.06614}, 2026.
+\bibitem{li2026skillopt} Li, Y., et al. ``SkillOpt: Executive Strategy for Self-Evolving Agent Skills.'' \emph{arXiv preprint arXiv:2605.23904}, 2026.
+\bibitem{aoki2026memanto} Aoki, R., et al. ``Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.'' \emph{arXiv preprint arXiv:2604.22085}, 2026.
+\bibitem{wang2026appo} Wang, X., et al. ``APPO: Agentic Procedural Policy Optimization.'' \emph{arXiv preprint arXiv:2606.12384}, 2026.
+\bibitem{yun2026tie} Yun, H., et al. ``Who Should Lead Decoding Now? Tracking Reliable Trajectories for Ensembling Masked Diffusion Language Models.'' \emph{arXiv preprint arXiv:2606.16281}, 2026.
+\bibitem{ye2026sumi} Ye, M., et al. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{li2026fireopd} Li, Y., et al. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{wang2026esr} Wang, Z., et al. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\end{thebibliography}
+
+\end{document}
