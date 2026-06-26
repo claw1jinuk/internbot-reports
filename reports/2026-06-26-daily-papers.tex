@@ -1,0 +1,134 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: ReNIO --- Reweighting Negative Trajectory\\Importance for LLM On-Policy Distillation}
+\author{Internbot --- Automated Research Summary}
+\date{June 26, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Standard on-policy distillation (OPD) treats all student-generated outputs (SGOs) equally---every trajectory receives the same training weight regardless of informativeness. Lin et al.~\cite{lin2026renio} discover a \emph{counterintuitive asymmetry}: training \emph{only on incorrect SGOs} consistently outperforms training \emph{only on correct SGOs}, by +3.60, +3.89, and +2.59 Avg@12 points on AIME24, AIME25, and benchmark average respectively under OPD, with similar gaps under on-policy self-distillation (OPSD).
+
+\paragraph{Why Negative Trajectories Are More Valuable.} Behavioral analysis reveals that models trained only on correct SGOs generate \emph{shorter} reasoning traces with \emph{weaker reflection behavior} (fewer hedging/self-checking markers like ``wait,'' ``alternatively,'' ``however'')---they consolidate behavior the student already performs well. Incorrect SGOs, by contrast, preserve \emph{exploratory reasoning} near the model's capability boundary, exposing structured failure modes that provide process-level correction signals when aligned to the teacher's distribution.
+
+\paragraph{The Design Constraint.} Existing correctness-aware OPD methods (FiRe-OPD~\cite{li2026fireopd}, SCOPE, Uni-OPD) require rolling out each SGO to the final answer to determine trajectory correctness, which destroys OPD's key efficiency advantage of training on short prefixes. ReNIO needs to emphasize negative trajectories \emph{without ever observing whether the final answer is correct}.
+
+\subsection{Method}
+
+ReNIO operates in three phases, using only prefix-conditioned token probabilities.
+
+\paragraph{Phase I: Student-Teacher Log Ratio.} For each token $y_t$ in an SGO, compute the log probability ratio:
+\begin{equation}
+l_t = \log \frac{\pi_S(y_t \mid x, y_{<t})}{\pi_T(y_t \mid x, y_{<t})}
+\end{equation}
+A large $l_t$ indicates a ``pivotal token''---a local decision where the student's reasoning departs from the teacher-preferred direction. Under reverse-KL distillation $D_{\mathrm{KL}}(\pi_S \| \pi_T)$, the effective gradient weight for a sampled token is exactly $l_t$ (up to a removable baseline), grounding the log ratio as the natural token-level corrective emphasis.
+
+\paragraph{Phase II: Key Token Selection.} The distribution of $l_t$ across tokens is heavily long-tailed: most tokens have $l_t \approx 0$ (student and teacher agree), while rare outliers have very large values (pivotal disagreement points). ReNIO applies a fixed threshold:
+\begin{equation}
+\mathcal{K}(x, y) = \{t \mid l_t > \tau\}
+\end{equation}
+with $\tau = 0.8$, removing routine tokens and retaining only high-disagreement pivotal tokens.
+
+\paragraph{Phase III: Geometric-Mean Aggregation.} Selected log ratios are aggregated into a single sample-level weight:
+\begin{equation}
+w(x, y) = \exp\!\left(\frac{1}{|\mathcal{K}(x,y)|} \sum_{t \in \mathcal{K}(x,y)} \mathrm{clip}(l_t, \epsilon_{\min}, \epsilon_{\max})\right)
+\end{equation}
+with clipping bound 3.0 to prevent extreme ratios from destabilizing training. If $\mathcal{K}(x,y) = \emptyset$, then $w(x,y) = 1$. Weights are batch-normalized: $\hat{w}(x,y) = w(x,y) / \bar{w}_\mathcal{B}$, ensuring the mean weight is 1---ReNIO \emph{redistributes} emphasis across SGOs without changing overall gradient scale.
+
+\paragraph{Weighted Distillation Objective.}
+\begin{equation}
+\mathcal{L}_{\mathrm{ReNIO}} = \mathbb{E}_{x \sim \mathcal{D},\; y \sim \pi_S(\cdot \mid x)} \left[\hat{w}(x, y) \cdot D(\pi_S(y \mid x) \| \pi_T(y \mid x))\right]
+\end{equation}
+where $D$ is any token-level divergence (FKLD, RKLD). The effect: SGOs with tokens where the student is confidently wrong (relative to the teacher) receive higher training emphasis---these are statistically the negative/incorrect trajectories, identified without checking the final answer.
+
+\paragraph{Teacher Confidence Correlation.} Critically, higher ReNIO weights \emph{negatively correlate} with teacher entropy---ReNIO upweights SGOs where the teacher is \emph{more confident}, not less. This addresses the concern that negative trajectories might fall outside the teacher's reliable supervision region. The mechanism naturally avoids amplifying trajectories where the teacher cannot provide sharp corrective signals.
+
+\subsection{Results}
+
+\paragraph{Mathematical Reasoning.} On Qwen3-1.7B: OPSD+ReNIO achieves Avg@12 of \textbf{42.78} vs.\ 40.83 for standard OPSD (+4.77\%). On R1-Distill-Qwen-7B: OPSD+ReNIO reaches \textbf{41.57} vs.\ 39.69 (+4.74\%). Peak gains on individual benchmarks: HMMT25 +17.00\% relative (R1-Distill-1.5B), AIME25 +10.00\% relative (R1-Distill-7B).
+
+\paragraph{Stabilization Effect.} For R1-Distill-Qwen-1.5B, standard OPSD \emph{degrades} math performance below the base model (21.67 $\to$ 21.20), while OPSD+ReNIO recovers and improves (21.67 $\to$ 22.78). ReNIO stabilizes noisy on-policy self-distillation.
+
+\paragraph{Code Generation.} Consistent gains on HumanEval+ and MBPP+: Qwen3-1.7B OPSD+ReNIO reaches \textbf{70.53} vs.\ 68.64 (+2.75\%).
+
+\paragraph{Prefix Length Efficiency.} Even at 1024-token prefixes (which do not include final answers), OPSD+ReNIO (42.78) outperforms 4096-token OPSD (38.70) and even 4096-token OPSD+ReNIO (40.56). This confirms that ReNIO's reweighting signal is most effective at short prefix lengths---precisely where the efficiency advantage of OPD is greatest.
+
+\paragraph{Design Space Ablation.} (1)~Token-level S/T weighting (applying the ratio directly per-token rather than aggregating to sample level) is \emph{ineffective}---it underperforms baseline OPSD. (2)~Reversed T/S ratio at sample level improves over OPSD but underperforms ReNIO by 1.21 points, confirming the S/T direction (emphasizing student overconfidence) is the correct choice. (3)~Geometric-mean aggregation outperforms arithmetic mean and max aggregation.
+
+\subsection{Limitations}
+
+\textbf{Scale}: Only tested up to 8B parameters (4$\times$ H200 GPUs). Effectiveness on larger models is unverified.
+
+\textbf{Hyperparameter sensitivity}: Two key hyperparameters ($\tau$ threshold, clipping bound) require tuning, with performance varying meaningfully across choices.
+
+\textbf{Localized error assumption}: The method assumes reasoning errors stem from a small number of pivotal tokens. For tasks with diffusely distributed errors, the threshold-based selection may be less effective.
+
+\textbf{Fixed threshold}: $\tau$ is static across training. An adaptive threshold that accounts for changing student-teacher disagreement during training could be beneficial.
+
+\textbf{Task scope}: Only mathematical reasoning and code generation evaluated. Other domains (commonsense, scientific reasoning, multi-hop QA) untested.
+
+\subsection{Relevance to Our Research}
+
+ReNIO provides a critical missing piece in our extensive OPD review corpus. Our FiRe-OPD review~\cite{li2026fireopd} established the filter-then-reweight paradigm where low-quality student rollouts are filtered out and remaining ones are reweighted by reward gap---but this requires full rollouts and answer correctness labels. Our ESR review~\cite{wang2026esr} showed that early stopping rollouts at prefix length improves OPD efficiency---but applied uniform weighting to all prefixes. ReNIO bridges both insights: it achieves FiRe-OPD's quality-aware reweighting \emph{at} ESR's short prefix lengths, using only prefix-available information (the student-teacher log ratio).
+
+The negative-trajectory asymmetry has deep connections across our review corpus. In geometric OPD~\cite{shen2026geometry}, we found that the student's update subspace locks early to a low-dimensional channel---correct trajectories reinforce this lock (consolidation), while incorrect trajectories that expose failures at the student's capability boundary are precisely the data that could break the lock. ReNIO's finding that incorrect SGOs preserve ``exploratory reasoning with more reflection markers'' operationalizes this: these trajectories force gradient flow into directions the locked subspace currently neglects.
+
+The student-teacher log ratio $l_t = \log(\pi_S/\pi_T)$ is closely related to DelTA's~\cite{wang2026delta} discriminative token credit assignment. DelTA identifies informative tokens via reward-conditioned importance sampling; ReNIO identifies ``pivotal tokens'' via the S/T probability ratio. Both converge on the same insight: reasoning errors are localized at a small number of consequential token decisions, and effective training must concentrate supervision at these positions. The key difference is that DelTA requires final-answer rewards (RL setting) while ReNIO uses only prefix probabilities (distillation setting).
+
+The self-distillation stabilization result (OPSD degrades R1-Distill-1.5B from 21.67 to 21.20, while OPSD+ReNIO recovers to 22.78) directly addresses the degradation mechanism identified in our self-distillation review~\cite{wang2026selfdistill}: self-distillation can reinforce the model's own biases. ReNIO's S/T ratio reweighting counteracts this by penalizing SGOs where the student is most overconfident relative to its frozen copy (the teacher in OPSD).
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Negative Trajectory Reweighting for Diffusion LLM On-Policy Distillation}
+
+\paragraph{Gap.} Our OPDLM~\cite{ye2026opdlm} and geometric OPD~\cite{shen2026geometry} reviews established on-policy distillation for masked diffusion LLMs, but both apply uniform weighting across denoising trajectories. ReNIO's negative-trajectory asymmetry suggests that some denoising paths are more informative than others: trajectories where the student's denoising decisions diverge most from the teacher's should receive higher training emphasis. No OPD method for diffusion LLMs currently exploits this asymmetry.
+
+\paragraph{Approach.} Adapt ReNIO's S/T log ratio to the denoising setting. At each denoising step $t$, for each position $i$ that transitions from masked to unmasked, compute $l_{t,i} = \log p_S(x_i \mid z_t) - \log p_T(x_i \mid z_t)$---the student-teacher probability ratio for the unmasked token. Aggregate high-ratio positions via ReNIO's geometric mean to produce a per-step weight $w_t$, and weight the distillation loss at each denoising step accordingly. This creates a \emph{step-adaptive} OPD objective that concentrates teacher supervision on denoising steps where the student makes its most consequential mistakes. The key hypothesis: early denoising steps (many positions transitioning simultaneously) will have higher aggregate weights because the student has less context for disambiguation, aligning with TIE's~\cite{yun2026tie} finding that trajectory quality at early steps is most predictive of final output quality.
+
+\paragraph{Feasibility.} The S/T log ratio requires only student and teacher forward passes at each denoising step, which OPDLM's training pipeline already performs. ReNIO's threshold and clipping hyperparameters transfer directly. Validation on LLaDA-8B (student) / Qwen-72B (teacher) with AIME24/MATH500, comparing uniform-weight OPDLM vs.\ ReNIO-weighted OPDLM. Expected training overhead: negligible (one additional comparison per denoising position).
+
+\subsection{Direction 2: Prefix-Length-Adaptive Threshold via Geometric OPD Insights}
+
+\paragraph{Gap.} ReNIO uses a fixed threshold $\tau = 0.8$ across all training, but our geometric OPD review~\cite{shen2026geometry} showed that the student's update subspace evolves during training: it locks early (first $\sim$10\% of training) and then stabilizes. This means the student-teacher disagreement landscape changes over training---early in training, many tokens may exceed the threshold (the student is broadly wrong), while later the distribution narrows as the student improves. A fixed threshold either over-selects early (noisy) or under-selects late (missing remaining hard cases).
+
+\paragraph{Approach.} Replace ReNIO's fixed $\tau$ with a training-phase-adaptive threshold informed by the geometric OPD subspace analysis. Define $\tau_t = \mu_t + k \cdot \sigma_t$, where $\mu_t$ and $\sigma_t$ are the running mean and standard deviation of positive $l_t$ values, and $k$ is a fixed multiplier (e.g., $k=1.5$). This automatically adapts: early in training (when $\sigma_t$ is large and disagreement is widespread), $\tau_t$ is high, selecting only the most extreme pivotal tokens; late in training (when $\sigma_t$ shrinks as the student converges), $\tau_t$ decreases, maintaining sensitivity to the remaining hard cases. Additionally, track the effective rank of the gradient matrix (from geometric OPD's stable-rank analysis) and reduce $k$ when effective rank drops---signaling that the update subspace has locked and the threshold should become more inclusive to break the lock.
+
+\paragraph{Feasibility.} Computing $\mu_t$ and $\sigma_t$ requires only an exponential moving average over batch statistics, adding negligible compute. Effective rank estimation requires a periodic SVD of the gradient accumulator (every $\sim$100 steps), as in geometric OPD's analysis. Validation: compare fixed-$\tau$ ReNIO vs.\ adaptive-$\tau$ ReNIO on Qwen3-4B/8B across AIME24/AIME25/HMMT25, measuring both final accuracy and training stability (gradient norm variance).
+
+\subsection{Direction 3: Cross-Model Consensus Reweighting for Self-Distillation Without a Teacher}
+
+\paragraph{Gap.} ReNIO's OPSD mode uses a frozen copy of the student as the ``teacher,'' but this teacher shares all of the student's biases---the S/T ratio only captures how much the student has changed since the frozen checkpoint, not how much it disagrees with a genuinely different perspective. Our EDV review~\cite{zhu2026edv} showed that single-model self-evaluation reinforces biases (the Self-Confirmation Trap), and multi-model consensus provides better quality signals. Can we replace ReNIO's single-model S/T ratio with a multi-model consensus signal for teacher-free distillation?
+
+\paragraph{Approach.} Maintain a small pool of heterogeneous models $\{\pi_1, \ldots, \pi_K\}$ (as in EDV's execution group). For each token $y_t$ in a student-generated trajectory, compute the \emph{consensus disagreement}: $l_t^{\mathrm{consensus}} = \log \pi_S(y_t) - \frac{1}{K}\sum_{k=1}^K \log \pi_k(y_t)$. This measures how much the student's token choice deviates from the average belief of diverse models, replacing the single-teacher comparison with a multi-perspective consensus. Apply ReNIO's threshold-aggregate-normalize pipeline to $l_t^{\mathrm{consensus}}$. The consensus signal is more robust than a single S/T ratio because: (a)~model-specific biases are averaged out, reducing the risk of reinforcing shared blind spots; (b)~the ``teacher'' is implicitly an ensemble, providing richer supervision at pivotal tokens; (c)~no single large teacher model is needed, making this feasible with multiple small models. This bridges ReNIO's negative-trajectory insight with EDV's multi-agent consensus principle.
+
+\paragraph{Feasibility.} The consensus computation requires $K$ forward passes per token (one per model in the pool). With $K=3$ small models (e.g., three 1.7B variants with different training seeds or architectures), total compute is comparable to a single 7B teacher forward pass. EDV demonstrated that even 3 heterogeneous models provide meaningful consensus signal. Validation: compare single-model OPSD+ReNIO vs.\ consensus OPSD+ReNIO on R1-Distill-Qwen-1.5B (where standard OPSD degrades), measuring whether consensus prevents the degradation that single-model OPSD exhibits.
+
+\section{Conclusion}
+
+ReNIO identifies and exploits a fundamental asymmetry in on-policy distillation: incorrect student-generated trajectories are consistently more valuable for training than correct ones, because they preserve exploratory reasoning at the student's capability boundary while correct trajectories merely consolidate known behaviors. The three-phase algorithm---student-teacher log ratio computation, threshold-based key-token selection, geometric-mean aggregation into sample weights---achieves correctness-aware reweighting \emph{without ever observing final answers}, preserving OPD's critical short-prefix training efficiency. The theoretical grounding via reverse-KL gradient interpretation, combined with the empirical finding that ReNIO upweights trajectories where the teacher is most confident (not least), provides a principled mechanism for concentrating supervision where it is both most needed and most reliable. For our research program, ReNIO bridges the gap between FiRe-OPD's quality-aware reweighting and ESR's prefix-efficient training, while the negative-trajectory asymmetry provides empirical support for geometric OPD's subspace-locking theory: correct trajectories reinforce the locked subspace, while incorrect trajectories---especially at pivotal tokens where the student diverges most from the teacher---are the data that can break the lock and enable continued improvement.
+
+\begin{thebibliography}{99}
+\bibitem{lin2026renio} Lin, C., Chen, K., and Zhang, W. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{li2026fireopd} Li, Y., et al. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{wang2026esr} Wang, Z., et al. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{ye2026opdlm} Ye, H., et al. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\bibitem{wang2026delta} Wang, Z., et al. ``DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.'' \emph{arXiv preprint arXiv:2605.21467}, 2026.
+\bibitem{wang2026selfdistill} Wang, Z., et al. ``Why Does Self-Distillation (Sometimes) Degrade the Reasoning Capability of LLMs?'' \emph{arXiv preprint arXiv:2603.24472}, 2026.
+\bibitem{yun2026tie} Yun, H., et al. ``Who Should Lead Decoding Now? Tracking Reliable Trajectories for Ensembling Masked Diffusion Language Models.'' \emph{arXiv preprint arXiv:2606.16281}, 2026.
+\bibitem{zhu2026edv} Zhu, S., et al. ``Escaping the Self-Confirmation Trap: An Execute-Distill-Verify Paradigm for Agentic Experience Learning.'' \emph{arXiv preprint arXiv:2606.24428}, 2026.
+\end{thebibliography}
+
+\end{document}
