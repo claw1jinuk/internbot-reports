@@ -1,0 +1,143 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: NormGuard --- Reward-Preserving Norm Constraints\\in Flow-Matching Reinforcement Learning}
+\author{Internbot --- Automated Research Summary}
+\date{June 30, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+When flow-matching generative models (Stable Diffusion 3.5, FLUX) are fine-tuned with RL using reward proxies (PickScore, HPSv2), the proxy reward improves but \emph{perceptual quality degrades}: images exhibit over-sharpening, color oversaturation, unnatural lighting, and loss of fine texture. The NormGuard authors~\cite{normguard2026} identify a \textbf{specific structural signature} of this degradation: RL fine-tuning consistently \emph{inflates the per-step velocity norm} $\|v_\theta(x_t, t)\|$ by 5--15\% relative to the pretrained reference $\|v_{\mathrm{ref}}(x_t, t)\|$, uniformly along the denoising trajectory, across three different RL methods (NFT, AWM, DPO) and multiple model/reward combinations.
+
+\paragraph{Why Standard Mitigations Fail.} Two natural fixes are ineffective:
+\begin{itemize}
+\item \textbf{KL regularization} ($\|v_\theta - v_{\mathrm{ref}}\|^2$) penalizes the \emph{total} velocity deviation, treating directional changes and norm changes as a single aggregate quantity. This constrains beneficial directional updates (which carry reward signal) alongside harmful norm inflation.
+\item \textbf{Inference-time renormalization} (rescaling $v_\theta$ to match $\|v_{\mathrm{ref}}\|$, as done for classifier-free guidance) preserves reward ($\Delta R \in [-0.008, +0.001]$) but \emph{fails to fix artifacts}. Unlike CFG---where inflation is an explicit inference-time combination of two velocity heads---RL inflation is \emph{trained into the weights}: the network has co-adapted to the inflated norm, so post-hoc rescaling distorts the co-adapted dynamics.
+\end{itemize}
+
+\paragraph{Adjoint Sensitivity Analysis.} To determine whether suppressing norm inflation would destroy reward signal, the paper performs a first-order sensitivity analysis. Under a multiplicative velocity scaling $v_\theta \to (1+\epsilon)\,v_\theta$, the first-order reward change is governed by the norm-scaling sensitivity $S(t) = v_\theta(x_t,t)^\top a(t)$, where $a(t)$ is the reward adjoint state satisfying $-\dot{a}(t) = [\nabla_{x_t} v_\theta]^\top a(t)$ with $a(1) = \nabla_{x_1} R(x_1)$. Computed on 6,400 samples from SD3.5-Medium, $S(t)$ exhibits substantial per-sample magnitude and sign heterogeneity, with a noise-to-signal ratio $\sigma/|\mu|$ ranging from 3$\times$ to 100$\times$. This means velocity magnitude rescaling carries \textbf{no coherent first-order reward signal at the batch level}---suppressing norm inflation is safe.
+
+\subsection{Method}
+
+\paragraph{Velocity-Local Post-Training Losses.} The paper first formalizes a structural property: a post-training objective $\mathcal{L}_{\mathrm{post}}$ is \emph{velocity-local} if its parameter gradient admits the form:
+\begin{equation}
+\nabla_\theta \mathcal{L}_{\mathrm{post}} = \mathbb{E}\!\left[w(x_t,t,c) \cdot \nabla_\theta \|v_\theta(x_t,t,c) - \tilde{v}(x_t,t,c)\|^2\right]
+\end{equation}
+where $w$ is a scalar weight and $\tilde{v}$ is a local target velocity. Three methods satisfy this definition: NFT (reward-weighted flow-matching residuals), AWM (advantage-weighted FM residual under the FM-ELBO surrogate), and DPO (sigmoid-weighted local quadratic deviations). Critically, Flow-GRPO is \emph{not} velocity-local---its gradient flows through trajectory-level likelihood ratios over reverse transitions.
+
+\paragraph{The NormGuard Regularizer.} For each sampled $(x_t, t, c)$:
+\begin{equation}
+\mathcal{R}_{\mathrm{norm}}(\theta;\, x_t,t,c) = \lambda \cdot \max\!\left\{0,\;\frac{\|v_\theta(x_t,t,c)\|^2 - \|v_{\mathrm{ref}}(x_t,t,c)\|^2}{\|v_{\mathrm{ref}}(x_t,t,c)\|^2}\right\}
+\end{equation}
+The total training objective is $\mathcal{L} = \mathcal{L}_{\mathrm{base}} + \mathbb{E}[\mathcal{R}_{\mathrm{norm}}]$.
+
+\paragraph{Design Choices.} (1)~\textbf{One-sided hinge}: the $\max\{0,\cdot\}$ activates only when $\|v_\theta\|^2 > \|v_{\mathrm{ref}}\|^2$, leaving updates unconstrained as long as the velocity norm stays within the reference budget. (2)~\textbf{Squared norms}: smoother for optimization than norm differences. (3)~\textbf{Relative normalization}: dividing by $\|v_{\mathrm{ref}}\|^2$ makes the penalty scale-invariant across timesteps (important since velocity magnitudes vary along the denoising trajectory). (4)~\textbf{Single hyperparameter}: $\lambda$ controls regularization strength; no architectural changes, no new networks, no sampling modifications.
+
+\paragraph{Decomposition Insight.} The key conceptual contribution is decomposing post-training velocity drift into a \emph{radial} (norm) component and a \emph{directional} component. KL regularization constrains both; NormGuard constrains \emph{only the radial component}, leaving directional updates---which carry the reward signal---free. This targeted intervention explains why NormGuard improves quality without sacrificing reward.
+
+\subsection{Results}
+
+\paragraph{Main Results (7 Configurations).} Across SD3.5-Medium and FLUX with NFT/AWM/DPO and PickScore/HPSv2:
+\begin{itemize}
+\item \textbf{Image quality}: NormGuard is preferred by both MLLM judges (Qwen3.5-35B, GPT-4.1) in \emph{all 7 settings}. Win rates range from 47--72\% (Qwen3.5) and 47--73\% (GPT-4.1) vs.\ baselines at 28--42\% and 20--47\%.
+\item \textbf{Forensic realism}: RealScore improves in 6/7 configurations; largest gain is SD3.5+NFT+PickScore: 0.248 $\to$ 0.310 (+25\%).
+\item \textbf{Reward preservation}: PickScore differences range from $-0.003$ to $+0.011$; HPSv2 differences from $-0.004$ to $+0.001$. Reward is essentially unchanged.
+\end{itemize}
+
+\paragraph{Few-Step Robustness.} NormGuard's advantage \emph{grows monotonically} with fewer inference steps. On FLUX+NFT+PickScore, MLLM win-rate gap widens from 9\% (28 steps) to 20\% (4 steps). Fewer steps mean larger ODE step sizes, amplifying the effect of velocity-norm inflation on discretization error.
+
+\paragraph{Not Explained by Early Stopping.} NormGuard at iteration 200 achieves PickScore=0.910, RealScore=0.274, MLLM=6.16---\emph{better than all earlier baseline checkpoints} (iter 160: 0.898/0.259/6.08; iter 180: 0.901/0.252/5.99; iter 200: 0.905/0.240/6.05). The improvement is not simply from stopping training earlier.
+
+\paragraph{Complementarity with KL.} Adding NormGuard ($\lambda=1.0$) consistently improves RealScore at every KL strength ($\beta_{\mathrm{KL}} \in \{0, 10^{-4}, 10^{-3}\}$). The two penalties address \emph{distinct failure modes} and combine additively---NormGuard targets the radial artifact while KL constrains total drift.
+
+\paragraph{Hyperparameter Stability.} Performance is stable across $\lambda \in \{0.1, 1, 10\}$; any nonzero regularization outperforms $\lambda=0$. Intermediate $\lambda=1$ works best; $\lambda=10$ is slightly over-regularized early in training.
+
+\subsection{Limitations}
+
+\textbf{Mechanistic gap}: The paper identifies and treats velocity norm inflation but does not fully explain \emph{why} RL training causes this inflation. The dynamic origin remains an open question.
+
+\textbf{Batch-level claim only}: The adjoint analysis shows that norm perturbations carry no \emph{batch-average} reward signal, but per-sample effects can be substantial. More nuanced interactions at the individual sample level are not ruled out.
+
+\textbf{Scope restricted to velocity-local objectives}: NormGuard applies to NFT, AWM, and DPO but \emph{not} to Flow-GRPO, whose gradient flows through trajectory-level likelihood ratios rather than per-timestep velocity residuals.
+
+\textbf{Method-dependent tuning}: While NormGuard uses a single $\lambda$, optimal values differ by method ($\lambda=1.0$ for NFT/DPO, $\lambda=0.01$ for AWM), requiring some method-specific tuning.
+
+\textbf{Modality scope}: Evaluated only on text-to-image generation; applicability to video generation, audio, or text (discrete diffusion LLMs) is untested.
+
+\subsection{Relevance to Our Research}
+
+NormGuard provides a critical missing piece in our understanding of RL post-training for generative models. Our Flow-DPPO review~\cite{liu2026flowdppo} identified that PPO-style ratio clipping is structurally ill-suited for flow models (systematic left shift in ratio distributions) and proposed exact KL-based masking as a replacement. NormGuard is \emph{complementary}: Flow-DPPO addresses \emph{how to constrain the trust region} (optimization mechanism), while NormGuard addresses \emph{what specific artifact to suppress} (velocity norm inflation). The two operate at different levels---Flow-DPPO at the trajectory/policy level, NormGuard in the velocity output space---and could in principle be combined.
+
+The velocity norm inflation phenomenon provides a concrete instantiation of the reward over-optimization problem analyzed abstractly in our Verification Horizon review~\cite{qwen2026verification}. The verification horizon argues that any fixed reward function becomes a proxy that Goodhart's Law guarantees will be gamed. NormGuard's finding is a visual-domain analog: the reward proxy (PickScore/HPSv2) is satisfied by inflated velocities that produce rewarded-but-artifacted images. The targeted decomposition into radial (artifact) and directional (reward) components is a principled response to this proxy problem.
+
+Our V-GRPO review~\cite{vgrpo2026} showed that ELBO-based RL surrogates can match trajectory-level approaches with 2--3$\times$ speedup. NormGuard identifies that even when RL training ``succeeds'' (reward improves), structural artifacts emerge. V-GRPO could serve as the base RL method (it is ELBO-based, similar to AWM), with NormGuard applied on top to prevent norm inflation---a natural combination that the paper's velocity-local framework directly supports.
+
+The radial/directional decomposition resonates with our geometric OPD review~\cite{shen2026geometry}, which found that on-policy distillation gradients lock into a low-rank subspace early in training. Both papers share the insight that training updates have a \emph{structure} (directional vs.\ radial; within-subspace vs.\ out-of-subspace) and that effective regularization should target the harmful component specifically rather than constraining all update dimensions equally.
+
+The adjoint sensitivity analysis---showing that norm suppression carries no batch-level reward cost---echoes our ReNIO review~\cite{lin2026renio}, which showed that the student-teacher log ratio identifies ``pivotal tokens'' where corrective training signal is concentrated. Both papers converge on the principle of \emph{targeted intervention}: rather than uniformly constraining the model (KL penalty, uniform weighting), identify exactly which component carries learning signal and constrain only the rest.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Norm-Budget Constraints for Discrete Diffusion LLM Alignment}
+
+\paragraph{Gap.} NormGuard demonstrates that RL over-optimization manifests as velocity norm inflation in continuous flow-matching image models. Our diffusion LLM corpus (Sumi~\cite{chen2026sumi}, DARE~\cite{dare2026}, V-GRPO~\cite{vgrpo2026}) extensively studies RL alignment for discrete diffusion language models, but the structural signatures of over-optimization in discrete models remain uncharacterized. Do masked diffusion LLMs exhibit an analogous ``norm inflation'' when trained with RL, and if so, in what representation space? The transition probability networks in discrete diffusion play a role analogous to the velocity field in flow matching---do their output logit magnitudes inflate during RL training?
+
+\paragraph{Approach.} Systematically profile the output logit statistics of masked diffusion LLMs (LLaDA-8B, Sumi-7B) during RL training with DARE's framework. At each checkpoint, measure: (1)~the $\ell_2$ norm of per-position logit vectors $\|z_\theta(x_t, t)\|$ relative to the pretrained reference $\|z_{\mathrm{ref}}(x_t,t)\|$; (2)~the entropy of the predicted token distributions at each masking step; (3)~the KL divergence between RL-trained and pretrained per-step distributions. If logit norm inflation is observed (the discrete analog of velocity norm inflation), design a \textbf{LogitNormGuard} regularizer:
+\begin{equation}
+\mathcal{R}_{\mathrm{logit}}(\theta) = \lambda \cdot \max\!\left\{0,\;\frac{\|z_\theta(x_t,t)\|^2 - \|z_{\mathrm{ref}}(x_t,t)\|^2}{\|z_{\mathrm{ref}}(x_t,t)\|^2}\right\}
+\end{equation}
+This directly transfers NormGuard's one-sided hinge design to the discrete setting. The hypothesis is that logit norm inflation in discrete diffusion causes ``over-confident'' denoising---the model assigns excessively high probability to single tokens at each step, reducing the diversity and nuance of generated text (analogous to over-sharpening in images). If entropy reduction rather than norm inflation is the primary artifact, replace the norm constraint with an entropy floor: $\mathcal{R}_{\mathrm{ent}} = \lambda \cdot \max\{0,\; H_{\mathrm{ref}}(t) - H_\theta(t)\}$.
+
+\paragraph{Feasibility.} All measurements require only forward passes through pretrained and RL-trained checkpoints, which DARE's framework already supports. LogitNormGuard adds one additional term to the loss computation per training step. Validation: compare standard RL vs.\ LogitNormGuard-regularized RL on LLaDA-8B with RLVR rewards (math/code), measuring both task accuracy and text quality (diversity, coherence, repetition rate). Expected overhead: negligible ($<$1\% compute increase).
+
+\subsection{Direction 2: Radial-Directional Decomposition for On-Policy Distillation}
+
+\paragraph{Gap.} NormGuard's decomposition of velocity drift into radial (norm) and directional components is formulated for RL post-training, but the same structural analysis could apply to \emph{on-policy distillation} (OPD) of diffusion models. Our OPDLM review~\cite{ye2026opdlm} and geometric OPD review~\cite{shen2026geometry} established that OPD for diffusion LLMs suffers from gradient subspace locking and training instability. If the student's velocity field develops norm inflation relative to the teacher (as in RL), this could be a source of the instability. The geometric OPD paper measured effective rank of the gradient matrix but did not decompose drift into radial vs.\ directional components.
+
+\paragraph{Approach.} Extend NormGuard's analysis to the OPD setting. During autoregressive-to-diffusion distillation (OPDLM), profile the student's velocity norm $\|v_S(x_t,t)\|$ relative to the teacher-implied velocity $\|v_T(x_t,t)\|$ at each denoising step throughout training. If norm inflation is observed:
+\begin{enumerate}
+\item Apply NormGuard's regularizer directly to the OPD loss, constraining the student's velocity norm to stay within the teacher's norm budget.
+\item Combine with ReNIO's~\cite{lin2026renio} negative-trajectory reweighting: compute the student-teacher log ratio $l_t = \log(\pi_S/\pi_T)$ per denoising step, and apply NormGuard only to steps where $l_t > \tau$ (pivotal steps where the student diverges most from the teacher). This creates a \emph{step-adaptive NormGuard} that concentrates norm correction at the denoising steps that matter most.
+\item Test whether combining radial constraint (NormGuard) with the geometric OPD subspace analysis (measuring effective rank before and after NormGuard) reveals that norm inflation is a cause---rather than merely a correlate---of subspace locking.
+\end{enumerate}
+
+\paragraph{Feasibility.} Requires OPDLM's existing training pipeline plus NormGuard's single regularization term. The profiling analysis (measuring velocity norms across training) is purely diagnostic and adds negligible compute. Validation: compare standard OPDLM vs.\ NormGuard-OPDLM on LLaDA-8B (student) / Qwen-72B (teacher), measuring AIME24/MATH500 accuracy, training stability (gradient norm variance), and effective rank of the update subspace. Expected benefit: if norm inflation contributes to subspace locking, NormGuard should both stabilize training and improve final accuracy.
+
+\subsection{Direction 3: Adjoint-Guided Reward Decomposition for Multi-Objective RL}
+
+\paragraph{Gap.} NormGuard's adjoint sensitivity analysis reveals that the velocity field can be decomposed into components that carry reward signal (directional) and components that do not (radial). This decomposition is binary: norm vs.\ direction. But for \emph{multi-objective RL}---where multiple reward signals must be balanced simultaneously---a richer decomposition is needed. Our DVAO review~\cite{chen2026dvao} showed that dynamically weighting multiple rewards via variance-adaptive optimization improves over static combinations, but DVAO operates in \emph{reward space} (weighting scalar reward terms). NormGuard's adjoint analysis suggests an alternative: decompose the velocity update in \emph{output space} by which components carry signal for each reward.
+
+\paragraph{Approach.} For $K$ reward functions $\{R_1, \ldots, R_K\}$, compute the adjoint state $a_k(t)$ for each reward separately, yielding $K$ sensitivity vectors at each timestep. Perform a principal component analysis (or independent component analysis) of the joint matrix $[a_1(t), \ldots, a_K(t)]$ to identify: (1)~\emph{shared reward subspace}: velocity directions that carry signal for multiple rewards simultaneously; (2)~\emph{exclusive reward subspaces}: directions that carry signal for one reward but not others; (3)~\emph{null subspace}: directions (like the radial component NormGuard identifies) that carry signal for no reward. During multi-objective RL training, constrain updates in the null subspace (generalizing NormGuard) and resolve conflicts in the exclusive subspaces using DVAO's dynamic variance-adaptive weighting. The shared subspace can be updated with standard gradient aggregation. This creates an \textbf{adjoint-guided multi-objective RL} framework that combines NormGuard's output-space analysis with DVAO's multi-reward optimization, operating at a finer granularity than either method alone.
+
+\paragraph{Feasibility.} The main computational cost is $K$ adjoint computations per evaluation batch (one per reward). For typical $K=2$--$3$ (e.g., aesthetic quality + text alignment + safety), this adds $2$--$3\times$ forward/backward passes at evaluation time (not every training step). The PCA/ICA decomposition is computed periodically (every $\sim$500 steps) on a diagnostic batch, amortizing the cost. Validation: compare DVAO (reward-space weighting) vs.\ adjoint-guided decomposition on SD3.5 with PickScore + HPSv2 as dual rewards, measuring Pareto frontier quality (hypervolume indicator) and artifact rate. Expected outcome: adjoint-guided decomposition achieves better Pareto fronts by identifying and suppressing the null subspace that causes artifacts without sacrificing either reward.
+
+\section{Conclusion}
+
+NormGuard makes a focused, principled contribution to the RL post-training pipeline for flow-matching generative models: it identifies that reward over-optimization manifests specifically as velocity norm inflation, proves via adjoint sensitivity analysis that this inflation carries no batch-level reward signal, and introduces a simple one-sided hinge penalty that suppresses the excess norm during training. The radial/directional decomposition of post-training drift is the key conceptual insight: standard KL regularization constrains both components indiscriminately, while NormGuard targets only the artifact-causing radial component and leaves the reward-carrying directional component free. The result is striking---quality improves substantially (up to 72\% MLLM win rate vs.\ 28\% baseline), reward is preserved ($|\Delta R| < 0.01$), and the advantage amplifies at few-step inference (20\% win-rate gap at 4 steps vs.\ 9\% at 28 steps). For our research program, NormGuard provides a concrete template for \emph{structured regularization}---the principle that effective training constraints should decompose the update space and target only the components responsible for degradation. This principle extends beyond flow-matching image models to discrete diffusion LLMs (where logit norm inflation may cause analogous ``over-sharpening'' of text), to on-policy distillation (where radial drift may contribute to the subspace locking identified in our geometric OPD work), and to multi-objective RL (where adjoint-guided decomposition can identify and suppress null-space components that cause artifacts without carrying signal for any reward).
+
+\begin{thebibliography}{99}
+\bibitem{normguard2026} NormGuard Authors. ``NormGuard: Reward-Preserving Norm Constraints in Flow-Matching Reinforcement Learning.'' \emph{arXiv preprint arXiv:2606.27771}, 2026.
+\bibitem{liu2026flowdppo} Liu, X., et al. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{qwen2026verification} Qwen Team. ``The Verification Horizon: No Silver Bullet for Coding Agent Rewards.'' \emph{arXiv preprint arXiv:2606.26300}, 2026.
+\bibitem{vgrpo2026} V-GRPO Authors. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{lin2026renio} Lin, C., et al. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{chen2026sumi} Chen, Y., et al. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{dare2026} DARE Authors. ``DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.'' \emph{arXiv preprint arXiv:2604.04215}, 2026.
+\bibitem{ye2026opdlm} Ye, H., et al. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\bibitem{chen2026dvao} Chen, Y., et al. ``DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.'' \emph{arXiv preprint arXiv:2605.25604}, 2026.
+\end{thebibliography}
+
+\end{document}
