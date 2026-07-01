@@ -1,0 +1,160 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: How Good Can Linear Models Be\\for Time-Series Forecasting?}
+\author{Internbot --- Automated Research Summary}
+\date{July 1, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Huang et al.~\cite{huang2026linear} pose a fundamental question: is the march toward ever-larger forecasting models (Transformers, foundation models) truly necessary, or is the apparent weakness of linear models an artifact of under-tuned preprocessing? Prior work by Toner and Darlow (2024) proved that DLinear, NLinear, RLinear, SparseTSF, and related variants are all \emph{functionally equivalent} to unconstrained linear regression over suitably augmented features---closed-form OLS solutions match or beat the same models trained with SGD. This collapse of diverse linear architectures into a single model class motivates the paper's central thesis: if the model is effectively fixed (linear regression), all remaining degrees of freedom should be invested in \textbf{preprocessing}.
+
+\paragraph{Why Preprocessing Matters More for Linear Models.} The key insight is asymmetric sensitivity: Transformers with millions of parameters can partially compensate for a poorly chosen lookback window or uninformative normalization by absorbing these choices into learned weights. A linear model \emph{cannot}---its performance is directly determined by the input representation. When standard evaluation protocols fix context length, normalization, and augmentation to a single setting per benchmark, they systematically disadvantage linear models and overstate the benefit of architectural complexity.
+
+\subsection{Method}
+
+\paragraph{Base Model: Ridge Regression.} The paper uses Ridge regression with closed-form solution $W^* = YX^\top(XX^\top + \alpha I)^{-1}$, mapping a context window of $L$ past observations to $H$ future predictions per variate (channel-independent). Each trial runs in milliseconds on GPU, enabling massive hyperparameter search.
+
+\paragraph{Four-Axis Preprocessing Search (SearchCast).} The core contribution is parameterizing preprocessing along four axes:
+
+\begin{enumerate}
+\item \textbf{Normalization (scope and method):} Global (training-set statistics) vs.\ local (trailing $r \cdot L$ steps of each window, $r \in (0,1]$). Under local normalization, the per-window scale $\sigma$ is appended as an additional feature. Robust median/IQR normalization is also tested but underperforms mean/std. The ratio $r$ is searched on a log scale between $10^{-3}$ and 1.0.
+
+\item \textbf{Context length:} Lookback $L$ searched in $[32, 2048]$ on a log scale---a critical degree of freedom that prior work almost always fixes at $L = 96$ or $L = 720$.
+
+\item \textbf{Augmentation:} Additive Gaussian noise in the time domain, Gaussian perturbation of Fourier coefficients in the frequency domain, or none. Noise intensity $\sigma$ searched on a log scale in $[10^{-3}, 0.5]$.
+
+\item \textbf{Regularization:} 21 logarithmically spaced $\alpha$ values in $[10^{-6}, 10^3]$, with the best $\alpha$ selected via inner validation loop (no additional search cost).
+\end{enumerate}
+
+\paragraph{Grouped Search Scheme.} A novel contribution is continuous interpolation between per-step/per-series and global search:
+\begin{itemize}
+\item \textbf{Horizon grouping} ($g_h$): partitions $H$ forecast steps into contiguous blocks. $g_h = 1$ is fully per-step; $g_h = H$ is global.
+\item \textbf{Series grouping} ($g_s$): partitions $C$ variates into groups. $g_s = 1$ is fully per-series; $g_s = C$ is fully shared.
+\end{itemize}
+Each $(g_h, g_s)$ cell runs an independent Optuna search (Tree-structured Parzen Estimator) with 20 trials and $k = 3$ expanding-window cross-validation folds.
+
+\subsection{Results}
+
+\paragraph{Main Forecasting Results.} Across 8 standard benchmarks (ETTh1/h2/m1/m2, Weather, Electricity, Traffic, Exchange) with horizons $H \in \{96, 192, 336, 720\}$:
+\begin{itemize}
+\item \textbf{Within linear class}: SearchCast achieves best average MSE on 7/8 datasets.
+\item \textbf{Against nonlinear baselines}: SearchCast wins on \textbf{6 of 8} datasets against PatchTST, iTransformer, TimeMixer, TimesNet, and Autoformer. Margins over PatchTST: ETTm2 $\sim$16\%, ETTh1 $\sim$14\%, ETTh2 $\sim$14\%, ETTm1 $\sim$11\%, Exchange $\sim$7\%, Weather $\sim$4\%.
+\item \textbf{Two losses}: Electricity (effectively tied, 0.159 vs.\ 0.159) and Traffic (0.404 vs.\ 0.391)---the two largest datasets (321 and 862 channels), where cross-series representation sharing plausibly helps Transformers.
+\end{itemize}
+
+\paragraph{Finding 1: Lookback-Horizon Scaling.} A power-law $L^* = a \cdot H^b$ fitted to searched optimal contexts reveals dramatic variation in the exponent $b$:
+\begin{itemize}
+\item ETTm2: $b = +0.46$ (longer horizons need longer history---conventional wisdom).
+\item Weather, Electricity: $b \approx 0$ (context $\sim 10^3$ steps regardless of horizon).
+\item Exchange, Traffic: $b = -0.19$ (\emph{longer horizons prefer shorter context}---distant history actively misleads due to non-stationarity).
+\end{itemize}
+The standard $L = 96$ default is wrong in two opposite directions simultaneously: it underserves Weather/Electricity by $\sim$10$\times$ and overserves Exchange/Traffic at long horizons.
+
+\paragraph{Finding 2: Local Normalization.} Local normalization is selected in 62--100\% of cells. Optimal $\log_{10}(r)$ clusters in $[-2.5, -0.5]$, meaning trailing fractions of 0.3--30\% of the window set the scale. Full-window normalization ($r = 1$) is essentially never selected. The effect is strongest on ETTm2 and Exchange, where series are nonstationary on the scale of $L$.
+
+\paragraph{Finding 3: Series Heterogeneity.} Optimal cross-series sharing is strongly dataset-dependent: ETTh1 prefers fully shared; Weather prefers fully per-series ($\sim$10\% degradation if shared); Electricity prefers intermediate ($g_s = 32$). Heterogeneity is driven primarily by local ratio $r$ and regularization $\alpha$, not by lookback.
+
+\paragraph{Nonlinear Structure Analysis (BDS Test).} PatchTST \emph{does} capture nonlinear patterns missed by Ridge (mean $\Delta = -7.83$, significant in 18/24 cells). However, this additional nonlinear structure \textbf{does not translate into lower MSE}---the tuned linear model still matches or outperforms PatchTST. On the two datasets where PatchTST wins, only 1/8 BDS comparisons is significant, suggesting its advantage comes from cross-series sharing, not nonlinear modeling.
+
+\paragraph{Long-Range Autocorrelation.} After harmonic deseasonalization, all benchmarks retain substantial autocorrelation at lag 720 (0.39--0.73), confirming the linear model genuinely exploits long-range structure beyond obvious seasonal cycles.
+
+\subsection{Limitations}
+
+\textbf{Benchmark scope}: Limited to standard numeric long-horizon forecasting. Findings may not generalize to probabilistic forecasting, irregular time series, or multimodal settings.
+
+\textbf{Metric limitations}: Only point-estimate MSE reported. Small margins should be treated as ties.
+
+\textbf{Baseline fairness}: Nonlinear baselines use published configurations rather than jointly retuned preprocessing. \emph{Applying the same preprocessing search to deeper models---and comparing all model classes under jointly tuned preprocessing---remains future work.} This is a significant gap: deep models with SearchCast-style preprocessing might regain their advantage.
+
+\textbf{Scalability}: Per-series search scales with channel count; the practical defaults ($g_h = 48$, moderate $g_s$) are compromises.
+
+\textbf{``Too linear'' benchmarks}: The combination of strong linear autocorrelation and the BDS finding (captured nonlinear structure doesn't improve MSE) suggests the standard benchmarks may be predominantly linear in nature, limiting the generalizability of the architectural conclusions.
+
+\subsection{Relevance to Our Research}
+
+SearchCast directly challenges the premise of our time series foundation model reviews. Our Toto~2.0 review~\cite{woo2026toto} celebrated the scaling era for time series---1B+ parameter models trained on trillions of tokens achieving state-of-the-art across diverse benchmarks. SearchCast's finding that Ridge regression with searched preprocessing matches or beats deep models on 6/8 standard benchmarks forces a critical re-evaluation: are the gains from scaling driven by genuine capacity needs or by implicit preprocessing improvements that large models absorb into their learned weights?
+
+Our Timer-S1 review~\cite{liu2026timers1} established that billion-scale serial scaling (extending context and resolution) drives forecasting gains. SearchCast's context-length analysis provides a mechanistic explanation: Timer-S1's long-context advantage on Weather and Electricity (where $L^* \sim 10^3$) may simply reflect better preprocessing via longer lookback, achievable by a linear model given the right $L$. Conversely, Timer-S1's advantage on Traffic (where $b = -0.19$ suggests shorter context is better at long horizons) may come from learned cross-series representations that a channel-independent model cannot access.
+
+The local normalization finding resonates with our SAGA review~\cite{saga2026}, which introduced adaptive temporal conformal prediction for multi-horizon forecasting. SAGA's adaptive calibration implicitly performs a form of local normalization---adjusting prediction intervals based on recent volatility. SearchCast shows that even a much simpler local normalization (trailing fraction of the window) captures most of this benefit for point forecasts, suggesting that SAGA's conformal layer adds value primarily for \emph{uncertainty quantification} rather than point accuracy.
+
+Our QuitoBench review~\cite{quitobench2026} argued for higher-quality benchmarks to replace the standard suite. SearchCast's BDS analysis provides concrete evidence for this argument: the standard benchmarks are ``too linear,'' meaning reported advances in nonlinear modeling do not translate to MSE gains. QuitoBench's emphasis on diverse, challenging datasets is precisely what is needed to distinguish genuine architectural contributions from preprocessing artifacts.
+
+The component-level benchmarking philosophy from our Beyond Holistic Models review~\cite{wang2026component} aligns with SearchCast's diagnostic approach: rather than comparing model architectures monolithically, both papers decompose performance into interpretable components (preprocessing axes for SearchCast; encoder/decoder/normalization for component-level benchmarking). The convergence of these perspectives suggests the field should shift from ``which model is best?'' to ``which preprocessing-model combination is best for this data regime?''
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: SearchCast as a Diagnostic Layer for Foundation Model Deployment}
+
+\paragraph{Gap.} SearchCast establishes a strong linear baseline but does not compare against time series foundation models (Toto~2.0, Timer-S1, Chronos, TimesFM) under the same preprocessing search protocol. Our Toto~2.0 review~\cite{woo2026toto} showed foundation models achieve state-of-the-art via scaling, but it is unknown how much of their advantage comes from genuine capacity vs.\ implicit preprocessing absorbed during pretraining. A direct comparison under controlled preprocessing would quantify the ``true architectural gap'' between linear and foundation models.
+
+\paragraph{Approach.} Design a two-stage evaluation protocol:
+\begin{enumerate}
+\item \textbf{Stage 1: SearchCast diagnostic.} Run SearchCast on a new dataset to extract optimal preprocessing parameters: lookback $L^*$, local normalization ratio $r^*$, augmentation type, and regularization $\alpha^*$. These parameters characterize the dataset's stationarity regime ($b$ exponent), locality ($r^*$), and heterogeneity structure ($g_s^*$).
+\item \textbf{Stage 2: Foundation model with SearchCast preprocessing.} Apply the SearchCast-discovered preprocessing (context length $L^*$, local normalization with ratio $r^*$) to the foundation model's input pipeline before inference. Compare: (a)~foundation model with default preprocessing; (b)~foundation model with SearchCast preprocessing; (c)~SearchCast Ridge baseline. If (b) $\gg$ (a), the foundation model underutilizes its capacity due to suboptimal preprocessing. If (c) $\approx$ (b), the foundation model's architectural capacity adds no value beyond what preprocessing provides.
+\end{enumerate}
+This creates a \textbf{diagnostic-first deployment protocol}: before committing to an expensive foundation model, run SearchCast to characterize the data and establish whether the complexity is warranted. The protocol also reveals which SearchCast insights (context length, normalization ratio) transfer to improve foundation model performance.
+
+\paragraph{Feasibility.} SearchCast runs in minutes on GPU (closed-form Ridge, 20 Optuna trials). Foundation model inference uses existing APIs. Validation on the 8 standard benchmarks plus QuitoBench's~\cite{quitobench2026} more challenging datasets. Expected outcome: foundation models benefit from SearchCast preprocessing (especially context length adaptation), but retain advantages on high-channel, nonstationary datasets where cross-series learning matters.
+
+\subsection{Direction 2: Adaptive Local Normalization for Agentic Time Series Forecasting}
+
+\paragraph{Gap.} SearchCast's local normalization uses a fixed ratio $r$ per dataset-horizon cell, selected via offline search. Our Nexus review~\cite{nexus2026} established an agentic framework for time series forecasting where an LLM agent selects models and strategies dynamically. But Nexus treats preprocessing as fixed. Combining SearchCast's insight (local normalization is the most impactful preprocessing axis) with Nexus's agentic framework creates an opportunity: can an agent \emph{learn to adapt the normalization ratio online} as the data stream evolves, rather than fixing it offline?
+
+\paragraph{Approach.} Extend Nexus's agentic forecasting framework with a \textbf{normalization-adaptive module}:
+\begin{enumerate}
+\item At each prediction step, compute a battery of stationarity diagnostics on the trailing context: augmented Dickey-Fuller test statistic, KPSS statistic, rolling variance ratio, and the autocorrelation function decay rate.
+\item Feed these diagnostics to a lightweight policy network (MLP or decision tree) that outputs the optimal $\log_{10}(r)$ for the current context window. The policy is trained via supervised learning on (diagnostic features, SearchCast-selected $r^*$) pairs from the offline search phase.
+\item The agent uses this predicted $r$ to normalize the input before passing it to either the Ridge model or a downstream foundation model.
+\end{enumerate}
+The key innovation over static SearchCast is \emph{temporal adaptivity}: if a dataset transitions from a stationary regime (where $r \approx 1$ is fine) to a regime-switching regime (where $r \ll 1$ is needed), the adaptive module detects this and adjusts. This is especially important for real-world deployment where distribution shifts are common---the offline-searched $r$ may become stale. The approach bridges SearchCast's preprocessing insight with our continual learning research: the normalization ratio is a form of \emph{data-driven hyperparameter} that must evolve with the data, analogous to the evolving representations in our EvoEmbedding review~\cite{li2026evoembedding}.
+
+\paragraph{Feasibility.} Training data comes directly from SearchCast's existing search outputs (pairs of diagnostic features and selected $r^*$ across multiple datasets and horizons). The policy network adds negligible inference cost ($<$1ms per prediction). Validation: compare static SearchCast vs.\ adaptive SearchCast on synthetic regime-switching data and on real-world datasets with known distribution shifts (e.g., COVID-era economic indicators). Expected benefit: adaptive normalization maintains accuracy through distribution shifts where static $r$ degrades.
+
+\subsection{Direction 3: Preprocessing-Aware Distillation from Foundation Models to Linear Models}
+
+\paragraph{Gap.} SearchCast shows linear models match foundation models on most benchmarks, but lose on high-channel datasets (Electricity, Traffic) where cross-series representation sharing helps. Our extensive OPD corpus (ReNIO~\cite{lin2026renio}, geometric OPD~\cite{shen2026geometry}, OPDLM~\cite{ye2026opdlm}) has developed sophisticated distillation techniques for LLMs. Can we distill a foundation model's cross-series knowledge into SearchCast's preprocessing pipeline, creating a linear model that captures the foundation model's advantage without its computational cost?
+
+\paragraph{Approach.} Design a \textbf{preprocessing-aware distillation} (PAD) framework:
+\begin{enumerate}
+\item \textbf{Teacher}: A pretrained foundation model (Toto~2.0 or Timer-S1) that implicitly learns cross-series representations during pretraining.
+\item \textbf{Student}: SearchCast Ridge regression, but with an extended feature space that includes \emph{cross-series features} distilled from the teacher.
+\item \textbf{Distillation target}: Instead of distilling the teacher's output predictions (standard knowledge distillation), distill the teacher's \emph{internal cross-series attention patterns} into explicit features for the linear model. Specifically: (a)~extract the teacher's cross-variate attention matrix $A \in \mathbb{R}^{C \times C}$ from an intermediate layer; (b)~use $A$ to compute weighted cross-series features $\tilde{x}_i = \sum_j A_{ij} x_j$ for each variate $i$; (c)~concatenate $\tilde{x}_i$ with the original features $x_i$ as input to Ridge regression.
+\item \textbf{SearchCast over extended features}: Run the full four-axis preprocessing search over the augmented feature space $[x_i; \tilde{x}_i]$.
+\end{enumerate}
+This transforms the foundation model's implicit cross-series knowledge into explicit linear features, enabling the Ridge model to benefit from cross-channel information without needing learned parameters. The approach is inspired by our ReNIO review's insight that the student-teacher relationship should concentrate learning signal at ``pivotal'' points---here, the pivotal information is the cross-series attention structure that the linear model cannot discover on its own.
+
+\paragraph{Feasibility.} Requires one forward pass through the teacher per training sample to extract attention matrices (offline, precomputable). The extended feature space doubles Ridge's input dimension but preserves the closed-form solution. Validation: compare SearchCast, SearchCast+PAD, and the teacher foundation model on Electricity (321 channels) and Traffic (862 channels)---the two datasets where linear models currently lose. Expected outcome: PAD closes much of the gap on high-channel datasets while maintaining SearchCast's speed advantage (milliseconds vs.\ minutes per inference).
+
+\section{Conclusion}
+
+SearchCast demonstrates that the perceived gap between linear models and deep learning for time series forecasting is largely an artifact of under-tuned preprocessing rather than insufficient model capacity. By systematically searching over four preprocessing axes---context length, local normalization, augmentation, and regularization---Ridge regression matches or outperforms PatchTST on 6 of 8 standard benchmarks, with margins up to 16\% on ETTm2. The three diagnostic findings are individually striking: (1)~optimal context length varies by two orders of magnitude across datasets, and the lookback-horizon relationship can be \emph{negative} (longer horizons preferring shorter context); (2)~local normalization using only the trailing 0.3--30\% of the window dominates full-window normalization in 62--100\% of settings; (3)~the BDS test confirms that PatchTST captures genuine nonlinear structure that Ridge misses, but this structure does not improve MSE---the standard benchmarks are ``too linear'' to require nonlinear modeling. For our research program, SearchCast provides both a practical baseline (any new forecasting method should beat searched Ridge before claiming architectural novelty) and a diagnostic methodology (the structure of optimal preprocessing reveals data properties that deep models absorb silently). The remaining frontier---high-channel datasets where cross-series representation sharing genuinely helps---motivates preprocessing-aware distillation as a bridge between foundation model knowledge and linear model efficiency.
+
+\begin{thebibliography}{99}
+\bibitem{huang2026linear} Huang, L., Xu, J., and Darlow, L. ``How Good Can Linear Models Be for Time-Series Forecasting?'' \emph{arXiv preprint arXiv:2606.27282}, 2026.
+\bibitem{woo2026toto} Woo, G., et al. ``Toto 2.0: Time Series Forecasting Enters the Scaling Era.'' \emph{arXiv preprint arXiv:2605.20119}, 2026.
+\bibitem{liu2026timers1} Liu, Y., et al. ``Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling.'' \emph{arXiv preprint arXiv:2603.04791}, 2026.
+\bibitem{saga2026} SAGA Authors. ``SAGA: A Sequence-Adaptive Generative Architecture for Multi-Horizon Probabilistic Forecasting with Adaptive Temporal Conformal Prediction.'' \emph{arXiv preprint arXiv:2605.19014}, 2026.
+\bibitem{quitobench2026} QuitoBench Authors. ``QuitoBench: A High-Quality Open Time Series Forecasting Benchmark.'' \emph{arXiv preprint arXiv:2603.26017}, 2026.
+\bibitem{wang2026component} Wang, Z., et al. ``Beyond Holistic Models: Systematic Component-level Benchmarking of Deep Multivariate Time-Series Forecasting.'' \emph{arXiv preprint arXiv:2605.26562}, 2026.
+\bibitem{nexus2026} Nexus Authors. ``Nexus: An Agentic Framework for Time Series Forecasting.'' \emph{arXiv preprint arXiv:2605.14389}, 2026.
+\bibitem{li2026evoembedding} Li, H., et al. ``EvoEmbedding: Evolvable Representations for Long-Context Retrieval and Agentic Memory.'' \emph{arXiv preprint arXiv:2606.21649}, 2026.
+\bibitem{lin2026renio} Lin, C., et al. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{ye2026opdlm} Ye, H., et al. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\end{thebibliography}
+
+\end{document}
