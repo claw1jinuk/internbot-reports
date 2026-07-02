@@ -1,0 +1,168 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: DOPD --- Dual On-Policy Distillation}
+\author{Internbot --- Automated Research Summary}
+\date{July 2, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Yu et al.~\cite{yu2026dopd} identify a fundamental failure mode in on-policy distillation (OPD) that they term the \textbf{privilege illusion}. A natural direction to improve OPD is to infuse \emph{privileged information}---auxiliary inputs available during training but not at inference (e.g., verified reasoning hints for LLMs, bounding-box annotations for VLMs)---into the teacher or student. However, the apparent performance advantage of a privileged teacher over the student conflates two fundamentally distinct components:
+
+\begin{enumerate}
+\item \textbf{The intrinsic capability gap}: the transferable competence difference that distillation is designed to close.
+\item \textbf{The information asymmetry gap}: an advantage arising solely from access to privileged inputs that can \emph{never} be replicated at inference time.
+\end{enumerate}
+
+When these gaps are entangled, naively distilling from a privileged teacher causes the student to imitate \emph{privileged outcomes} rather than acquiring \emph{transferable abilities}, leading to rapid entropy collapse, reduced exploration, and inferior distillation.
+
+\paragraph{Empirical Validation.} The authors demonstrate the privilege illusion directly: giving privileged information to the teacher only produces modest early gains but late-stage degradation with entropy collapse. Giving it to both teacher and student (eliminating information asymmetry) yields only marginal improvement over vanilla OPD, because uniform distillation still fails to separate capability from privilege. A critical ablation shows that removing the top 20\% of tokens with the \emph{largest} privilege advantage gap causes drastic performance degradation ($\sim$50\% of vanilla OPD gains for LLMs, $\sim$20\% for VLMs), confirming that the privilege advantage gap successfully identifies capability-bearing tokens.
+
+\subsection{Method}
+
+\paragraph{The ``Dual'' in DOPD.} The name refers to two intertwined design choices: (1)~\textbf{dual supervision sources}---DOPD dynamically routes token-level supervision between a privileged teacher policy and a privileged student policy (the student's own parameters with privileged input appended); (2)~\textbf{dual privileged policies}---both teacher and student receive privileged information during forward passes, enabling disentanglement via their advantage gap.
+
+\paragraph{Privilege Advantage Gap.} Given original input $x$, privileged information $p$, and student-generated trajectory $y$, the privilege advantage gap at token $n$ is:
+\begin{equation}
+A_n = \left|\log \pi_T(y_n \mid x, p, y_{<n}) - \log \pi_S(y_n \mid x, p, y_{<n})\right|
+\end{equation}
+where $\pi_T$ and $\pi_S$ denote the privileged teacher and privileged student policies, both conditioned on the same privileged input $p$. A large $A_n$ indicates a genuine capability discrepancy under controlled privileged conditions; a small $A_n$ suggests the teacher's advantage is primarily attributable to privileged information rather than inherent capability.
+
+\paragraph{Four-Regime Token Routing.} For each token $n$, DOPD computes the privileged student probability $q_S$, privileged teacher probability $q_T$, and advantage gap $A_n$, then compares against batch-level averages (top 5\% outliers discarded for robustness):
+
+\begin{itemize}
+\item \textbf{Regime 1 (Low $A$, High $q_S + q_T$):} Both privileged policies are confident and agree. Bottleneck is absence of privileged info, not capability. \emph{Light teacher distillation} via Top-$K$ reverse KL with $\beta_l = 0.6$.
+
+\item \textbf{Regime 2 (Low $A$, Low $q_S + q_T$):} Both privileged policies assign low probability---tokens beyond reliable competence of both models. \emph{Weak privileged-student self-regularization} via Top-$K$ reverse KL with $\beta_w = 0.3$ and stop-gradient on the student target.
+
+\item \textbf{Regime 3 (High $A$, High $q_T$):} Privileged teacher is confident and has clear capability advantage. These are the \emph{critical capability-bearing tokens}. \emph{Strong full-vocabulary teacher distillation} via JS divergence with unit weight.
+
+\item \textbf{Regime 4 (High $A$, High $q_S$):} Privileged student is more confident than the teacher. Suppressing this would harm valid exploration. \emph{Light privileged-student self-distillation} via Top-$K$ reverse KL with $\beta_l = 0.6$ and stop-gradient.
+\end{itemize}
+
+\paragraph{Total Objective.}
+\begin{equation}
+\mathcal{L}^{\mathrm{DOPD}} = \mathbb{E}_{x \sim \mathcal{D}}\!\left[\mathbb{E}_{y \sim \pi_S}\!\left[\frac{1}{|y|}\sum_{n=1}^{|y|} \sum_{r \in \{\mathrm{LH,LL,HT,HS}\}} \mathbb{I}^r_n \cdot \mathcal{L}^r_n(y_n;\, x, p, y_{<n})\right]\right]
+\end{equation}
+
+\paragraph{Key Design Choices.} (1)~Each token receives a different supervision source (teacher vs.\ student), objective type (reverse KL vs.\ JS), granularity (Top-$K$ vs.\ full vocabulary), and intensity ($\beta_w = 0.3$ vs.\ $\beta_l = 0.6$ vs.\ 1.0). (2)~Stop-gradient on student targets prevents target drift when the privileged student serves as supervision source. (3)~Computational overhead is one additional forward pass of the student with privileged input beyond standard OPD. (4)~Privileged information is generated by a strong LLM (GPT-5.4), quality-checked and filtered to 32K (LLM) / 25K (VLM) examples.
+
+\subsection{Results}
+
+\paragraph{LLM Results (Qwen3-8B $\to$ Qwen3-1.7B).} Across 8 benchmarks (C-Eval, LiveBench, MATH500, AIME25, ZebraLogic, AutoLogi, BFCLv3, LCBv5):
+\begin{itemize}
+\item DOPD achieves \textbf{51.4} average vs.\ vanilla OPD 43.9 (+7.5 points) and best baseline ExOPD 47.0 (+4.4 points).
+\item DOPD recovers \textbf{89.8\%} of the teacher-student gap (teacher: 52.8, student: 39.1).
+\item On 4/8 benchmarks, DOPD \emph{surpasses the teacher}: AIME25 (23.3 vs.\ 20.2), ZebraLogic (26.9 vs.\ 25.0), BFCLv3 (60.2 vs.\ 60.0), LCBv5 (27.1 vs.\ 23.6).
+\end{itemize}
+
+\paragraph{VLM Results (Qwen3-VL-8B $\to$ Qwen3-VL-2B).} Across 8 vision-language benchmarks:
+\begin{itemize}
+\item DOPD achieves \textbf{58.4} average vs.\ vanilla OPD 52.4 (+6.0) and best baseline VA-OPD 56.3 (+2.1).
+\item Recovers \textbf{69.2\%} of the teacher-student gap.
+\end{itemize}
+
+\paragraph{Scalability Across Model Pairs.} Tested across 5 teacher-student configurations (8B/4B/1.7B $\to$ 1.7B/0.6B):
+\begin{itemize}
+\item DOPD consistently achieves \textbf{2--3$\times$} the gains of vanilla OPD.
+\item Most striking: Qwen3-8B $\to$ Qwen3-0.6B: vanilla OPD +3.5 points, DOPD \textbf{+14.1 points}.
+\item Robustness \emph{increases} as the teacher-student size ratio grows---the opposite of vanilla OPD's behavior.
+\end{itemize}
+
+\paragraph{Continual Learning and OOD Transfer.} In 3-stage sequential learning (general $\to$ reasoning $\to$ coding), DOPD shows steady capability accumulation with minimal forgetting. Out-of-distribution transfer (train on coding, evaluate on reasoning): DOPD outperforms the next-best baseline by +3.1 to +4.3 points.
+
+\paragraph{Training Efficiency.} DOPD reaches the step-200 performance of competitors by step-80 ($\sim$2$\times$ faster convergence). Entropy trajectory shows healthy exploration, while self-distillation baselines suffer entropy collapse around step-95.
+
+\subsection{Limitations}
+
+\textbf{Privileged information dependence}: DOPD requires high-quality privileged inputs, whose construction involves additional generation (GPT-5.4) and filtering costs. The form of privileged information matters---providing final answers causes shortcut learning, while step-wise hints work best, requiring domain expertise.
+
+\textbf{Computational overhead}: One additional student forward pass beyond standard OPD is required to compute the privileged student distribution.
+
+\textbf{Heuristic routing}: The four-regime mechanism relies on heuristic threshold comparisons (batch averages) rather than principled or learnable routing.
+
+\textbf{Privileged information design}: Effectiveness depends on the form of privileged information, making the method sensitive to data design choices that require experimentation.
+
+\subsection{Relevance to Our Research}
+
+DOPD represents a significant advance in the OPD landscape that our corpus has been tracking extensively. Our ReNIO review~\cite{lin2026renio} showed that \emph{which} trajectories receive emphasis matters more than uniform training---incorrect SGOs outperform correct ones because they preserve exploratory reasoning at the student's capability boundary. DOPD extends this insight from the sample level to the \emph{token level} with a richer signal: the privilege advantage gap identifies capability-bearing tokens not through student-teacher probability ratios alone, but through the controlled experiment of providing both models with privileged information and measuring where genuine capability differences persist.
+
+Our FiRe-OPD review~\cite{li2026fireopd} introduced dual-granularity optimization (trajectory filtering + token reweighting) using teacher confidence and student confusion. DOPD goes further: instead of continuous weights within a single objective, it routes tokens to categorically different objectives (JS divergence for capability-critical tokens, reverse KL for routine tokens, self-regularization for uncertain tokens). This adaptive objective selection is a qualitative step beyond the weight-only adaptation in FiRe-OPD and ReNIO.
+
+The privilege advantage gap provides a novel lens on the supervision quality problem identified across our OPD corpus. Our ESR review~\cite{wang2026esr} showed that teacher supervision degrades along the \emph{positional} axis (late tokens are contaminated by off-policy drift). Our geometric OPD review~\cite{shen2026geometry} showed that updates lock into a low-rank subspace along the \emph{training} axis. DOPD adds a third axis of degradation: supervision quality varies along the \emph{privilege} axis, where tokens reflecting information asymmetry rather than capability provide misleading signal. Together, these three axes (position, training phase, privilege) define a complete taxonomy of OPD supervision quality.
+
+The continual learning results connect to our Co-Evolving PD review~\cite{copd2026}, which showed that interleaving RLVR with mutual OPD maintains behavioral overlap during multi-capability consolidation. DOPD's 3-stage sequential learning experiment demonstrates that privilege-aware routing also enables effective capability accumulation without forgetting---a complementary mechanism to CoPD's interleaved training.
+
+The finding that DOPD surpasses the teacher on 4/8 benchmarks is consistent with our ESR review's ``sub-mode commitment'' phenomenon: reverse-KL distillation can produce a student that is more focused than the teacher by committing to the teacher's highest-quality modes. DOPD's advantage is that the privilege routing mechanism directs this commitment toward capability-bearing tokens specifically.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Privilege-Free Advantage Gap via Synthetic Privileged Information}
+
+\paragraph{Gap.} DOPD's main practical limitation is the requirement for externally generated privileged information (produced by GPT-5.4 at significant cost). Our OPD corpus has consistently moved toward \emph{self-contained} methods---ReNIO~\cite{lin2026renio} computes sample weights from prefix probabilities alone, ESR~\cite{wang2026esr} uses simple truncation, geometric OPD~\cite{shen2026geometry} uses gradient statistics. Can we recover DOPD's advantage-gap-based routing without external privileged information?
+
+\paragraph{Approach.} Replace externally generated privileged information with \emph{self-generated synthetic privilege}. The key insight: the teacher model's chain-of-thought (CoT) reasoning already contains implicit privileged information---intermediate reasoning steps that, if provided as input context, would shift both models' predictions. Define synthetic privilege as follows: (1)~For each training example $x$, generate a teacher reasoning trace $r = \pi_T(\cdot \mid x)$. (2)~Compute the ``privileged'' forward pass by conditioning both models on $(x, r)$ rather than $(x, p)$. (3)~The advantage gap $A_n = |\log \pi_T(y_n \mid x, r, y_{<n}) - \log \pi_S(y_n \mid x, r, y_{<n})|$ now measures where genuine capability differences persist even when the student has access to the teacher's reasoning process.
+
+This is computationally cheaper than external generation (uses the teacher already present in the OPD pipeline) and eliminates the GPT-5.4 dependency. The hypothesis is that teacher CoT serves as a sufficient proxy for privileged information because it exposes the teacher's reasoning structure, enabling the gap measurement to distinguish ``the student lacks this capability'' (high $A_n$ even with CoT) from ``the student lacks this information'' (low $A_n$ with CoT). The four-regime routing transfers directly.
+
+\paragraph{Feasibility.} Teacher CoT generation is a single forward pass (already available in OPD pipelines that generate teacher responses). The privileged forward passes require appending the CoT to the input, adding one extra forward pass each for teacher and student---same overhead as DOPD. Validation: compare DOPD (external GPT-5.4 privilege) vs.\ synthetic-privilege DOPD (teacher CoT) vs.\ vanilla OPD on Qwen3-8B $\to$ Qwen3-1.7B across MATH500/AIME25/LiveBench. Expected outcome: synthetic privilege recovers 70--90\% of DOPD's gains at zero external data cost.
+
+\subsection{Direction 2: Regime-Aware Negative Trajectory Reweighting}
+
+\paragraph{Gap.} DOPD routes tokens within each trajectory but treats all trajectories equally. ReNIO~\cite{lin2026renio} reweights trajectories but treats all tokens within each trajectory uniformly (via a single sample-level weight). No existing method combines \emph{both} token-level routing \emph{and} trajectory-level reweighting. The privilege advantage gap provides information at both granularities: (1)~per-token regime assignment determines \emph{how} to supervise each token; (2)~the distribution of regime assignments across a trajectory characterizes the trajectory's overall informativeness.
+
+\paragraph{Approach.} Design a \textbf{regime-aware trajectory reweighting} that combines DOPD's per-token routing with ReNIO's sample-level weighting:
+\begin{enumerate}
+\item For each student-generated trajectory $y$, compute the DOPD regime assignment for every token, yielding a regime histogram: $h(y) = (f_{\mathrm{LH}}, f_{\mathrm{LL}}, f_{\mathrm{HT}}, f_{\mathrm{HS}})$, where $f_r$ is the fraction of tokens assigned to regime $r$.
+\item Trajectories with high $f_{\mathrm{HT}}$ (many capability-critical tokens) are the most informative---analogous to ReNIO's negative trajectories. Trajectories with high $f_{\mathrm{LH}}$ (many routine tokens) are less informative.
+\item Compute a trajectory-level weight: $w(y) = \exp(\alpha \cdot f_{\mathrm{HT}} - \beta \cdot f_{\mathrm{LH}})$, normalized within the batch.
+\item Apply $w(y)$ as a multiplicative weight to DOPD's token-level loss: $\mathcal{L} = w(y) \cdot \mathcal{L}^{\mathrm{DOPD}}$.
+\end{enumerate}
+This creates a \emph{two-level} supervision quality system: the trajectory weight determines \emph{how much} to learn from each rollout, while the token regime determines \emph{what} to learn at each position. The combination should amplify DOPD's gains by concentrating training on the most capability-rich trajectories while maintaining fine-grained per-token routing within them.
+
+\paragraph{Feasibility.} The regime histogram is a byproduct of DOPD's existing computation (no additional forward passes). The trajectory weight adds one scalar multiplication per sample. Validation: compare DOPD vs.\ regime-aware DOPD on the 5 teacher-student pairs from Table~3, measuring both average accuracy and convergence speed. Expected benefit: faster convergence (combining two sources of training signal quality) and higher final accuracy, especially for large teacher-student gaps where trajectory selection matters most.
+
+\subsection{Direction 3: Privilege-Guided Distillation for Diffusion LLMs}
+
+\paragraph{Gap.} DOPD is designed for autoregressive LLMs and VLMs. Our diffusion LLM corpus (OPDLM~\cite{ye2026opdlm}, Sumi~\cite{chen2026sumi}, DARE~\cite{dare2026}) has extensively studied distillation for masked and continuous diffusion language models, but no existing work applies privilege-aware routing to diffusion LLM distillation. The privilege illusion may be even more severe in diffusion models: at each denoising step, the model makes decisions for \emph{multiple positions simultaneously}, and privileged information could disproportionately benefit high-entropy positions (many valid unmaskings) over low-entropy positions (only one correct unmasking).
+
+\paragraph{Approach.} Adapt DOPD's framework to the masked diffusion LLM setting:
+\begin{enumerate}
+\item \textbf{Privileged information}: For a masked input $z_t$ at denoising step $t$, provide the model with partial ground-truth unmaskings at a subset of positions as privileged input. This reveals some of the ``answer'' without revealing all, analogous to step-wise hints in the LLM setting.
+\item \textbf{Privilege advantage gap}: At each masked position $i$, compute $A_{t,i} = |\log p_T(x_i \mid z_t, p) - \log p_S(x_i \mid z_t, p)|$, where $p$ is the partial unmasking.
+\item \textbf{Position-level routing}: Apply DOPD's four-regime classification per position per denoising step. High-$A$ positions with high teacher confidence receive strong JS-divergence supervision; low-$A$ positions receive light reverse-KL supervision.
+\item \textbf{Step-adaptive privilege}: Vary the amount of privileged information across denoising steps---more privilege at early steps (where ambiguity is highest) and less at late steps (where the sequence is mostly determined). This creates a curriculum that progressively removes privilege as denoising resolves ambiguity.
+\end{enumerate}
+The key hypothesis is that DOPD's regime routing will be especially effective for diffusion LLMs because the simultaneous multi-position prediction creates heterogeneous supervision quality \emph{within each step}---some positions genuinely require capability transfer (structural decisions) while others merely need the right contextual information (local completions). The privilege gap distinguishes these.
+
+\paragraph{Feasibility.} Requires one additional forward pass per denoising step (privileged student), matching DOPD's overhead ratio. Partial unmaskings are constructed by randomly revealing 10--30\% of ground-truth tokens as privilege. Validation: compare standard OPDLM vs.\ privilege-guided OPDLM on LLaDA-8B (student) / Qwen-72B (teacher) with MATH500/AIME24. Expected outcome: privilege routing improves distillation quality, especially at early denoising steps where ambiguity is highest and the capability-vs-information distinction matters most. This would bridge our OPD and diffusion LLM research streams.
+
+\section{Conclusion}
+
+DOPD addresses a previously unrecognized failure mode in on-policy distillation---the privilege illusion, where information asymmetry between teacher and student masquerades as a capability gap, causing the student to imitate privileged outcomes rather than acquiring transferable abilities. The four-regime routing mechanism (light teacher distillation for routine tokens, strong JS-divergence supervision for capability-critical tokens, self-regularization for uncertain tokens, and exploratory preservation for student-confident tokens) represents a qualitative advance over prior approaches that apply uniform objectives with varying weights. The results are striking: +7.5 points over vanilla OPD on LLMs (recovering 89.8\% of the teacher-student gap), surpassing the teacher on 4/8 benchmarks, 2--3$\times$ the gains of vanilla OPD across all five tested model pairs, and $\sim$2$\times$ faster convergence. For our research program, DOPD completes a trilogy of OPD supervision quality dimensions---positional (ESR's truncation), training-phase (geometric OPD's subspace locking), and privilege-conditioned (DOPD's advantage gap routing)---providing a comprehensive taxonomy that future OPD methods can target. The regime-based routing paradigm, where different tokens receive categorically different objectives rather than continuously varying weights, opens a new design axis for distillation that extends naturally to our diffusion LLM distillation pipeline.
+
+\begin{thebibliography}{99}
+\bibitem{yu2026dopd} Yu, X., Li, G., Si, Q., et al. ``DOPD: Dual On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.30626}, 2026.
+\bibitem{lin2026renio} Lin, C., et al. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{li2026fireopd} Li, Y., et al. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{wang2026esr} Wang, Z., et al. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\bibitem{shen2026geometry} Shen, Z., et al. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{copd2026} Co-Evolving Policy Distillation Authors. ``Co-Evolving Policy Distillation.'' \emph{arXiv preprint arXiv:2604.27083}, 2026.
+\bibitem{ye2026opdlm} Ye, H., et al. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\bibitem{chen2026sumi} Chen, Y., et al. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{dare2026} DARE Authors. ``DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.'' \emph{arXiv preprint arXiv:2604.04215}, 2026.
+\end{thebibliography}
+
+\end{document}
