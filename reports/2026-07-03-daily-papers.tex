@@ -1,0 +1,160 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: ELDR --- Expert-Locality-Aware Decode Routing\\for PD-Disaggregated MoE Serving}
+\author{Internbot --- Automated Research Summary}
+\date{July 3, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Choi et al.~\cite{choi2026eldr} identify a previously unexploited routing axis in prefill-decode (PD) disaggregated serving of Mixture-of-Experts (MoE) LLMs: \textbf{expert locality}. In PD-disaggregated architectures, inference is split between prefill workers (compute-bound, parallel) and decode workers (memory-bandwidth-bound, sequential), with a router assigning requests from prefill to decode workers. While prefill-side routing has received attention (cache-affinity policies), decode-side routing has been treated as pure load balancing, assuming decode workers are interchangeable.
+
+\paragraph{Why Equal Load $\neq$ Equal Latency for MoE.} For dense models, equal-load workers perform equal feed-forward work. For MoE models, this breaks down because decode cost is dominated by loading expert weights from HBM, and the cost is determined by the \emph{union of distinct experts activated across all tokens in the batch}---not the number of tokens. The paper quantifies this strikingly: on Qwen3-30B-A3B, growing the active-expert count from 16 to 128 raises MoE-layer latency by \textbf{4.7$\times$} at fixed batch size, while increasing batch size at fixed active-expert count barely moves latency. The bottleneck is how many distinct expert weight tensors must be loaded, not how many tokens are processed.
+
+\paragraph{Expert Locality Is Exploitable.} Three empirical facts make expert-aware routing actionable: (1)~\textbf{Experts specialize by domain}: code, math, medical, and legal prompts activate distinct expert subsets, with clear domain-specific activation patterns across Qwen3-30B-A3B, GPT-OSS-120B, and Gemma-4-26B-A4B. (2)~\textbf{Same-domain batches activate fewer experts}: 17--21\% fewer distinct experts per step for task domains, 3--10\% fewer for language domains, compared to mixed batches. (3)~\textbf{Prefill predicts decode activation}: per-expert prefill and decode activation correlate at \textbf{0.70--0.92} across models. This is critical because the routing decision happens at the prefill-to-decode handoff, before any decode tokens exist.
+
+\subsection{Method}
+
+ELDR operates as a thin routing layer ($\sim$2,000 lines of Python on vLLM) with three components: expert signature construction, offline clustering, and online locality-band routing.
+
+\paragraph{Expert Signature.} A per-request representation summarizing prefill-time expert activations to predict decode-time expert usage, constructed in four steps:
+
+\begin{enumerate}
+\item \textbf{Count}: At each layer $l$, count how many prefill tokens route to each expert, giving $c_r(l) \in \mathbb{N}^E$.
+\item \textbf{IDF reweighting}: Multiply by inverse document frequency $w(l,e) = \log\!\left(\frac{|\mathcal{C}|+1}{\mathrm{df}(l,e)+1}\right)$ to suppress generalist experts and amplify rare specialists: $\tilde{c}_r(l,e) = c_r(l,e) \cdot w(l,e)$.
+\item \textbf{Layer selection}: A greedy mask $S \subset \{1,\ldots,L\}$ selects layers maximizing signature quality $\rho$, stopping at peak $N^*$ (adding more layers dilutes the signal).
+\item \textbf{L2 normalization}: $s_r = x_r / \|x_r\|_2$ ensures similarity reflects the \emph{shape} of expert usage, not token count.
+\end{enumerate}
+
+Signature quality is measured as $\rho = \mathrm{Spearman}(\mathrm{cos\text{-}dist}(s_i, s_j),\; \mathrm{cos\text{-}dist}(p_i, p_j))$, the rank correlation between signature pair-distance and decode-pattern pair-distance. Count-based signatures with IDF beat continuous alternatives (gate probabilities, logits) by $>$0.035 in mean $\rho$; IDF alone raises worst-case $\rho$ by 4.9 points.
+
+\paragraph{Offline Clustering: Hungarian-Balanced K-Means.} ELDR produces one centroid per decode worker by clustering calibration signatures into $K$ groups. Standard K-means produces uneven clusters on skewed data; since each cluster maps to one worker, imbalance means uneven load. \textbf{Hungarian-balanced K-means} replaces nearest-neighbor assignment with a global optimal assignment via the Hungarian algorithm, constraining each centroid to take at most $\lceil N/K \rceil$ points. This forces centroids to spread across distinct signature regions. The offline fit completes in under 10 seconds on CPU.
+
+\paragraph{Online Routing: Locality-Band.} Pure top-1 routing (nearest centroid) causes tail latency spikes from burst concentration. ELDR defines a \textbf{locality band}: all workers with similarity $s_k \geq s^* - \tau$ (where $s^*$ is the maximum), then selects the lowest-load worker within the band. The parameter $\tau \in [0,1]$ interpolates between pure locality ($\tau = 0$) and pure load balancing ($\tau = 1$); $\tau = 0.1$ is used throughout. The band adapts to signature confidence: a confident signature puts few workers in the band (locality preserved); an ambiguous signature puts many (load balance applied).
+
+\paragraph{Prefix Cache Coherence.} ELDR stores signatures at KV cache block granularity, co-indexed with the KV cache. When prefix blocks are reused, the signature is recovered by summing cached and fresh block signatures---exact regardless of which request populated each block. Memory overhead: \textbf{0.24\% of HBM}.
+
+\subsection{Results}
+
+\paragraph{Setup.} 5-node cluster of AMD MI300X GPUs (8 GPUs/node, 192 GB HBM each), 400 Gbps InfiniBand. Models: Qwen3-30B-A3B, GPT-OSS-120B, Gemma-4-26B-A4B (all 128 experts), and Qwen3-235B-A22B with TP=4/EP=4. Workloads: task domain (code/math/medical/legal, 11,668 prompts) and language domain (WildChat, 14,000 prompts). Main topology: 8P16D (24 GPUs).
+
+\paragraph{Main Results.} On task workloads with well-defined domains:
+\begin{itemize}
+\item Median TPOT reduction: \textbf{7.0--13.9\%} vs.\ best load balancer (JSQ/P2C).
+\item Tail TPOT (P99) reduction: \textbf{3.4--6.0\%}.
+\item Even beats oracle domain routing by 1.4--6.9\% (median) because $K = 16$ signature clusters resolve locality more finely than 4 domain labels.
+\end{itemize}
+
+On language workloads with softer domain boundaries:
+\begin{itemize}
+\item Median TPOT reduction: \textbf{5.9--10.0\%} vs.\ best load balancer.
+\item Oracle domain routing \emph{collapses} here: language labels are too coarse, and skewed English/Chinese mix over-subscribes one block, \emph{regressing} tail TPOT by up to 6.1\%. ELDR avoids this via continuous signatures.
+\end{itemize}
+
+\paragraph{Active-Expert Reduction.} ELDR reduces per-step active-expert count by \textbf{22.0\% on average} compared to round-robin routing.
+
+\paragraph{Overhead.} Total routing overhead: \textbf{0.86 ms per request} (1.2\% of TTFT). Signature cache: 0.24\% of HBM. Per-request signature payload: 12 KiB (negligible vs.\ multi-MB KV transfer).
+
+\paragraph{Scaling and Generalization.} Improvement grows monotonically with decode pool size: 8.0\% at 8D, 9.8\% at 16D, 10.2\% at 24D (more decoders = finer clusters = narrower expert coverage). On Qwen3-235B-A22B (40 GPUs, EP=4): 2.7--4.3\% median TPOT reduction. TPOT advantage is preserved across both cache-on and cache-off states---locality and prefix-cache benefits are additive.
+
+\paragraph{Design Validation.} Hungarian-balanced K-means vs.\ vanilla: vanilla K-means reduces median TPOT but \emph{regresses} tail TPOT by up to 17.4\%; Hungarian-balanced reduces both (P50 up to 12.6\%, P99 up to 6.8\%). Locality band $\tau = 0$: regresses tail TPOT on 4/6 workloads; $\tau = 0.1$: removes all regressions while preserving 5.2--12.7\% median gains.
+
+\subsection{Limitations}
+
+\textbf{Offline calibration}: Requires 1,000-prompt calibration (4--15 minutes) and re-clustering upon workload shift. No online adaptation mechanism is provided.
+
+\textbf{Workload dependence}: Gains scale with expert activation separability. Homogeneous workloads offer no locality to exploit; task domains (7.0--13.9\%) outperform language domains (5.9--10.0\%).
+
+\textbf{Correlation strength varies}: Prefill-decode expert correlation ranges from 0.70 to 0.92; models with weaker correlation see smaller gains.
+
+\textbf{Diminishing returns at scale}: The 235B experiment shows smaller gains (2.7--4.3\%) than smaller models, likely due to EP-induced communication overhead diluting the expert-loading bottleneck.
+
+\textbf{Fixed expert count}: All evaluated models have 128 experts. Generalization to different expert counts or gating mechanisms (e.g., expert-choice routing) is untested.
+
+\subsection{Relevance to Our Research}
+
+ELDR provides a serving-layer perspective on LLM efficiency that complements the model-level and kernel-level optimizations in our review corpus. Our IndexCache review~\cite{indexcache2026} and LookaheadKV review~\cite{lookaheadkv2026} addressed KV cache efficiency within individual attention layers---reducing memory and computation per worker. ELDR operates \emph{across} workers, deciding which worker serves which request based on expert composition. These are orthogonal and composable: a deployment could use IndexCache/LookaheadKV within each decoder and ELDR across decoders for multiplicative gains.
+
+The expert-locality insight has implications for our distillation research. Our DOPD review~\cite{yu2026dopd} showed that different tokens receive categorically different supervision based on privilege advantage gaps. ELDR reveals that different requests have categorically different computational profiles based on expert activation patterns. Together, these suggest a two-level optimization: DOPD-style token routing during training (which tokens to supervise) and ELDR-style request routing during inference (which worker serves which request). A distilled student that inherits the teacher's expert specialization patterns would preserve ELDR's routing advantage even after knowledge transfer.
+
+The IDF-reweighted expert signature connects to a recurring theme in our corpus: the importance of \emph{targeted} rather than uniform treatment of model components. NormGuard~\cite{normguard2026} targets only the radial (norm) component of velocity drift; ReNIO~\cite{lin2026renio} targets only pivotal tokens via log-ratio thresholding; ELDR targets only specialist experts via IDF downweighting of generalists. All three methods achieve their gains by identifying which dimension of the problem carries information and suppressing the rest.
+
+The scaling behavior (improvement grows with decode pool size: 8.0\% $\to$ 9.8\% $\to$ 10.2\%) suggests ELDR's relevance will increase as production deployments grow. Our TriAttention review~\cite{triattention2026} and PEFT scaling review~\cite{peft2026} both noted that efficiency techniques become more impactful at scale. ELDR confirms this at the serving layer: larger pools allow finer-grained clustering, creating a positive feedback loop between scale and locality benefit.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Online Adaptive Expert Clustering via Continual Signature Learning}
+
+\paragraph{Gap.} ELDR uses a fixed offline clustering computed from a 1,000-prompt calibration set. In real-world deployments, workload distributions shift over time (e.g., coding traffic spikes during business hours, multilingual traffic varies by timezone). When the live distribution diverges from calibration, the fixed centroids become stale, and ELDR's locality benefit degrades. No online adaptation mechanism exists.
+
+\paragraph{Approach.} Design a \textbf{continual clustering} system that updates ELDR's centroids online as the workload evolves:
+\begin{enumerate}
+\item \textbf{Streaming signature buffer}: Maintain a fixed-size FIFO buffer of the most recent $M$ expert signatures (e.g., $M = 5{,}000$), continuously replacing old signatures with new ones.
+\item \textbf{Drift detection}: Compute the mean cosine distance between incoming signatures and their assigned centroids using an exponential moving average. When this distance exceeds a threshold $\delta$ (indicating the live distribution has drifted from the calibration), trigger a re-clustering.
+\item \textbf{Warm-start re-clustering}: Run Hungarian-balanced K-means on the buffer using the current centroids as initialization (warm start). Since the fit takes $<$10 seconds on CPU, this can run asynchronously without disrupting serving.
+\item \textbf{Smooth centroid transition}: Blend old and new centroids via exponential moving average ($c_{\mathrm{new}} = \alpha \cdot c_{\mathrm{fit}} + (1-\alpha) \cdot c_{\mathrm{old}}$) to prevent abrupt routing changes.
+\end{enumerate}
+This creates a \textbf{continual learning system for the routing layer}---connecting ELDR's serving optimization to our continual learning research. The approach draws on our EvoEmbedding review~\cite{li2026evoembedding}, which showed that bounded re-encoding with FIFO memory prevents representation collapse during continual updates. The same principle applies: the FIFO signature buffer ensures the clustering adapts to recent data without catastrophic forgetting of less-frequent-but-still-relevant workload modes.
+
+\paragraph{Feasibility.} The buffer adds $M \times d$ storage (negligible at $d \sim 10^3$). Re-clustering is already fast ($<$10s on CPU). Drift detection requires one cosine similarity per request (negligible). Validation: simulate a 24-hour production workload with periodic domain shifts (e.g., coding $\to$ chat $\to$ multilingual $\to$ coding) and compare fixed ELDR vs.\ adaptive ELDR on median and tail TPOT. Expected outcome: adaptive ELDR maintains locality gains throughout, while fixed ELDR degrades 30--50\% after the first major shift.
+
+\subsection{Direction 2: Expert-Locality-Aware Distillation for Dense Student Models}
+
+\paragraph{Gap.} ELDR optimizes serving of MoE models by exploiting their expert sparsity structure. But many deployments distill MoE teachers into dense students (our DOPD~\cite{yu2026dopd}, TESSY~\cite{tessy2026}, and TIDE~\cite{tide2026} reviews all involve teacher-student distillation). When an MoE model is distilled to a dense model, the expert structure disappears, and ELDR's routing advantage is lost. Can we \emph{preserve} the expert-locality structure during distillation, so that the dense student retains domain-specialized computational pathways that enable locality-aware serving?
+
+\paragraph{Approach.} Design an \textbf{expert-locality-preserving distillation} framework:
+\begin{enumerate}
+\item \textbf{Expert-signature-guided data grouping}: Use ELDR's clustering to group training data by expert signature similarity. Instead of random mini-batches, train the dense student on \emph{cluster-homogeneous batches}---each batch contains only data from one ELDR cluster.
+\item \textbf{Cluster-conditional LoRA}: For each of ELDR's $K$ clusters, train a lightweight LoRA adapter on the dense student. At inference, the request's expert signature (computed from a lightweight gate network that survives distillation) selects the appropriate LoRA adapter.
+\item \textbf{Serving integration}: The LoRA adapters replace ELDR's expert locality---requests with similar signatures share LoRA weights, enabling the same routing optimization. LoRA weight loading is much cheaper than full expert loading (our PEFT scaling review~\cite{peft2026} showed LoRA adds $<$1\% parameters), so the bandwidth bottleneck is dramatically reduced while preserving domain specialization.
+\end{enumerate}
+This bridges ELDR's serving insight with our distillation research: the teacher's expert specialization structure is ``distilled'' into the student's LoRA adapter structure, preserving the routing advantage even after model compression.
+
+\paragraph{Feasibility.} Expert-signature-guided grouping uses ELDR's existing clustering output. Cluster-conditional LoRA training is standard multi-adapter fine-tuning. The lightweight gate network can be a small MLP trained to predict ELDR cluster assignment from the input embedding. Validation: distill Qwen3-30B-A3B (MoE) to a dense 7B student with and without expert-locality-preserving distillation; compare TPOT in a PD-disaggregated setting. Expected outcome: the cluster-conditional LoRA student achieves comparable TPOT to ELDR-routed MoE serving while requiring $\sim$4$\times$ less memory.
+
+\subsection{Direction 3: Cross-Layer Expert Signature Compression for KV Cache Co-Optimization}
+
+\paragraph{Gap.} ELDR's signature construction selects a subset of layers and stores per-block signatures at those layers. Our KV cache reviews (IndexCache~\cite{indexcache2026}, LookaheadKV~\cite{lookaheadkv2026}, TriAttention~\cite{triattention2026}) showed that different layers have dramatically different information density---some layers are nearly redundant while others carry critical information. ELDR's greedy layer selection is based on signature quality (routing prediction accuracy), but it does not consider the \emph{joint} information structure between expert signatures and KV cache importance. Can we co-optimize which layers to keep for KV caching and which to keep for expert routing, since both operate on the same set of transformer layers?
+
+\paragraph{Approach.} Design a \textbf{joint layer importance metric} that scores each layer by its combined value for both KV caching and expert routing:
+\begin{enumerate}
+\item \textbf{KV importance}: Use LookaheadKV's attention-score-based importance metric to rank layers by how much their KV entries contribute to downstream attention patterns.
+\item \textbf{Expert routing importance}: Use ELDR's signature quality $\rho$ contribution to rank layers by how much they improve routing prediction.
+\item \textbf{Joint score}: $I(l) = \alpha \cdot I_{\mathrm{KV}}(l) + (1-\alpha) \cdot I_{\mathrm{route}}(l)$, with $\alpha$ controlling the trade-off.
+\item \textbf{Layer budget allocation}: Given a total memory budget, allocate layers to ``full KV + signature'' (both KV cache and expert signature stored), ``KV only'' (KV cached but no signature contribution), ``signature only'' (expert signature captured but KV evicted), or ``neither'' (layer fully compressed).
+\end{enumerate}
+This creates a unified memory management system that co-optimizes attention (KV cache) and routing (expert signatures) within a single memory budget. The insight is that layers important for routing may not be important for attention and vice versa, enabling a Pareto-optimal allocation that neither system achieves independently.
+
+\paragraph{Feasibility.} Both metrics are computed from existing forward passes. The joint optimization is a simple knapsack problem (discrete allocation across $L$ layers with a memory budget). Validation: compare independent KV eviction + independent ELDR layer selection vs.\ joint co-optimized allocation on Qwen3-30B-A3B, measuring both attention quality (perplexity) and routing quality ($\rho$) at various memory budgets. Expected outcome: joint allocation achieves the same routing quality at 15--20\% less total memory, or the same memory with 2--3\% better TPOT from improved routing.
+
+\section{Conclusion}
+
+ELDR demonstrates that decode latency in MoE serving is governed by expert composition, not just load, and that this composition is predictable from prefill activations. The IDF-reweighted, layer-selected expert signature provides a compact, predictive representation that enables Hungarian-balanced clustering to assign each decode worker a locality-coherent request stream. The locality-band routing mechanism ($\tau = 0.1$) elegantly interpolates between expert affinity and load balance, eliminating the tail-latency regressions that pure locality routing suffers. The result is a lossless, low-overhead (0.86 ms, 0.24\% HBM) serving optimization that achieves 5.9--13.9\% median TPOT reduction across three MoE models up to 235B parameters---purely from smarter request placement, without modifying model weights, kernels, or batching. For our research program, ELDR opens a new dimension of LLM efficiency---\emph{serving-layer optimization via computational locality}---that is orthogonal to and composable with the model-level (distillation, quantization) and kernel-level (KV cache compression, sparse attention) optimizations we have extensively studied. The expert signature's predictive power from prefill activations exemplifies the broader principle that early-phase information can guide late-phase optimization, connecting to themes across our corpus from ESR's positional truncation in distillation to ReNIO's prefix-computable trajectory reweighting.
+
+\begin{thebibliography}{99}
+\bibitem{choi2026eldr} Choi, S., Cho, S., Xiong, Y., et al. ``ELDR: Expert-Locality-Aware Decode Routing for PD-Disaggregated MoE Serving.'' \emph{arXiv preprint arXiv:2607.00466}, 2026.
+\bibitem{indexcache2026} IndexCache Authors. ``IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse.'' \emph{arXiv preprint arXiv:2603.12201}, 2026.
+\bibitem{lookaheadkv2026} LookaheadKV Authors. ``LookaheadKV: Fast and Accurate KV Cache Eviction by Glimpsing into the Future without Generation.'' \emph{arXiv preprint arXiv:2603.10899}, 2026.
+\bibitem{triattention2026} TriAttention Authors. ``TriAttention: Efficient Long Reasoning with Trigonometric KV Compression.'' \emph{arXiv preprint arXiv:2604.04921}, 2026.
+\bibitem{yu2026dopd} Yu, X., et al. ``DOPD: Dual On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.30626}, 2026.
+\bibitem{normguard2026} NormGuard Authors. ``NormGuard: Reward-Preserving Norm Constraints in Flow-Matching Reinforcement Learning.'' \emph{arXiv preprint arXiv:2606.27771}, 2026.
+\bibitem{lin2026renio} Lin, C., et al. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{li2026evoembedding} Li, H., et al. ``EvoEmbedding: Evolvable Representations for Long-Context Retrieval and Agentic Memory.'' \emph{arXiv preprint arXiv:2606.21649}, 2026.
+\bibitem{peft2026} PEFT Scaling Authors. ``On the Scaling of PEFT: Towards Million Personal Models of Trillion Parameters.'' \emph{arXiv preprint arXiv:2606.02437}, 2026.
+\bibitem{tessy2026} TESSY Authors. ``TESSY: Teacher-Student Cooperation Framework for Reasoning Model Fine-Tuning.'' \emph{arXiv preprint arXiv:2604.14164}, 2026.
+\bibitem{tide2026} TIDE Authors. ``Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.'' \emph{arXiv preprint arXiv:2604.26951}, 2026.
+\end{thebibliography}
+
+\end{document}
