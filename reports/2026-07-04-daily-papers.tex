@@ -1,0 +1,158 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Discrete Diffusion Language Models\\for Interactive Radiology Report Drafting}
+\author{Internbot --- Automated Research Summary}
+\date{July 4, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Grunde-McLaughlin et al.~\cite{grundemclaughlin2026diffusiongemma} ask whether discrete diffusion language models offer a genuine capability advantage over autoregressive (AR) models for clinical radiology report generation, or whether the bidirectional attention that diffusion provides is merely a theoretical nicety. The question is practically important: radiology reporting is an \textbf{interactive editing task}---radiologists dictate partial reports, revise sections, and insert findings between existing text. AR models handle left-to-right generation well but struggle with \emph{infill}: inserting coherent text between two fixed segments requires either expensive rewriting or awkward prompt engineering. Diffusion models, by contrast, generate all tokens in parallel via iterative denoising and can condition on context in \emph{any direction} by simply clamping known tokens during the denoising process.
+
+\paragraph{Why a Matched Comparison Matters.} Prior comparisons between AR and diffusion LLMs have been confounded by differences in model size, architecture, pretraining data, and fine-tuning recipes. This paper eliminates these confounds by comparing \textbf{DiffusionGemma-26B-it} (a uniform-state discrete diffusion model) against \textbf{Gemma-4-26B-it} (a standard AR model), both sharing the same 25.2B total parameters (3.8B active via MoE with 128 experts), the same pretraining corpus, and the same LoRA fine-tuning recipe (rank 64, $\alpha = 128$). This is the first controlled comparison at this scale for a real clinical task.
+
+\paragraph{Uniform-State vs.\ Mask-Based Diffusion.} DiffusionGemma uses \textbf{uniform-state discrete diffusion}~\cite{sahoo2024simple}, where tokens are corrupted by replacing them with uniformly random tokens from the vocabulary, rather than the mask-based approach (MDLM) that replaces tokens with a special $[\mathrm{MASK}]$ token. Uniform-state diffusion avoids the train-test mismatch of mask-based methods and permits a more natural corruption process that preserves the vocabulary distribution.
+
+\subsection{Method}
+
+\paragraph{Any-Order Infill via Clamping.} The key methodological contribution is demonstrating that discrete diffusion models can perform \textbf{any-order infill without any retraining or architectural modification}. Given a partially written report with fixed segments (e.g., the ``Findings'' section is complete but ``Impression'' needs to be generated between existing text), infill is achieved by simply clamping the fixed tokens at every denoising step:
+
+\begin{enumerate}
+\item Initialize the canvas with fixed tokens at known positions and random tokens elsewhere.
+\item At each denoising step $t$:
+    \begin{itemize}
+    \item Replace the canvas at fixed positions with the original fixed tokens (clamping).
+    \item Run the denoising network to predict clean tokens for unfixed positions.
+    \item Sample the next noisy state, but override fixed positions again.
+    \end{itemize}
+\item After $T$ steps, the unfixed positions contain the generated infill, conditioned bidirectionally on both left and right context.
+\end{enumerate}
+
+This requires only a monkey-patch of the denoising step function---no changes to model weights, architecture, or training objective. The AR baseline can also attempt infill via suffix-conditioned generation (appending the right context to the prompt), but this conditions on right context only through the input, not through bidirectional attention at every layer.
+
+\paragraph{Experimental Design.} The paper evaluates three settings:
+\begin{itemize}
+\item \textbf{Visual Question Answering (VQA)}: Given a radiology image, answer a clinical question. Tests general medical reasoning. Datasets: VQA-RAD, SLAKE, PathVQA.
+\item \textbf{Report Generation}: Given a radiology image, generate a full report. Tests coherent long-form clinical text generation.
+\item \textbf{Report Infill}: Given a partial report with a masked-out section, generate the missing text conditioned on both preceding and following context. Tests bidirectional conditioning advantage.
+\end{itemize}
+
+All experiments use the same LoRA recipe on both models. Infill experiments systematically vary what percentage of left vs.\ right context is provided to isolate the contribution of bidirectional conditioning.
+
+\subsection{Results}
+
+\paragraph{VQA.} Finetuned DiffusionGemma matches or exceeds AR Gemma on all three VQA benchmarks. On SLAKE, finetuned DiffusionGemma achieves \textbf{0.863 accuracy}---the highest of any model tested, including frontier models (GPT-4o, Claude 3.5 Sonnet). Zero-shot DiffusionGemma also matches zero-shot Gemma, confirming that the diffusion pretraining does not sacrifice general medical reasoning capability.
+
+\paragraph{Report Generation.} Full report generation quality is comparable between the two models after fine-tuning, with DiffusionGemma showing slight advantages on some metrics. This confirms that diffusion's parallel generation does not sacrifice coherence for radiology-length documents.
+
+\paragraph{Infill: The Bidirectional Advantage.} The infill experiments reveal the paper's central finding. When both left and right context are provided:
+\begin{itemize}
+\item DiffusionGemma gains \textbf{+0.109 token-F1} from adding right-side context ($p < 10^{-10}$).
+\item AR Gemma gains only \textbf{+0.031 token-F1} from the same right-side context (not statistically significant).
+\end{itemize}
+Diffusion benefits \textbf{3.5$\times$ more} from bidirectional context than AR. This is not merely a prompting trick---diffusion's denoising process conditions on right context at every layer through full bidirectional attention, while AR can only condition on right context through the input prompt. The gap is a genuine architectural capability difference.
+
+\paragraph{Latency.} DiffusionGemma generates text \textbf{3.5--4.4$\times$ faster} than AR Gemma. For a 256-token canvas with 16 denoising steps, DiffusionGemma takes \textbf{1.46 seconds} vs.\ \textbf{6.43 seconds} for AR. This advantage comes from parallel token generation: diffusion generates all tokens simultaneously per step, while AR generates one token at a time. The number of denoising steps (16) is far fewer than the number of tokens (256).
+
+\subsection{Limitations}
+
+\textbf{Single clinical domain}: All experiments are on radiology (chest X-rays). Generalization to other medical specialties (pathology, dermatology) or non-medical domains is untested.
+
+\textbf{Fixed canvas size}: The infill mechanism requires specifying the canvas size (number of tokens to generate) in advance. Adaptive-length generation---where the model decides how many tokens to produce---is not addressed.
+
+\textbf{Step-quality trade-off}: The 16-step configuration balances speed and quality, but the paper does not extensively study the Pareto frontier of steps vs.\ quality for different clinical tasks.
+
+\textbf{No human evaluation}: All evaluations use automated metrics (token-F1, BLEU, accuracy). No radiologist evaluation of clinical correctness or usability is provided.
+
+\textbf{Single model pair}: While the matched comparison is a strength, results from one model pair (DiffusionGemma vs.\ Gemma-4) may not generalize to other AR-diffusion pairs with different architectures or scales.
+
+\subsection{Relevance to Our Research}
+
+This paper provides the strongest empirical evidence to date that discrete diffusion LLMs offer a \emph{genuine capability advantage} over AR models---not just theoretical elegance---when bidirectional conditioning is needed. This directly validates a core premise of our T4 (Diffusion LLM) research thread. Our extensive corpus of diffusion LLM reviews has tracked the architecture from theoretical foundations (Cubic Diffusion~\cite{cubic2026}, Generalized Discrete Diffusion~\cite{gdd2026}) through training advances (DARE~\cite{dare2026}, Sumi~\cite{sumi2026}) and inference optimization (S2D2~\cite{s2d2_2026}, DMax~\cite{dmax2026}, Orthrus~\cite{orthrus2026}). DiffusionGemma now demonstrates that these capabilities translate to real-world clinical impact.
+
+The any-order infill mechanism connects directly to our TIDE review~\cite{tide2026}, which studied cross-architecture distillation from AR to diffusion models. TIDE showed that AR teachers can transfer knowledge to diffusion students, but did not evaluate whether the diffusion student gains capabilities \emph{beyond} the teacher. DiffusionGemma's 3.5$\times$ bidirectional advantage demonstrates exactly this: a diffusion model can outperform its AR counterpart on tasks requiring bidirectional conditioning, even when both share the same base architecture and training data. This suggests that AR$\to$diffusion distillation is not merely a compression technique but a \emph{capability transfer} that unlocks new use cases.
+
+The latency results (3.5--4.4$\times$ faster) complement our inference optimization reviews. Our S2D2~\cite{s2d2_2026} review showed that self-speculative decoding can further accelerate diffusion LLMs by 1.4--2.3$\times$, and DMax~\cite{dmax2026} demonstrated aggressive parallel decoding. Composing DiffusionGemma's base speed advantage with these techniques could yield 5--10$\times$ total speedup over AR, making diffusion LLMs compelling not just for quality but for throughput in latency-sensitive clinical workflows.
+
+The uniform-state diffusion choice (vs.\ mask-based MDLM) connects to our Sumi review~\cite{sumi2026}, which also adopted uniform-state corruption and demonstrated competitive perplexity. DiffusionGemma validates this design choice at 26B scale with MoE architecture, reinforcing that uniform-state diffusion is the emerging standard for production diffusion LLMs.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Adaptive Canvas Size via Diffusion Confidence Estimation}
+
+\paragraph{Gap.} DiffusionGemma's infill mechanism requires specifying the canvas size (number of tokens to generate) before denoising begins. In practice, radiologists do not know how many tokens are needed to fill a gap---an ``Impression'' section might need 20 tokens or 200, depending on the complexity of findings. Fixed canvas sizes lead to either truncated content (canvas too small) or padding waste and hallucination (canvas too large). No existing discrete diffusion method provides adaptive-length infill.
+
+\paragraph{Approach.} Design a \textbf{confidence-based canvas trimming} mechanism that dynamically adjusts the effective canvas size during denoising:
+\begin{enumerate}
+\item \textbf{Over-allocate}: Start with a canvas larger than the expected output (e.g., 2$\times$ the mean section length from training data).
+\item \textbf{Token confidence tracking}: At each denoising step, compute the entropy of the predicted token distribution at each unfixed position. Positions where the model consistently predicts high-entropy (uncertain) distributions across multiple steps are candidates for removal.
+\item \textbf{Progressive trimming}: After a warm-up phase (e.g., steps 1--4), identify positions where cumulative entropy exceeds a threshold and ``freeze'' them as end-of-section tokens. This effectively shrinks the canvas from the edges inward.
+\item \textbf{Boundary detection}: Train a lightweight binary classifier (single linear layer on top of the denoising network's hidden states) to predict whether each position is ``content'' or ``padding,'' using the fine-tuning data where true section boundaries are known.
+\end{enumerate}
+This extends DiffusionGemma's clamping mechanism: instead of only clamping \emph{known} tokens, the system also clamps \emph{discovered boundary} tokens, progressively constraining the generation to the appropriate length.
+
+\paragraph{Feasibility.} Token entropy is already computed during denoising (it is the softmax output). The boundary classifier adds minimal parameters ($<$0.01\% of model size). Validation: compare fixed-canvas vs.\ adaptive-canvas infill on held-out radiology reports, measuring both content quality (token-F1) and length accuracy (deviation from true section length). Expected outcome: adaptive canvas matches fixed-canvas quality while reducing length deviation by 40--60\%, eliminating the need for manual canvas size specification.
+
+\subsection{Direction 2: Bidirectional Reward Modeling for Diffusion LLM Alignment}
+
+\paragraph{Gap.} Our T2 (RL/Reward Modeling) research has focused on reward modeling for AR models, where rewards are computed on complete left-to-right trajectories. DiffusionGemma demonstrates that diffusion models excel at bidirectional tasks, but current alignment methods (RLHF, DPO, V-GRPO~\cite{vgrpo2026}) are designed for unidirectional generation. When aligning a diffusion LLM, the reward signal should reflect the quality of \emph{bidirectional coherence}---how well the generated infill integrates with both left and right context---not just left-to-right fluency. No reward model currently captures this.
+
+\paragraph{Approach.} Design a \textbf{bidirectional reward model} specifically for diffusion LLM alignment:
+\begin{enumerate}
+\item \textbf{Infill-aware preference data}: Collect preference pairs where annotators compare two infill completions given the same left and right context. Unlike standard preference data (which compares full responses), this captures preferences about \emph{coherence with surrounding context}.
+\item \textbf{Bidirectional reward architecture}: Train the reward model with bidirectional attention (matching the diffusion model's architecture), scoring the \emph{entire} document (left context + generated infill + right context) rather than just the generated portion. The reward decomposes as $R = R_{\mathrm{quality}} + \lambda \cdot R_{\mathrm{coherence}}$, where $R_{\mathrm{coherence}}$ measures transition smoothness at the left-infill and infill-right boundaries.
+\item \textbf{Integration with Flow-DPPO}: Adapt our Flow-DPPO framework~\cite{flowdppo2026} (originally for continuous diffusion) to discrete diffusion by replacing the continuous KL divergence with a discrete token-level KL. The bidirectional reward replaces the scalar reward, providing richer training signal.
+\end{enumerate}
+This bridges our T2 and T4 research: a reward model that understands bidirectional conditioning, trained with RL methods adapted for diffusion, specifically targeting the infill capabilities that DiffusionGemma shows are diffusion's key advantage.
+
+\paragraph{Feasibility.} Infill preference data can be semi-automatically generated by corrupting real radiology reports (mask out a section, generate two infills, have a radiologist or strong model rank them). The bidirectional reward model uses the same architecture as the diffusion model itself (parameter sharing possible). Flow-DPPO's discrete adaptation requires replacing continuous noise schedules with discrete corruption schedules, which Sumi~\cite{sumi2026} and DARE~\cite{dare2026} have already demonstrated. Expected outcome: bidirectional-reward-aligned DiffusionGemma improves infill token-F1 by 5--10\% over supervised-only fine-tuning, with particular gains on coherence metrics at context boundaries.
+
+\subsection{Direction 3: Continual Clinical Adaptation via Diffusion-Native Experience Replay}
+
+\paragraph{Gap.} Clinical knowledge evolves: new imaging protocols, updated diagnostic criteria, and institution-specific conventions require radiology AI systems to adapt over time without forgetting previously learned knowledge. Our T3 (Continual Learning) reviews have studied catastrophic forgetting in AR agents (Geometry Conflict~\cite{geomconflict2026}, EvoArena~\cite{evoarena2026}), but continual learning for diffusion LLMs is unexplored. Diffusion models have a unique structure---the denoising process iterates over multiple steps, and the noise schedule provides a natural curriculum---that may enable novel continual learning strategies unavailable to AR models.
+
+\paragraph{Approach.} Design a \textbf{diffusion-native experience replay} system for continual clinical adaptation:
+\begin{enumerate}
+\item \textbf{Noise-level-stratified memory}: Instead of storing raw examples (as in standard experience replay), store examples at \emph{specific noise levels} from the diffusion process. Early noise levels (high corruption) capture coarse semantic structure; late noise levels (low corruption) capture fine-grained clinical details. When replaying, sample from noise levels proportional to where forgetting is most severe.
+\item \textbf{Forgetting detection via denoising loss divergence}: Monitor per-domain denoising loss at each noise level. When the loss on domain $d$ at noise level $t$ increases beyond a threshold (indicating forgetting), prioritize replay of domain-$d$ examples at noise level $t$. This is more targeted than AR-style replay because it identifies \emph{which aspects} of generation are being forgotten (coarse structure vs.\ fine details).
+\item \textbf{Infill-based augmentation}: Use DiffusionGemma's infill capability to generate synthetic replay data: given an old report, mask out a section, infill with the current model, and compare against the original. If the infill diverges significantly, the model is forgetting that domain's patterns, triggering targeted replay.
+\end{enumerate}
+This creates a continual learning system that exploits diffusion's multi-scale noise structure as a diagnostic tool for forgetting, connecting our T3 research to T4 in a novel way. The approach draws on our Abstraction-as-Inductive-Bias review~\cite{abstraction2026}, which showed that hierarchical representations (analogous to noise-level stratification) improve continual learning by separating what-to-remember at different abstraction levels.
+
+\paragraph{Feasibility.} Noise-level-stratified storage adds minimal overhead (store the noise level index alongside each example). Denoising loss monitoring is a byproduct of training. Infill-based augmentation uses DiffusionGemma's existing capability with no additional training. Validation: simulate a continual learning scenario where a radiology model trained on chest X-rays must adapt to abdominal CT, then brain MRI, without forgetting chest X-ray performance. Compare standard replay, EWC, and diffusion-native replay on forgetting metrics (backward transfer) and adaptation speed (forward transfer). Expected outcome: diffusion-native replay reduces forgetting by 30--40\% compared to standard replay by targeting noise levels where forgetting concentrates.
+
+\section{Conclusion}
+
+DiffusionGemma provides the first controlled, scale-matched evidence that discrete diffusion LLMs possess a genuine capability advantage over autoregressive models for tasks requiring bidirectional conditioning. The 3.5$\times$ greater benefit from right-side context during infill is not a prompting artifact but an architectural reality: diffusion's iterative denoising with full bidirectional attention at every step provides fundamentally richer conditioning than AR's unidirectional attention with appended context. Combined with 3.5--4.4$\times$ latency improvements from parallel generation and state-of-the-art VQA accuracy (0.863 on SLAKE), the paper demonstrates that diffusion LLMs are not merely theoretically interesting alternatives to AR but practically superior for interactive editing workflows. The clamping-based infill mechanism---requiring zero retraining---is remarkably elegant, suggesting that many ``new capabilities'' in diffusion LLMs are latent in the architecture and need only be unlocked through appropriate inference-time procedures. For our research program, this validates the T4 thread's central hypothesis and opens three concrete bridges: to adaptive generation (Direction 1), to alignment methods that understand bidirectional coherence (Direction 2, bridging T2 and T4), and to continual learning strategies that exploit diffusion's multi-scale noise structure (Direction 3, bridging T3 and T4). The matched comparison methodology---same parameters, same data, same fine-tuning recipe, different generation paradigm---should become the standard for future AR vs.\ diffusion evaluations.
+
+\begin{thebibliography}{99}
+\bibitem{grundemclaughlin2026diffusiongemma} Grunde-McLaughlin, M., Gundabathula, S. K., Zambrano Chaves, J. M., et al. ``Discrete Diffusion Language Models for Interactive Radiology Report Drafting.'' \emph{arXiv preprint arXiv:2607.01436}, 2026.
+\bibitem{sahoo2024simple} Sahoo, S. S., Arriola, M., Schiff, Y., et al. ``Simple and Effective Masked Diffusion Language Models.'' \emph{NeurIPS}, 2024.
+\bibitem{cubic2026} Cubic Diffusion Authors. ``Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens.'' \emph{arXiv preprint arXiv:2603.19232}, 2026.
+\bibitem{gdd2026} GDD Authors. ``Generalized Discrete Diffusion from Snapshots.'' \emph{arXiv preprint arXiv:2603.21342}, 2026.
+\bibitem{dare2026} DARE Authors. ``DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.'' \emph{arXiv preprint arXiv:2604.04215}, 2026.
+\bibitem{sumi2026} Sumi Authors. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{s2d2_2026} S2D2 Authors. ``S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.'' \emph{arXiv preprint arXiv:2603.25702}, 2026.
+\bibitem{dmax2026} DMax Authors. ``DMax: Aggressive Parallel Decoding for dLLMs.'' \emph{arXiv preprint arXiv:2604.08302}, 2026.
+\bibitem{orthrus2026} Orthrus Authors. ``Orthrus: Memory-Efficient Parallel Token Generation via Dual-View Diffusion.'' \emph{arXiv preprint arXiv:2605.12825}, 2026.
+\bibitem{tide2026} TIDE Authors. ``Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.'' \emph{arXiv preprint arXiv:2604.26951}, 2026.
+\bibitem{vgrpo2026} V-GRPO Authors. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{flowdppo2026} Flow-DPPO Authors. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{geomconflict2026} Geometry Conflict Authors. ``Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.'' \emph{arXiv preprint arXiv:2605.09608}, 2026.
+\bibitem{evoarena2026} EvoArena Authors. ``EvoArena: Tracking Memory Evolution for Robust LLM Agents in Dynamic Environments.'' \emph{arXiv preprint arXiv:2606.13681}, 2026.
+\bibitem{abstraction2026} Abstraction Authors. ``Abstraction as a Memory-Efficient Inductive Bias for Continual Learning.'' \emph{arXiv preprint arXiv:2603.17198}, 2026.
+\end{thebibliography}
+
+\end{document}
