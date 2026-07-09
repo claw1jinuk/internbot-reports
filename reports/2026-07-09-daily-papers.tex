@@ -1,0 +1,194 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Nemotron-Labs-Diffusion --- A Tri-Mode Language\\Model Unifying Autoregressive, Diffusion, and\\Self-Speculation Decoding}
+\author{Internbot --- Automated Research Summary}
+\date{July 9, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Fu et al.~\cite{fu2026nemotron} ask whether autoregressive (AR) and diffusion language modeling should be viewed as competing paradigms or as complementary capabilities that can be unified in a single model. AR models decode tokens one at a time, achieving high accuracy but fundamentally limiting inference parallelism---at low batch sizes, GPUs are memory-bandwidth-bound with compute massively underutilized. Diffusion LMs can decode multiple tokens per forward pass but have consistently lagged behind AR in accuracy, required more training data, and ignored the strong left-to-right prior of natural language.
+
+\paragraph{Three Questions.} The paper frames its contribution around three questions: (Q1)~Can AR and diffusion be harmonized rather than forced to compete? (Q2)~Can diffusion provide stronger acceleration than dedicated multi-token prediction (MTP) methods like Eagle3? (Q3)~Does diffusion decoding have enough long-term potential to justify investment? The paper answers all three affirmatively.
+
+\paragraph{The Complementarity Hypothesis.} The key insight is that AR and diffusion objectives are \textbf{complementary}: AR training injects strong left-to-right linguistic priors that improve diffusion modeling, while diffusion training enhances the model's ability to plan ahead for future tokens, subtly benefiting AR predictions. A unified model can switch between decoding modes based on deployment conditions---AR at high concurrency, diffusion-based self-speculation at low concurrency---sustaining high throughput across the entire operating range.
+
+\subsection{Method}
+
+\paragraph{Architecture.} Nemotron-Labs-Diffusion is built on pretrained Ministral3 models (3B, 8B, 14B parameters) with \textbf{no architectural modifications}. The tri-mode capability arises entirely from the training objective and attention mask switching. A dual-stream input is used during training: a corrupted/noised view and a clean view of the same sequence are concatenated, with three attention regions---noisy-to-noisy (bidirectional within blocks, causal across blocks), noisy-to-clean (full cross-attention), and clean-to-clean (\textbf{strictly causal}, enabling AR loss computation without label leakage in the same forward-backward pass).
+
+\paragraph{Joint Training Objective.} The model is trained on a weighted combination:
+\[
+\mathcal{L}(\theta) = \mathcal{L}_{\mathrm{AR}}(\theta) + \alpha \cdot \mathcal{L}_{\mathrm{diff}}(\theta), \qquad \alpha = 0.3,
+\]
+where:
+\[
+\mathcal{L}_{\mathrm{AR}} = \mathbb{E}_{x \sim \mathcal{D}}\!\left[ -\sum_{i=1}^{|x|} \log p_\theta(x_i | x_{<i}) \right], \quad \mathcal{L}_{\mathrm{diff}} = \mathbb{E}_{t \sim U[0,1]}\!\left[ -\frac{1}{t} \sum_{b=1}^{B} \log p_\theta(x^b | x_t^b, x^{<b}) \right].
+\]
+The diffusion objective partitions the sequence into $B$ contiguous blocks, corrupts each block at noise level $t$ by replacing tokens with mask tokens, and trains the model to predict the clean block. The $1/t$ reweighting emphasizes low-noise (near-clean) steps.
+
+\paragraph{Two-Stage Training.} Stage~1: 1T tokens of pure AR pretraining ($\alpha = 0$) to establish strong left-to-right priors. Stage~2: 300B tokens of joint AR+diffusion training ($\alpha = 0.3$). This two-stage approach contributes \textbf{+5.74\%} accuracy over direct joint training, and the AR loss contributes an additional \textbf{+7.48\%} over diffusion-only training.
+
+\paragraph{Global Loss Averaging.} A critical stabilization technique: instead of averaging token losses per-sequence then across sequences, all tokens across the batch are treated equally:
+\[
+\mathcal{L}_{\mathrm{global}} = \frac{1}{NL} \sum_{n=1}^{N} \sum_{i=1}^{L} \ell_{n,i}.
+\]
+This prevents samples with few highly-weighted noisy tokens (small $t$, high $1/t$) from disproportionately influencing the batch gradient. This alone improves average accuracy by \textbf{+2.12\%}.
+
+\paragraph{Three Decoding Modes.}
+
+\begin{enumerate}
+\item \textbf{AR Decoding}: Standard left-to-right generation with causal attention. One token per forward pass. Preferred at high concurrency.
+
+\item \textbf{Block-wise Diffusion Decoding}: The sequence is divided into blocks. Each block is initialized with mask tokens and iteratively denoised in parallel, with multiple tokens committed per step based on a \textbf{learned sampler}---a lightweight 4-layer Transformer ($\sim$4.8M parameters, 0.06\% of backbone) that predicts whether the current top-1 prediction will be the final committed token. Input features include PCA-compressed semantic embeddings and distribution statistics.
+
+\item \textbf{Self-Speculation Decoding}: Diffusion generates draft tokens in parallel; AR verifies them. Two sub-variants:
+\begin{itemize}
+\item \textbf{Linear}: Two forward passes per cycle (one diffusion draft, one AR verification). Practical and efficient.
+\item \textbf{Quadratic}: Single forward pass using a structured attention mask that simultaneously drafts and verifies. Higher tokens-per-forward but currently limited by suboptimal attention kernels.
+\end{itemize}
+\end{enumerate}
+
+\paragraph{LoRA-Enhanced Drafting.} A lightweight LoRA adapter (rank 128, $\alpha_{\mathrm{LoRA}} = 512$, $\sim$36M parameters / $\sim$0.4\% of backbone) is applied only to the output projection of attention in the diffusion draft pathway. The LoRA is trained with an LK-hybrid loss combining forward KL divergence and total variation distance on the top-$K = 200$ token support, plus a cross-entropy term against the AR verifier's argmax. An ``accepted + 1'' position mask focuses training on positions where the drafter's predictions actually matter.
+
+\subsection{Results}
+
+\paragraph{Setup.} Models: 3B, 8B, 14B parameter variants. Evaluation: 10 instruct tasks (HumanEval, MBPP, LiveCodeBench-CPP, GSM8K, Math500, AIME24, AIME25, GPQA, IFEval, MMLU), 12 base model tasks, 7 VLM tasks, and SPEED-Bench (11 categories). Hardware: GB200, RTX Pro 6000, DGX Spark.
+
+\paragraph{8B Instruct Results.}
+\begin{itemize}
+\item AR mode: \textbf{63.61\%} average (+0.86\% over Qwen3-8B 62.75\%, +5.59\% over Ministral3-8B 58.02\%).
+\item Diffusion mode: \textbf{63.18\%} at 2.57$\times$ tokens per forward (TPF). This is +9.09\% over SDAR-8B (50.57\%), +22.64\% over Dream-7B (40.54\%), +25.94\% over LLaDA-8B (37.24\%).
+\item Linear self-speculation (w/ LoRA): \textbf{62.81\%} at 5.99$\times$ TPF.
+\item Quadratic self-speculation: \textbf{64.04\%} at 6.38$\times$ TPF.
+\end{itemize}
+
+\paragraph{Self-Speculation vs.\ MTP.} Average acceptance length: Nemotron w/ LoRA \textbf{6.82} vs.\ Eagle3 2.75 vs.\ Qwen3-9B-MTP 4.24. On diffusion-friendly categories (coding, math, reasoning, multilingual): 8.69 vs.\ 2.81 (Eagle3) vs.\ 4.73 (MTP). Real-device speedup: \textbf{2.4$\times$/2.3$\times$/1.8$\times$} over Eagle3 on GB200/RTX Pro 6000/DGX Spark at batch size 1.
+
+\paragraph{Speed.} Linear self-speculation achieves up to \textbf{3.3$\times$ speedup over AR} on GB200 (1015 tok/sec with optimized kernel). On RTX Pro 6000: 277/525 tok/sec under FP8/INT4. On DGX Spark: 77.5/112.5 tok/sec under FP8/INT4.
+
+\paragraph{Speed-of-Light Analysis.} SOL ceiling at block length 32: \textbf{7.60$\times$} TPF at 61.81\% accuracy. Current linear self-speculation achieves 3.41$\times$ real TPF vs.\ 6.02$\times$ SOL---a \textbf{76.5\% improvement gap}, indicating substantial headroom for future sampler and kernel improvements.
+
+\paragraph{Multi-Scale.} 3B linear SS: 55.00\% at 4.36$\times$ TPF (vs.\ Qwen3-4B 53.23\%). 14B linear SS: 66.36\% at 5.96$\times$ TPF (vs.\ Qwen3-14B 65.17\%). Performance scales consistently with model size.
+
+\paragraph{VLM.} AR mode: 59.5\% (+1.3\% over LLaDA-V-8B). Linear SS: 59.4\% at 3.63--7.45$\times$ TPF. Massively outperforms other diffusion VLMs (MMaDA: 28.0\%, LaViDa: 46.9\%, Dimple: 44.3\%).
+
+\paragraph{Ablation: Cumulative Training Improvements (25B-token CPT).}
+\begin{itemize}
+\item Block-wise attention baseline: 54.23\%.
+\item + Global loss averaging: 56.35\% (+2.12\%).
+\item + DP-rank varying masking ratios: 57.06\% (+0.71\%).
+\item + Two-stage training: 62.80\% (+5.74\%).
+\item + AR loss: 70.28\% (+7.48\%).
+\item \textbf{Total cumulative improvement: +16.05\%}.
+\end{itemize}
+
+\subsection{Limitations}
+
+\textbf{SOL gap}: Practical diffusion decoding achieves only $\sim$3$\times$ TPF vs.\ the 7.6$\times$ SOL ceiling at BL=32. Current samplers leave most available parallelism unused.
+
+\textbf{Prefix-only acceptance}: AR verification can only accept a contiguous prefix of draft tokens. Correct tokens beyond the first rejection are discarded, fundamentally capping real TPF below the SOL ceiling.
+
+\textbf{Accuracy degrades at large block lengths}: Accuracy drops from 65.43\% at BL=8 to 61.81\% at BL=32, indicating diffusion quality deteriorates with longer parallel generation spans.
+
+\textbf{Strong left-to-right bias}: Even in diffusion mode, generation order exhibits a strong left-to-right tendency, providing mainly token-level parallelism rather than segment-level or paragraph-level parallelism.
+
+\textbf{Instruction following}: The diffusion objective slightly degrades strict instruction-following compliance (IFEval drops 3.01\% in the instruct ablation).
+
+\textbf{Starting from pretrained AR}: All models are initialized from pretrained Ministral3 checkpoints. Whether the approach works equally well when training from scratch is unknown.
+
+\textbf{Low-concurrency advantage only}: The diffusion/self-speculation speed advantage diminishes at high concurrency where AR throughput is already compute-bound.
+
+\subsection{Relevance to Our Research}
+
+Nemotron-Labs-Diffusion represents a paradigm shift for our T4 (Diffusion LLM) research: it demonstrates that the right framing is not ``diffusion vs.\ AR'' but ``diffusion \emph{enhancing} AR.'' Our diffusion LLM corpus has tracked the field from pure discrete diffusion (Cubic~\cite{cubic2026}, GDD~\cite{gdd2026}), through training advances (Sumi~\cite{sumi2026}, DARE~\cite{dare2026}), inference optimization (S2D2~\cite{s2d2_2026}, DMax~\cite{dmax2026}, Orthrus~\cite{orthrus2026}), and cross-architecture distillation (TIDE~\cite{tide2026}, AR$\to$Diffusion OPD~\cite{ar2diff2026}). Nemotron-Labs-Diffusion subsumes and unifies these threads: a single model that retains full AR accuracy while unlocking diffusion-based parallel decoding, with self-speculation emerging naturally from the joint training.
+
+The self-speculation mechanism directly extends our S2D2 review~\cite{s2d2_2026}, which proposed training-free self-speculation for diffusion LLMs. Nemotron-Labs-Diffusion shows that adding a lightweight LoRA adapter (0.4\% parameters) to the draft pathway dramatically improves acceptance length from 5.46 to 6.82, and the resulting system outperforms dedicated MTP methods (Eagle3: 2.75 acceptance length) by 2.4$\times$ in real-device speed. This validates our S2D2 follow-up direction suggesting learned draft refinement.
+
+The complementarity finding ($\alpha = 0.3$ simultaneously peaks both AR and diffusion accuracy) has deep implications for our distillation research (T1). Our TIDE review~\cite{tide2026} studied AR$\to$diffusion distillation as a one-way knowledge transfer. Nemotron-Labs-Diffusion reveals that the transfer is \emph{bidirectional}: AR priors help diffusion (+7.48\%), and diffusion objectives subtly help AR (+0.14--0.43\%). This suggests that future distillation should target the joint objective rather than either objective alone.
+
+The 76.5\% SOL gap (3.41$\times$ actual vs.\ 6.02$\times$ ceiling) is a concrete research opportunity. Our Orthrus review~\cite{orthrus2026} proposed dual-view diffusion for memory-efficient parallel generation; our DMax review~\cite{dmax2026} pursued aggressive parallel decoding. Both aimed to close exactly this kind of gap. The SOL analysis provides a principled upper bound for measuring progress.
+
+The DiffusionGemma review~\cite{diffusiongemma2026} from last week showed diffusion's bidirectional advantage for infill tasks. Nemotron-Labs-Diffusion operates in a different regime (forward generation, not infill) but confirms the same underlying principle: bidirectional attention during denoising captures dependencies that unidirectional AR misses. Together, these papers establish that diffusion's advantage is \emph{task-dependent}: bidirectional context for infill (DiffusionGemma), parallel drafting for forward generation (Nemotron-Labs-Diffusion).
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Closing the SOL Gap via Learned Non-Contiguous Acceptance}
+
+\paragraph{Gap.} Self-speculation's prefix-only acceptance rule discards all correct draft tokens beyond the first rejection. The SOL analysis shows this wastes up to 76.5\% of the available parallelism. The fundamental constraint is that AR verification requires contiguous acceptance---a single incorrect draft token invalidates all subsequent drafts, even if they are individually correct. Our DiffusionGemma review~\cite{diffusiongemma2026} demonstrated that diffusion models can condition on arbitrary subsets of tokens via clamping. Can we use diffusion's bidirectional nature to \emph{verify and accept non-contiguous token subsets}?
+
+\paragraph{Approach.} Design a \textbf{diffusion-verified non-contiguous acceptance} mechanism:
+\begin{enumerate}
+\item \textbf{Draft as usual}: Self-speculation generates $k$ draft tokens in parallel.
+\item \textbf{AR prefix acceptance}: Accept the longest contiguous prefix as in standard self-speculation.
+\item \textbf{Diffusion island detection}: For tokens beyond the first rejection, use a single diffusion denoising step (starting from the drafted tokens as the noisy state) to assess each token's confidence. Tokens where the diffusion pass confirms the draft (high confidence, matches the draft) are marked as ``islands'' of correctness.
+\item \textbf{Non-contiguous clamping}: Clamp accepted islands and re-denoise only the gaps between them, using DiffusionGemma's clamping mechanism. This fills the gaps conditioned on both the left prefix and the right islands.
+\item \textbf{Final verification}: A lightweight consistency check ensures the filled gaps are coherent with the islands.
+\end{enumerate}
+This creates a hybrid verification pipeline: AR for the prefix (guaranteed correct), diffusion for the tail (probabilistically correct but recovering otherwise-wasted tokens). The key insight is that diffusion's bidirectional attention makes it a natural verifier for non-contiguous subsets---something AR cannot do.
+
+\paragraph{Feasibility.} The diffusion verification step reuses the existing model with no additional training. Clamping is a zero-cost inference technique (demonstrated by DiffusionGemma). The overhead is one additional diffusion step per cycle (amortized over the recovered tokens). Validation: measure the TPF improvement on SPEED-Bench when allowing non-contiguous acceptance vs.\ prefix-only acceptance at BL=16 and BL=32. Expected outcome: non-contiguous acceptance recovers 30--50\% of the SOL gap, pushing real TPF from $\sim$3.4$\times$ toward $\sim$5$\times$ without accuracy degradation.
+
+\subsection{Direction 2: Adaptive Alpha Scheduling for Task-Specific Quality-Speed Control}
+
+\paragraph{Gap.} Nemotron-Labs-Diffusion uses a fixed $\alpha = 0.3$ throughout joint training and does not adjust the AR-diffusion balance at inference time based on the task or quality requirements. The SOL analysis reveals that per-category TPF spans a 3.2$\times$ range (3.49$\times$ for roleplay to 11.26$\times$ for multilingual), suggesting that the optimal AR-diffusion balance is highly task-dependent. A fixed $\alpha$ cannot adapt to this heterogeneity. Our DOPD review~\cite{dopd2026} showed that different tokens benefit from categorically different supervision; similarly, different tasks should receive categorically different AR-diffusion balances.
+
+\paragraph{Approach.} Design an \textbf{adaptive alpha} system that dynamically adjusts the AR-diffusion balance:
+\begin{enumerate}
+\item \textbf{Training-time alpha curriculum}: Instead of fixing $\alpha = 0.3$ throughout Stage~2, sweep $\alpha$ across $[0.1, 0.5]$ during training. At each step, sample $\alpha$ from a distribution that gradually shifts from AR-heavy ($\alpha \sim 0.1$) to diffusion-heavy ($\alpha \sim 0.5$), exposing the model to the full spectrum of AR-diffusion balances.
+\item \textbf{Alpha-conditioned generation}: At inference, prepend a control token $\langle\alpha=v\rangle$ to condition the model on the desired AR-diffusion balance. Low $\alpha$ activates stronger AR priors (higher accuracy, lower TPF); high $\alpha$ activates stronger diffusion parallelism (higher TPF, slightly lower accuracy).
+\item \textbf{Task-adaptive routing}: A lightweight classifier on the prompt features predicts the optimal $\alpha$ for each task, maximizing a user-specified quality-speed tradeoff. This draws on our ELDR review~\cite{eldr2026}: just as ELDR routes requests to locality-coherent workers based on expert signatures, the alpha router assigns each request its optimal AR-diffusion operating point.
+\end{enumerate}
+
+\paragraph{Feasibility.} Alpha-conditioned training adds no parameters (just a control token). The alpha curriculum is a simple scheduling change. The task classifier reuses the learned sampler's infrastructure (4.8M parameters). Validation: compare fixed-alpha Nemotron-Labs-Diffusion vs.\ adaptive-alpha on SPEED-Bench, allowing the system to maximize throughput subject to a per-category accuracy floor. Expected outcome: adaptive alpha improves category-average TPF by 20--30\% at matched accuracy, by operating at higher $\alpha$ for diffusion-friendly tasks (coding, math) and lower $\alpha$ for diffusion-unfriendly tasks (roleplay, creative writing).
+
+\subsection{Direction 3: Tri-Mode Training for Diffusion LLM Alignment}
+
+\paragraph{Gap.} Nemotron-Labs-Diffusion demonstrates joint AR+diffusion pretraining and supervised fine-tuning, but alignment (RLHF/DPO/GRPO) is performed only on the AR objective. The diffusion pathway is not aligned post-training. Our T2 reviews have studied RL for diffusion models (V-GRPO~\cite{vgrpo2026}, Flow-DPPO~\cite{flowdppo2026}, NormGuard~\cite{normguard2026}), but none have considered the tri-mode setting where AR and diffusion coexist in the same model. If RL is applied only to the AR pathway, the diffusion pathway may drift out of alignment, creating a quality gap between AR and diffusion modes post-alignment.
+
+\paragraph{Approach.} Design a \textbf{tri-mode alignment} procedure:
+\begin{enumerate}
+\item \textbf{Joint rollout}: During RL training, generate rollouts using \emph{both} AR and self-speculation modes. AR rollouts provide high-quality reference trajectories; self-speculation rollouts reveal where the diffusion pathway deviates from aligned behavior.
+\item \textbf{Mode-aware advantage}: Compute separate advantage estimates for AR and self-speculation rollouts. The self-speculation advantage is decomposed into ``AR-correct'' tokens (accepted drafts) and ``diffusion-correct'' tokens (where diffusion drafted correctly but AR would have differed), allowing targeted alignment of the diffusion pathway.
+\item \textbf{Dual KL constraint}: Apply two KL penalties: one against the SFT reference for the AR pathway (standard RLHF), and one against the \emph{jointly-trained} reference for the diffusion pathway. This ensures diffusion alignment without disrupting the AR-diffusion complementarity established during pretraining.
+\item \textbf{Self-speculation-aware reward}: The reward model evaluates the \emph{final output} regardless of which mode generated it, but a bonus term is added for self-speculation rollouts that achieve high acceptance rates, encouraging the diffusion pathway to remain aligned with AR verification.
+\end{enumerate}
+
+\paragraph{Feasibility.} Joint rollout generation is a simple scheduling change (alternate between AR and SS modes). Mode-aware advantage decomposition uses the acceptance/rejection decisions from self-speculation as a natural signal. The dual KL constraint adds one additional forward pass through the reference model per batch. Validation: compare AR-only alignment vs.\ tri-mode alignment on instruction-following benchmarks (IFEval, AlpacaEval). Expected outcome: tri-mode alignment closes the 3.01\% IFEval gap observed when the diffusion objective is added, while maintaining or improving self-speculation TPF by keeping the diffusion pathway explicitly aligned.
+
+\section{Conclusion}
+
+Nemotron-Labs-Diffusion settles the central debate in diffusion language modeling: AR and diffusion are not competing paradigms but complementary capabilities that achieve their common optimum at $\alpha = 0.3$. The cumulative +16.05\% accuracy improvement from training innovations (global loss averaging, two-stage training, AR loss integration) closes most of the historical accuracy gap between diffusion and AR LMs, while self-speculation delivers 6$\times$ tokens per forward pass---outperforming dedicated MTP methods like Eagle3 by 2.4$\times$ in real-device speed without any auxiliary draft model. The 76.5\% SOL gap between current samplers and the theoretical ceiling reveals that diffusion decoding is far from its potential, making this a rich area for continued research. For our program, this paper reframes the T4 research agenda: rather than pursuing diffusion LMs as standalone alternatives to AR, the path forward is tri-mode models where diffusion serves as a parallel decoding accelerator for AR, with self-speculation as the unifying mechanism. The three follow-up directions---non-contiguous acceptance (Direction~1, closing the SOL gap via diffusion-native verification), adaptive alpha (Direction~2, task-specific quality-speed control), and tri-mode alignment (Direction~3, ensuring diffusion stays aligned post-RLHF)---collectively chart a course toward production-ready diffusion-enhanced language models.
+
+\begin{thebibliography}{99}
+\bibitem{fu2026nemotron} Fu, Y., Whalen, L., Garg, A., Wu, C., et al. ``Nemotron-Labs-Diffusion: A Tri-Mode Language Model Unifying Autoregressive, Diffusion, and Self-Speculation Decoding.'' \emph{arXiv preprint arXiv:2607.05722}, 2026.
+\bibitem{cubic2026} Cubic Diffusion Authors. ``Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens.'' \emph{arXiv preprint arXiv:2603.19232}, 2026.
+\bibitem{gdd2026} GDD Authors. ``Generalized Discrete Diffusion from Snapshots.'' \emph{arXiv preprint arXiv:2603.21342}, 2026.
+\bibitem{sumi2026} Sumi Authors. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{dare2026} DARE Authors. ``DARE: Diffusion Large Language Models Alignment and Reinforcement Executor.'' \emph{arXiv preprint arXiv:2604.04215}, 2026.
+\bibitem{s2d2_2026} S2D2 Authors. ``S2D2: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.'' \emph{arXiv preprint arXiv:2603.25702}, 2026.
+\bibitem{dmax2026} DMax Authors. ``DMax: Aggressive Parallel Decoding for dLLMs.'' \emph{arXiv preprint arXiv:2604.08302}, 2026.
+\bibitem{orthrus2026} Orthrus Authors. ``Orthrus: Memory-Efficient Parallel Token Generation via Dual-View Diffusion.'' \emph{arXiv preprint arXiv:2605.12825}, 2026.
+\bibitem{tide2026} TIDE Authors. ``Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.'' \emph{arXiv preprint arXiv:2604.26951}, 2026.
+\bibitem{ar2diff2026} AR-to-Diffusion OPD Authors. ``Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\bibitem{diffusiongemma2026} Grunde-McLaughlin, M., et al. ``Discrete Diffusion Language Models for Interactive Radiology Report Drafting.'' \emph{arXiv preprint arXiv:2607.01436}, 2026.
+\bibitem{dopd2026} Yu, X., et al. ``DOPD: Dual On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.30626}, 2026.
+\bibitem{eldr2026} Choi, S., et al. ``ELDR: Expert-Locality-Aware Decode Routing for PD-Disaggregated MoE Serving.'' \emph{arXiv preprint arXiv:2607.00466}, 2026.
+\bibitem{vgrpo2026} V-GRPO Authors. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{flowdppo2026} Flow-DPPO Authors. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{normguard2026} NormGuard Authors. ``NormGuard: Reward-Preserving Norm Constraints in Flow-Matching Reinforcement Learning.'' \emph{arXiv preprint arXiv:2606.27771}, 2026.
+\end{thebibliography}
+
+\end{document}
