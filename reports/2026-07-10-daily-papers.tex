@@ -1,0 +1,176 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Single-Rollout Asynchronous Optimization\\for Agentic Reinforcement Learning}
+\author{Internbot --- Automated Research Summary}
+\date{July 10, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Hou et al.~\cite{hou2026sao} identify a fundamental efficiency bottleneck in RL training for LLM-based agents: \textbf{synchronous batch-interleaved rollout collection}. Standard LLM RL pipelines (GRPO, PPO) require an entire batch of rollouts to complete before training begins. For agentic workloads---coding agents, multi-turn tool-integrated reasoning---this is catastrophic because rollout lengths are highly variable. A coding agent might solve one issue in 5 turns but take 300 turns for another; short trajectories idle while waiting for the slowest ``straggler.'' GRPO compounds the problem by requiring multiple rollouts (e.g., 8) per prompt for group-relative advantage estimation, creating an implicit synchronization barrier.
+
+\paragraph{Asynchronous RL Is Necessary but Dangerous.} The natural solution is asynchronous RL: rollout generation and model training run concurrently, so completed trajectories are consumed immediately without waiting for groups. However, this introduces severe \textbf{off-policy drift}---trajectories arrive from different policy versions, making the data inherently off-policy. Standard importance sampling breaks down because tracking exact behavior probabilities across rapidly updating policy versions is infeasible.
+
+\paragraph{Single-Rollout Is Natural for Agents.} Many agentic environments provide only a single trajectory feedback per prompt (e.g., a coding agent submits one patch, gets one result). GRPO's group-wise sampling is structurally mismatched to these settings. A single-rollout method eliminates this mismatch while also removing the synchronization barrier entirely.
+
+\subsection{Method}
+
+The paper proposes \textbf{SAO (Single-Rollout Asynchronous Optimization)}, a framework with three core innovations: double-sided importance sampling (DIS), improved value model training, and skip-observation GAE.
+
+\paragraph{Innovation 1: Double-Sided Importance Sampling (DIS).} Rather than tracking intermediate ``old policy'' references (which are ambiguous in async settings where a trajectory may span multiple policy updates), DIS computes the importance ratio directly between the current policy and the rollout policy:
+\[
+r_t(\theta) = \exp\!\big(\log \pi_\theta(a_t | s_t) - \log \pi_{\mathrm{rollout}}(a_t | s_t)\big).
+\]
+The key departure from standard PPO clipping is the \textbf{calibration function}, which completely zeros out (masks) tokens outside the trust region instead of merely clipping:
+\[
+f(x; \epsilon_l, \epsilon_h) = \begin{cases} x & \mathrm{if}\; 1 - \epsilon_l < x < 1 + \epsilon_h \\ 0 & \mathrm{otherwise} \end{cases}
+\]
+This is more aggressive than clipping: masked tokens contribute \emph{zero} gradient, preventing any signal from highly off-policy tokens. The bounds are \textbf{asymmetric}: $\epsilon_l \ll \epsilon_h$ (math: $\epsilon_l = 0.3$, $\epsilon_h = 5.0$; coding: $\epsilon_l = 0.8$, $\epsilon_h = 3.0$). The asymmetry reflects a key insight: probability \emph{decreases} from the rollout policy are more dangerous (they indicate the current policy actively disagrees with the action taken) than probability \emph{increases} (which indicate the current policy has learned to prefer an action the rollout policy was less confident about).
+
+The DIS policy gradient objective is:
+\[
+\mathcal{L}(\theta) = \hat{\mathbb{E}}_t\!\left[ f(r_t(\theta), \epsilon_l, \epsilon_h) \cdot \hat{A}_t \cdot \log \pi_\theta(a_t | s_t) \right].
+\]
+
+\paragraph{Innovation 2: Single-Rollout Value Model.} Without group-wise sampling, there are no siblings for relative advantage estimation (as in GRPO). SAO reintroduces a learned value model, but with three critical engineering strategies:
+
+\begin{enumerate}
+\item \textbf{Frozen-attention training}: During RL, freeze the attention parameters of the value model and only optimize MoE projection layers. Pre-trained attention already has sufficient semantic capability; unrestricted attention updates cause gradient instability with significantly larger and more volatile gradient norms.
+\item \textbf{Faster critic updates ($K = 2$)}: The value model is updated 2$\times$ per policy update, following the two-timescale principle---the value function should converge faster than the policy to provide stable baselines.
+\item \textbf{Scaled value pretraining}: The cold-start problem (poor initial value model produces noisy advantages causing destructive early updates) is addressed by significantly scaling the value pretraining corpus.
+\end{enumerate}
+
+\paragraph{Innovation 3: Skip-Observation Token-Level GAE.} In multi-turn agentic trajectories $[\mathrm{action}_0, \mathrm{obs}_0, \mathrm{action}_1, \mathrm{obs}_1, \ldots]$, the boundary between action-end and observation-start is discontinuous from the model's perspective---the model did not generate observation tokens. Standard GAE computes value differences between adjacent tokens, introducing noise at these boundaries. Skip-observation GAE links the value of the last token of $\mathrm{action}_i$ directly to the first token of $\mathrm{action}_{i+1}$:
+\[
+\hat{A}(a_{i,N}) = \delta + \gamma \lambda \, \hat{A}(a_{i+1,0}), \quad \delta = r_t + \gamma V(a_{i+1,0}) - V(a_{i,N}),
+\]
+bypassing observation tokens entirely. Only model-generated tokens contribute to advantage estimation.
+
+\subsection{Results}
+
+\paragraph{Setup.} Base model: Qwen3-30B-A3B (MoE, 3B active). Benchmarks: AIME 2025, BeyondAIME, HMMT Nov 2025, IMOAnswerBench (math reasoning with Python tool), SWE-Bench Verified (coding). SAO was also deployed to train the production GLM-5.2 model (750B-A40B).
+
+\paragraph{Math Reasoning.} SAO achieves state-of-the-art results with a 30B MoE model:
+\begin{itemize}
+\item AIME 2025: \textbf{97.3\%} (vs.\ GPT-5 High 94.6\%, GRPO+DIS 93.5\%, vanilla GRPO 84.2\%).
+\item BeyondAIME: \textbf{74.8\%} (vs.\ GPT-5 High 74.0\%, GRPO+DIS 70.8\%).
+\item HMMT: \textbf{88.3\%} (vs.\ GPT-5 High 89.2\%).
+\item IMOAnswerBench: \textbf{74.0\%} (vs.\ GPT-5 High 76.0\%).
+\end{itemize}
+SAO with Qwen3-30B-A3B \textbf{surpasses GPT-5 High} on AIME 2025 and approaches it on BeyondAIME, despite using a model with only 3B active parameters.
+
+\paragraph{Coding.} On SWE-Bench Verified: SAO achieves \textbf{29.8\%} vs.\ GRPO+DIS 27.0\% and baseline 23.0\% (+6.8 absolute improvement).
+
+\paragraph{Training Stability.} Standard GRPO \textbf{collapses at $\sim$160 steps}. GRPO+DIS trains stably but plateaus after $\sim$400 steps. Vanilla VAPO (value model without DIS) collapses at $\sim$90 steps. SAO trains stably for \textbf{1000+ steps} and continues improving throughout.
+
+\paragraph{Ablation.} Each component contributes meaningfully on AIME 2025 / BeyondAIME:
+\begin{itemize}
+\item Full SAO: 97.3 / 74.8.
+\item Without faster value update ($K=1$): 95.0 / 69.8 ($-$2.3 / $-$5.0).
+\item Without frozen attention: 90.6 / 74.5 ($-$6.7 / $-$0.3).
+\item Without DIS (vanilla VAPO): 91.3 / 69.0 ($-$6.0 / $-$5.8).
+\item Running-mean baseline (no value model): 79.8 / 55.3 ($-$17.5 / $-$19.5).
+\end{itemize}
+Token-level GAE significantly outperforms step-level alternatives: 89.8\% vs.\ 87.3\% (last-token) and 85.8\% (average) on AIME 2025 at 400 steps.
+
+\subsection{Limitations}
+
+\textbf{Model scope}: Experiments focus on Qwen3-30B-A3B (MoE). The frozen-attention strategy is motivated by an MoE-specific observation (attention layers are unstable, MoE layers are stable), which may not generalize to dense architectures.
+
+\textbf{Memory overhead}: SAO reintroduces the value network that GRPO eliminated, increasing memory requirements compared to critic-free methods.
+
+\textbf{Value pretraining cost}: Scaling the value pretraining corpus is described as ``essential'' but the required data volume and computational cost are not quantified.
+
+\textbf{No wall-clock comparisons}: Despite arguing for async efficiency, the paper does not provide wall-clock training time comparisons between SAO and synchronous baselines.
+
+\textbf{Hyperparameter sensitivity}: The clipping bounds differ substantially between tasks ($\epsilon_l = 0.3/0.8$, $\epsilon_h = 5.0/3.0$) without sensitivity analysis.
+
+\textbf{Modest coding gains}: The +2.8\% improvement on SWE-Bench Verified (29.8\% vs.\ 27.0\%) is meaningful but modest compared to the math reasoning gains.
+
+\subsection{Relevance to Our Research}
+
+SAO provides a production-validated alternative to the GRPO-based RL pipeline that has dominated our T2 (RL/Reward Modeling) corpus. Our GRPO-based reviews span policy optimization (BandPO~\cite{bandpo2026}, FIPO~\cite{fipo2026}), token-level credit assignment (DelTA~\cite{delta2026}), variance control (DVAO~\cite{dvao2026}), and the recent Mirage paper~\cite{mirage2026} on training-inference mismatch. All of these assume group-wise rollout collection with synchronous training. SAO challenges this fundamental assumption: \emph{group-wise sampling is a liability in asynchronous agentic RL}, and single-rollout with a properly engineered value model is superior.
+
+The connection to our Mirage review~\cite{mirage2026} is particularly deep. Mirage identified that training-inference mismatch causes the optimized policy to diverge from the deployed policy, and proposed MIPU with sampler-referenced correction and inference-gap-aware acceptance. SAO addresses a related but distinct mismatch: the \textbf{policy version lag} in asynchronous training, where rollouts come from stale policy snapshots. DIS's complete masking of off-policy tokens is conceptually analogous to MIPU's rollback of bad updates---both recognize that some updates should produce \emph{zero} effect rather than a clipped effect. The key difference is granularity: MIPU operates at the update level (accept/reject entire steps), while DIS operates at the token level (mask/keep individual tokens).
+
+The frozen-attention value training connects to our continual learning thread (T3). Our Geometry Conflict review~\cite{geomconflict2026} showed that gradient interference between different parameter groups causes forgetting during continual post-training. SAO's frozen-attention strategy is effectively a forgetting-prevention mechanism for the value model: by freezing the most volatile parameters (attention), the value model maintains semantic stability while learning reward prediction through the more stable MoE projections. This mirrors our Token's Dilemma review~\cite{tokensdilemma2026}, which used drift-aware routing in MoE models to prevent catastrophic forgetting.
+
+The skip-observation GAE for multi-turn agentic traces connects to our agentic RL reviews (RAGEN-2~\cite{ragen2026}, APPO~\cite{appo2026}). RAGEN-2 identified reasoning collapse in agentic RL; APPO proposed procedural policy optimization. Both treated the action-observation boundary implicitly. SAO makes this boundary explicit through skip-observation GAE, providing a principled way to estimate advantages in multi-turn traces without noise from environment-generated tokens.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: DIS-Enhanced On-Policy Distillation for Asynchronous Agent Training}
+
+\paragraph{Gap.} Our on-policy distillation (OPD) reviews (DOPD~\cite{dopd2026}, Filter-Then-Reweight~\cite{ftr2026}, ReNIO~\cite{renio2026}) all operate in synchronous settings where the student generates rollouts and the teacher provides supervision in lockstep. In production deployments, OPD could benefit from asynchronous execution---the student generates rollouts continuously while the teacher provides log-probabilities on completed trajectories asynchronously. However, the same off-policy drift problem arises: by the time teacher supervision arrives, the student policy has moved. No existing OPD method handles this.
+
+\paragraph{Approach.} Adapt SAO's DIS mechanism to the OPD setting:
+\begin{enumerate}
+\item \textbf{Asynchronous teacher evaluation}: The student generates rollouts continuously. Completed rollouts are queued for teacher evaluation. The teacher processes the queue asynchronously, computing log-probabilities on each trajectory.
+\item \textbf{DIS-corrected distillation}: When teacher log-probabilities arrive, compute the student's current log-probabilities and the importance ratio $r_t = \pi_{\mathrm{student}}^{\mathrm{current}} / \pi_{\mathrm{student}}^{\mathrm{rollout}}$. Apply DIS masking: tokens where $r_t$ falls outside the trust region are excluded from the distillation loss. This ensures the KL penalty is computed only on tokens where the current student still agrees with its rollout-time behavior.
+\item \textbf{DOPD privilege integration}: Combine DIS masking with DOPD's privilege advantage gap. High-privilege tokens (large teacher-student capability gap) receive tighter DIS bounds ($\epsilon_l$ smaller), ensuring critical supervision is not diluted by off-policy drift. Low-privilege tokens receive wider bounds, allowing more flexibility.
+\end{enumerate}
+
+\paragraph{Feasibility.} DIS masking adds negligible computation (one comparison per token). Teacher evaluation latency is the existing bottleneck in OPD; making it asynchronous strictly improves throughput. Validation: compare synchronous DOPD vs.\ async DIS-DOPD on Qwen3-30B$\to$Qwen3-8B distillation with math reasoning tasks. Expected outcome: async DIS-DOPD matches synchronous DOPD quality while achieving 2--3$\times$ higher throughput by eliminating the synchronization barrier.
+
+\subsection{Direction 2: Adaptive Trust Region Geometry for Multi-Domain Agentic RL}
+
+\paragraph{Gap.} SAO uses fixed, manually-tuned DIS bounds ($\epsilon_l$, $\epsilon_h$) that differ between math ($0.3/5.0$) and coding ($0.8/3.0$) tasks. No sensitivity analysis is provided. In multi-domain agentic settings (coding + math + web browsing + tool use), different domains may require different trust region shapes at different training stages. Our Local Perturbation Theory review~\cite{localpert2026} showed that cross-domain interference in multi-domain RL depends on the geometry of gradient interactions, suggesting that trust region bounds should adapt to the domain-specific gradient landscape.
+
+\paragraph{Approach.} Design an \textbf{adaptive DIS} mechanism that learns domain-specific trust region bounds:
+\begin{enumerate}
+\item \textbf{Domain-conditioned bounds}: Parameterize $\epsilon_l$ and $\epsilon_h$ as functions of the domain label: $\epsilon_l(d) = \sigma(\mathbf{w}_l^T \mathbf{e}_d)$, $\epsilon_h(d) = \exp(\mathbf{w}_h^T \mathbf{e}_d)$, where $\mathbf{e}_d$ is a domain embedding. This allows each domain to have its own trust region shape.
+\item \textbf{Gradient-norm-based adaptation}: Monitor the gradient norm contributed by each domain. When a domain's gradient norm spikes (indicating potentially destructive updates), tighten its trust region by reducing $\epsilon_h$. When the gradient is smooth, relax the bounds to allow faster learning.
+\item \textbf{Curriculum over bounds}: Inspired by MIPU's~\cite{mirage2026} dynamic tolerance annealing, anneal the bounds over training: start lenient (large $\epsilon_h$, small $\epsilon_l$) to allow broad exploration, then tighten progressively to stabilize late-stage training.
+\end{enumerate}
+
+\paragraph{Feasibility.} The adaptive bounds add minimal parameters (two small vectors per domain). Gradient norm monitoring is a byproduct of training. Validation: compare fixed DIS bounds vs.\ adaptive DIS on a multi-domain agentic task (coding + math + tool-use combined), measuring both per-domain and aggregate performance. Expected outcome: adaptive DIS improves the weakest domain by 3--5\% without regressing the strongest, by preventing cross-domain interference through domain-specific trust region shapes.
+
+\subsection{Direction 3: Unified Critic Architecture via Diffusion Value Estimation}
+
+\paragraph{Gap.} SAO's value model uses a separate copy of the LLM with frozen attention, which adds significant memory overhead. Our Nemotron-Labs-Diffusion review~\cite{nemotron2026} demonstrated that a single model can unify AR and diffusion decoding via attention mask switching. Can we similarly unify the policy and value model into a single architecture, using the diffusion pathway for value estimation?
+
+\paragraph{Approach.} Design a \textbf{diffusion-based unified actor-critic}:
+\begin{enumerate}
+\item \textbf{Dual-stream value estimation}: Use Nemotron-Labs-Diffusion's dual-stream architecture (clean + noisy) for value estimation. The clean stream computes the AR policy (as usual); the noisy stream, instead of denoising tokens, predicts state values through a lightweight value head on the noisy-stream hidden states.
+\item \textbf{Shared attention, separate heads}: The attention parameters are shared between policy and value estimation (eliminating the duplicate model). Only the final projection differs: the policy head maps to token logits; the value head maps to a scalar value. The noisy stream's bidirectional attention provides richer contextual representation for value estimation than the clean stream's causal attention.
+\item \textbf{Frozen-attention for value, flexible for policy}: During RL, the attention parameters receive gradients only from the policy objective (clean stream). The value head is trained on the noisy stream with attention frozen (following SAO's insight), but using the same attention weights. This achieves SAO's frozen-attention benefit without a separate model.
+\end{enumerate}
+This creates a memory-efficient actor-critic that leverages the diffusion pathway not for token generation but for value estimation, unifying the tri-mode architecture with SAO's single-rollout RL.
+
+\paragraph{Feasibility.} The dual-stream infrastructure already exists in Nemotron-Labs-Diffusion. Adding a value head is trivial (one linear layer). The key question is whether the noisy stream's bidirectional attention provides better value estimates than the clean stream's causal attention---prior work suggests bidirectional context improves prediction quality. Validation: compare SAO with separate value model vs.\ diffusion-unified actor-critic on Qwen3-30B-A3B math reasoning. Expected outcome: the unified model matches SAO's performance while reducing memory by $\sim$40\% (eliminating the duplicate value model), making single-rollout RL practical at larger model scales.
+
+\section{Conclusion}
+
+SAO overturns the conventional wisdom that group-wise rollout sampling (GRPO) is necessary for stable LLM RL. In asynchronous agentic settings, group-wise sampling is not just unnecessary but actively harmful---the synchronization barrier it introduces compounds off-policy drift and causes training collapse at $\sim$160 steps. SAO's three innovations---double-sided importance sampling (completely masking rather than clipping off-policy tokens), frozen-attention value training (stabilizing the critic by freezing the most volatile parameters), and skip-observation GAE (bridging action boundaries in multi-turn traces)---together enable stable training for 1000+ steps and produce a 30B MoE model that surpasses GPT-5 High on AIME 2025 (97.3\% vs.\ 94.6\%). The asymmetric DIS bounds ($\epsilon_l \ll \epsilon_h$) encode a practical insight that generalizes beyond this paper: probability decreases from the behavior policy are more dangerous than increases, because they indicate the current policy actively disagrees with the action taken. For our research program, SAO's production validation (deployed for GLM-5.2 at 750B scale) establishes single-rollout async RL as a viable alternative to the GRPO-based pipelines that have dominated our T2 reviews, opening new directions at the intersection of asynchronous optimization, on-policy distillation, and unified actor-critic architectures.
+
+\begin{thebibliography}{99}
+\bibitem{hou2026sao} Hou, Z., Li, Y., Tang, J., Dong, Y. ``Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning.'' \emph{arXiv preprint arXiv:2607.07508}, 2026.
+\bibitem{bandpo2026} BandPO Authors. ``BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2603.04918}, 2026.
+\bibitem{fipo2026} FIPO Authors. ``FIPO: Eliciting Deep Reasoning with Future-KL Influenced Policy Optimization.'' \emph{arXiv preprint arXiv:2603.19835}, 2026.
+\bibitem{delta2026} DelTA Authors. ``DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.'' \emph{arXiv preprint arXiv:2605.21467}, 2026.
+\bibitem{dvao2026} DVAO Authors. ``DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.'' \emph{arXiv preprint arXiv:2605.25604}, 2026.
+\bibitem{mirage2026} Liang, J., et al. ``The Mirage of Optimizing Training Policies: Monotonic Inference Policies as the Real Objective for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2606.29526}, 2026.
+\bibitem{geomconflict2026} Geometry Conflict Authors. ``Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.'' \emph{arXiv preprint arXiv:2605.09608}, 2026.
+\bibitem{tokensdilemma2026} Token's Dilemma Authors. ``On Token's Dilemma: Dynamic MoE with Drift-Aware Token Assignment for Continual Learning of Large Vision Language Models.'' \emph{arXiv preprint arXiv:2603.27481}, 2026.
+\bibitem{ragen2026} RAGEN-2 Authors. ``RAGEN-2: Reasoning Collapse in Agentic RL.'' \emph{arXiv preprint arXiv:2604.06268}, 2026.
+\bibitem{appo2026} APPO Authors. ``APPO: Agentic Procedural Policy Optimization.'' \emph{arXiv preprint arXiv:2606.12384}, 2026.
+\bibitem{dopd2026} Yu, X., et al. ``DOPD: Dual On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.30626}, 2026.
+\bibitem{ftr2026} Filter-Then-Reweight Authors. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{renio2026} Lin, C., et al. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{localpert2026} Local Perturbation Authors. ``A Local Perturbation Theory for Cross-Domain Interference and Recovery in Multi-Domain RL.'' \emph{arXiv preprint arXiv:2606.02398}, 2026.
+\bibitem{nemotron2026} Fu, Y., et al. ``Nemotron-Labs-Diffusion: A Tri-Mode Language Model Unifying Autoregressive, Diffusion, and Self-Speculation Decoding.'' \emph{arXiv preprint arXiv:2607.05722}, 2026.
+\end{thebibliography}
+
+\end{document}
