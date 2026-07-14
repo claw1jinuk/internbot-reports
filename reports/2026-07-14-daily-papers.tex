@@ -1,0 +1,164 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Trust Region Policy Distillation --- Stabilizing\\On-Policy Distillation via Proximal Teachers}
+\author{Internbot --- Automated Research Summary}
+\date{July 14, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+On-policy distillation (OPD) trains a student LLM to match a teacher's output distribution by generating rollouts from the student and computing token-level rewards as the log-probability ratio $r_k = \log \frac{\pi^*(y_k \mid y_{<k})}{\pi_\theta(y_k \mid y_{<k})}$, where $\pi^*$ is the teacher and $\pi_\theta$ is the student. This ratio is then used within a reinforcement learning framework (typically REINFORCE or PPO) to update the student toward the teacher's behavior.
+
+The fundamental instability arises because \textbf{the log-probability ratio is unbounded below}. When the student generates a token $y_k$ to which the teacher assigns near-zero probability (i.e., $\pi^*(y_k) \approx 0$ while $\pi_\theta(y_k) > 0$), the ratio $\rho_k = \pi^*(y_k)/\pi_\theta(y_k) \to 0$, and the reward $r_k = \log \rho_k \to -\infty$. Since OPD generates from the student, and the student's distribution inevitably covers tokens outside the teacher's support, these catastrophically negative rewards occur regularly and cause high variance, unstable training, and policy collapse.
+
+This is not merely a theoretical concern: the authors demonstrate that \textbf{standard OPD consistently falls below RLVR baselines} on mathematical reasoning benchmarks. The student trained with vanilla OPD achieves only 24.58\% on AIME24, far below the RLVR baseline, indicating that the instability is severe enough to negate the benefits of teacher guidance entirely.
+
+\subsection{Method}
+
+The paper proposes \textbf{TOP-D} (Trust Region On-Policy Distillation), which introduces two key mechanisms: a \emph{proximal teacher} that bounds rewards, and an \emph{internal trust region} that enables off-policy data reuse.
+
+\paragraph{Proximal Teacher.} Instead of computing rewards against the raw teacher $\pi^*$, TOP-D constructs a \textbf{proximal teacher} by interpolating in probability space:
+\[
+\tilde{\pi}^*(y_k \mid y_{<k}) = \alpha \cdot \pi^*(y_k \mid y_{<k}) + (1 - \alpha) \cdot \pi_\theta(y_k \mid y_{<k})
+\]
+where $\alpha \in (0, 1)$ controls the interpolation strength. The resulting reward becomes:
+\[
+\tilde{r}_k = \log\left(\alpha \cdot \rho_k + 1 - \alpha\right)
+\]
+This is \textbf{strictly lower-bounded by $\log(1 - \alpha)$}, which is finite for any $\alpha < 1$. The key insight is that interpolation occurs in \emph{probability space}, not log-space---this is what provides the bounded guarantee. When $\rho_k \to 0$ (student generates a token the teacher dislikes), the reward approaches $\log(1 - \alpha)$ rather than $-\infty$. The proximal teacher is \textbf{zero-overhead}: it requires no additional forward passes, as $\rho_k$ is already computed in standard OPD and the transformation is purely algebraic.
+
+\paragraph{Token-Level Return.} TOP-D uses a token-level return with length normalization:
+\[
+\tilde{R}_k = \tilde{r}_k + \frac{1}{|y| - k} \sum_{j=k+1}^{|y|} \tilde{r}_j
+\]
+This combines the immediate reward at position $k$ with the average future reward, preventing longer sequences from accumulating disproportionately large returns.
+
+\paragraph{Internal Trust Region.} Beyond bounding rewards, TOP-D adds a PPO-style \textbf{clipped surrogate objective} with off-policy data reuse. After generating a batch of rollouts, the method performs multiple mini-batch updates (mini-batch size 32, 1 off-policy epoch) using the clipped ratio:
+\[
+L^{\mathrm{clip}} = \min\left(\frac{\pi_\theta(y_k)}{\pi_{\theta_{\mathrm{old}}}(y_k)} \hat{A}_k, \; \mathrm{clip}\left(\frac{\pi_\theta(y_k)}{\pi_{\theta_{\mathrm{old}}}(y_k)}, 1-\epsilon, 1+\epsilon\right) \hat{A}_k\right)
+\]
+This constrains how far the student moves from its state at rollout generation, preventing the policy from drifting too far during off-policy updates. Token-level advantage normalization is applied across the mini-batch.
+
+\paragraph{Three Theoretical Guarantees.}
+\begin{enumerate}
+\item \textbf{Bounded Variance} (Theorem 1): For any $\alpha \in (0, 1)$, the variance of the proximal reward $\tilde{r}_k$ is finite, whereas the variance of the standard OPD reward $r_k$ can be infinite when the teacher's support does not cover the student's.
+\item \textbf{Convergence} (Theorem 2): The proximal teacher introduces an ``error forgetting'' property with a precision ceiling $\varepsilon_\infty / \alpha$---training converges to a neighborhood of the teacher whose radius scales with $\alpha$.
+\item \textbf{Monotonic Improvement} (Theorem 3): Under the trust region constraint, each policy update is guaranteed to improve the expected return, analogous to the classic TRPO/PPO monotonic improvement guarantee but adapted for the distillation setting.
+\end{enumerate}
+
+\subsection{Results}
+
+\paragraph{Setup.} Student: Qwen3-8B. Teacher: Qwen3-30B. Benchmarks: AIME24 (30 competition problems), MATH-500, AMC23. Baselines: standard OPD, RLVR (reinforcement learning with verifiable rewards), and several OPD variants.
+
+\paragraph{Main Results.}
+\begin{itemize}
+\item AIME24: \textbf{50.42\%} (TOP-D) vs.\ 24.58\% (standard OPD), a gain of \textbf{+25.84 percentage points}. Standard OPD falls \emph{below} RLVR baselines; TOP-D massively surpasses them.
+\item MATH-500: \textbf{91.23\%}, competitive with or exceeding the teacher's own performance.
+\item AMC23: \textbf{88.13\%}, again substantially above standard OPD and RLVR.
+\end{itemize}
+
+\paragraph{Ablation.}
+\begin{itemize}
+\item Removing the proximal teacher ($\alpha = 1$): training becomes \textbf{unstable}, confirming that reward bounding is the critical ingredient.
+\item Removing off-policy epochs (single update per batch): convergence \textbf{slows} but training remains stable, indicating the proximal teacher is the primary stabilizer while off-policy reuse is an efficiency improvement.
+\item $\alpha$ robustness: performance is stable across $\alpha \in \{0.1, 0.2, 0.3\}$, indicating that the method is not sensitive to the precise interpolation strength.
+\end{itemize}
+
+\subsection{Limitations}
+
+\textbf{Precision ceiling}: The convergence bound includes a term $\varepsilon_\infty / \alpha$, meaning smaller $\alpha$ (stronger bounding) implies a larger gap between the converged student and the true teacher. There is an inherent bias--variance tradeoff: stronger bounding reduces variance but introduces approximation error.
+
+\textbf{Single teacher}: The method assumes a single, fixed teacher. In multi-teacher or continual distillation settings, the proximal teacher construction would need adaptation, as the interpolation target changes over time.
+
+\textbf{Mathematical reasoning focus}: All evaluations are on mathematical reasoning benchmarks (AIME24, MATH-500, AMC23). Whether the same instability and the same degree of improvement hold for code generation, open-ended QA, or instruction-following tasks is not evaluated.
+
+\textbf{Fixed $\alpha$}: The interpolation weight $\alpha$ is constant throughout training. An adaptive schedule---starting with small $\alpha$ (strong bounding) and increasing toward 1 (pure teacher) as the student improves---could potentially achieve better final accuracy while maintaining early-training stability.
+
+\textbf{Scale}: Evaluated only at the 8B student / 30B teacher scale. Scaling behavior to larger gaps (e.g., 1B student / 70B teacher) or smaller gaps (e.g., 8B student / 14B teacher) is unknown.
+
+\subsection{Relevance to Our Research}
+
+This paper directly advances our T1 (LLM efficiency/distillation) thread by solving the core instability that has plagued on-policy distillation methods throughout our review corpus. Our extensive OPD review history---Flow-OPD~\cite{flowopd2026} (flow matching for distillation), Learning to Foresee~\cite{foresee2026} (unlocking OPD efficiency), Filter Then Reweight~\cite{filter2026} (optimization granularity), ReNIO~\cite{renio2026} (negative trajectory reweighting), DOPD~\cite{dopd2026} (dual on-policy distillation), Early Stopping~\cite{earlystop2026} (rollout truncation)---has progressively identified that the reward signal quality is the bottleneck, but none proposed a principled solution to the unbounded reward problem.
+
+The proximal teacher construction is elegantly simple: a single algebraic transformation $\log(\alpha \cdot \rho_k + 1 - \alpha)$ replaces $\log \rho_k$, requiring zero additional compute. This stands in contrast to our reviewed approaches that addressed instability through filtering (Filter Then Reweight), reweighting (ReNIO), or truncation (Early Stopping)---all of which discard or down-weight information. TOP-D instead \emph{reshapes} the reward landscape to be inherently bounded while preserving the full gradient signal.
+
+The connection to our T2 (RL) reviews is through the PPO-style trust region mechanism. Our BandPO review~\cite{bandpo2026} analyzed the relationship between trust regions and ratio clipping in LLM RL; TOP-D applies the same clipping machinery but in a distillation context, creating a unified framework where distillation \emph{is} RL with a specific (bounded) reward function. Our MIPU review~\cite{mirage2026} identified training-inference mismatch as a fundamental issue; TOP-D's proximal teacher can be viewed as mitigating a related mismatch---the teacher-student distribution mismatch that causes unbounded rewards.
+
+The theoretical guarantees (bounded variance, convergence, monotonic improvement) provide the formal foundation that our previous OPD reviews lacked. Our Geometry of OPD review~\cite{geomopd2026} analyzed the geometric properties of on-policy distillation but did not establish convergence guarantees. TOP-D's three theorems complete this picture: Theorem 1 explains \emph{why} standard OPD is unstable (infinite variance), Theorem 2 shows \emph{where} the proximal teacher converges (bounded neighborhood), and Theorem 3 guarantees \emph{how} it gets there (monotonic improvement under trust region).
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Adaptive Proximal Schedule for Curriculum Distillation}
+
+\paragraph{Gap.} TOP-D uses a fixed $\alpha$ throughout training, accepting a permanent precision ceiling of $\varepsilon_\infty / \alpha$. The ablation shows robustness across $\alpha \in \{0.1, 0.2, 0.3\}$, but there is no mechanism to \emph{anneal} the approximation error as the student improves. Early in training, when the student-teacher distribution mismatch is large, strong bounding (small $\alpha$) is needed to prevent catastrophic rewards. Later, when the student has converged close to the teacher, the bounding becomes unnecessarily conservative, limiting final accuracy.
+
+\paragraph{Approach.} Design an \textbf{adaptive $\alpha$ schedule} that increases $\alpha$ as training progresses:
+\begin{enumerate}
+\item \textbf{Variance-triggered annealing}: Monitor the empirical variance of the proximal reward $\tilde{r}_k$ across mini-batches. When variance drops below a threshold $\sigma^2_{\mathrm{thresh}}$, increase $\alpha$ by a multiplicative factor (e.g., $\alpha \leftarrow \min(\alpha \cdot 1.1, 1.0)$). This automatically transitions from strong bounding to near-exact teacher matching as the student's distribution converges.
+\item \textbf{Two-phase curriculum}: Phase~1 uses small $\alpha$ (e.g., 0.1) with standard TOP-D to stabilize training and bring the student into the teacher's basin. Phase~2 switches to large $\alpha$ (e.g., 0.9) for fine-grained matching, leveraging the fact that the student is now close enough to the teacher that unbounded rewards are rare.
+\item \textbf{Token-adaptive $\alpha$}: Instead of a global $\alpha$, compute a per-token $\alpha_k$ based on the current ratio $\rho_k$. Tokens with large $|\log \rho_k|$ (high teacher-student disagreement) get smaller $\alpha_k$ (stronger bounding), while tokens where teacher and student agree get $\alpha_k \to 1$. This selectively bounds only the problematic tokens.
+\end{enumerate}
+
+\paragraph{Feasibility.} Variance monitoring adds negligible compute (statistics over existing reward values). The two-phase approach requires only a single hyperparameter (switching point). Token-adaptive $\alpha$ is a per-token computation with no additional model forward passes. Validation: compare fixed $\alpha = 0.2$ vs.\ variance-triggered annealing vs.\ token-adaptive $\alpha$ on AIME24 and MATH-500. Expected outcome: adaptive schedules improve final accuracy by 2--5\% over fixed $\alpha$ while maintaining the same training stability.
+
+\subsection{Direction 2: Proximal Teacher for Diffusion LLM Distillation}
+
+\paragraph{Gap.} Our diffusion LLM review thread (T4) has extensively studied distillation for discrete diffusion models---TIDE~\cite{tide2026} (cross-architecture distillation), Nemotron-Labs~\cite{nemotron2026} (tri-mode joint training), Orthrus~\cite{orthrus2026} (dual-view parallel generation). These methods use various training objectives (score matching, KL minimization, flow matching) but face an analogous instability: when the student diffusion model assigns high probability to a denoising step that the teacher considers unlikely, the training signal can be extreme. The proximal teacher concept---interpolating teacher and student distributions before computing the training signal---is architecture-agnostic and could stabilize diffusion LLM distillation.
+
+\paragraph{Approach.} Adapt the proximal teacher to \textbf{discrete diffusion distillation}:
+\begin{enumerate}
+\item \textbf{Proximal score}: In score-based diffusion distillation, replace the teacher's score function $s^*(x_t, t)$ with a proximal score $\tilde{s}^* = \alpha \cdot s^*(x_t, t) + (1 - \alpha) \cdot s_\theta(x_t, t)$. This bounds the score-matching loss analogously to how the proximal teacher bounds the log-ratio reward.
+\item \textbf{Proximal transition kernel}: For discrete diffusion (MDLM-style), the teacher provides transition probabilities $p^*(x_{t-1} | x_t)$. Construct $\tilde{p}^* = \alpha \cdot p^* + (1 - \alpha) \cdot p_\theta$, then compute the KL divergence $D_{\mathrm{KL}}(p_\theta \| \tilde{p}^*)$ instead of $D_{\mathrm{KL}}(p_\theta \| p^*)$. This prevents the KL from diverging when teacher and student disagree on unlikely transitions.
+\item \textbf{Integration with TIDE}: Apply the proximal transition kernel within the TIDE cross-architecture framework (AR teacher $\to$ diffusion student), where the distribution mismatch is especially severe due to architectural differences.
+\end{enumerate}
+
+\paragraph{Feasibility.} The proximal interpolation is a trivial modification to existing distillation losses. No architectural changes are needed. Validation: apply proximal-TIDE to distill Qwen3-8B (AR) into an MDLM-style diffusion student, comparing standard TIDE loss vs.\ proximal TIDE on text generation quality (perplexity, MAUVE score) and training stability (reward variance over time). Expected outcome: proximal TIDE reduces training variance by 50--70\% and improves final generation quality by 5--10\% on benchmarks where standard TIDE struggles with distribution mismatch.
+
+\subsection{Direction 3: Proximal Teacher Meets Continual Distillation}
+
+\paragraph{Gap.} TOP-D assumes a single, fixed teacher throughout training. In continual learning scenarios (our T3 thread), the teacher itself may evolve---either because the teacher is periodically updated with new data, or because different teachers are used for different domains/tasks. Our Co-Evolving Policy Distillation review~\cite{coevolve2026} studied mutual distillation where teacher and student co-evolve, but did not address the reward instability that arises when the teacher distribution shifts mid-training. When the teacher changes, tokens that were well-supported under the old teacher may become unlikely under the new one, causing sudden spikes in $|\log \rho_k|$.
+
+\paragraph{Approach.} Extend the proximal teacher to \textbf{continual distillation with teacher drift}:
+\begin{enumerate}
+\item \textbf{Drift-aware proximal teacher}: When the teacher updates from $\pi^*_{\mathrm{old}}$ to $\pi^*_{\mathrm{new}}$, temporarily reduce $\alpha$ (increase bounding strength) to absorb the distribution shift. As the student adapts to the new teacher, gradually increase $\alpha$ back to its baseline value. The annealing rate depends on the magnitude of the teacher shift, measured as $D_{\mathrm{KL}}(\pi^*_{\mathrm{new}} \| \pi^*_{\mathrm{old}})$.
+\item \textbf{Multi-teacher proximal interpolation}: For domain-specific teachers (e.g., math teacher, code teacher, language teacher), construct a composite proximal teacher $\tilde{\pi}^* = \alpha \cdot (\sum_d w_d \pi^*_d) + (1 - \alpha) \cdot \pi_\theta$, where $w_d$ are domain weights. This provides a single bounded reward signal from multiple teachers.
+\item \textbf{Catastrophic forgetting prevention}: When distilling from a new domain teacher, the proximal interpolation with the student's own distribution naturally preserves old knowledge---the $(1 - \alpha) \cdot \pi_\theta$ term anchors the reward to the student's current (old-knowledge-preserving) distribution. This connects to our Geometry Conflict review~\cite{geomconflict2026} where gradient interference causes forgetting; the proximal teacher reduces gradient magnitude at high-disagreement tokens, precisely where interference is worst.
+\end{enumerate}
+
+\paragraph{Feasibility.} Drift detection via sampled KL estimation adds minimal overhead (reuses existing forward passes). Multi-teacher interpolation is a weighted sum of logits---no additional model calls if teachers are pre-computed. Validation: continual distillation across 3 sequential domain teachers (math $\to$ code $\to$ language) on a Qwen3-8B student, comparing standard OPD (catastrophic forgetting expected), EWC-regularized OPD (baseline continual learning), and drift-aware proximal TOP-D. Expected outcome: proximal TOP-D retains 85--90\% of old-domain performance while achieving 95\%+ of single-domain distillation quality on the new domain.
+
+\section{Conclusion}
+
+TOP-D provides the missing stability foundation for on-policy distillation through an elegant algebraic insight: interpolating teacher and student distributions in probability space before computing the log-ratio reward guarantees finite variance and bounded gradients, at zero additional compute cost. The +25.84 percentage point improvement over standard OPD on AIME24 is not merely incremental---it transforms OPD from a method that \emph{underperforms} RLVR into one that \emph{dominates} it, validating teacher guidance as a powerful training signal once the reward instability is resolved. For our research program, this paper retroactively contextualizes our extensive OPD review corpus: the filtering (Filter Then Reweight), reweighting (ReNIO), truncation (Early Stopping), and dual-policy (DOPD) approaches we reviewed were all addressing symptoms of the same underlying disease---unbounded rewards from teacher-student distribution mismatch. TOP-D treats the disease directly. The three follow-up directions---adaptive $\alpha$ scheduling (eliminating the precision ceiling), proximal diffusion distillation (extending the principle to T4), and continual distillation with teacher drift (extending to T3)---position the proximal teacher as a unifying stabilization principle across our entire distillation and continual learning research program.
+
+\begin{thebibliography}{99}
+\bibitem{topd2026} Trust Region Policy Distillation Authors. ``Trust Region Policy Distillation.'' \emph{arXiv preprint arXiv:2607.04751}, 2026.
+\bibitem{flowopd2026} Flow-OPD Authors. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \emph{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{foresee2026} Foresee Authors. ``Learning to Foresee: Unveiling the Unlocking Efficiency of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.11739}, 2026.
+\bibitem{filter2026} Filter Then Reweight Authors. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{renio2026} ReNIO Authors. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{dopd2026} DOPD Authors. ``DOPD: Dual On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.30626}, 2026.
+\bibitem{earlystop2026} Early Stopping Authors. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\bibitem{bandpo2026} BandPO Authors. ``BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2603.04918}, 2026.
+\bibitem{mirage2026} Liang, J., et al. ``The Mirage of Optimizing Training Policies: Monotonic Inference Policies as the Real Objective for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2606.29526}, 2026.
+\bibitem{geomopd2026} Geometry OPD Authors. ``On the Geometry of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.07082}, 2026.
+\bibitem{tide2026} TIDE Authors. ``Turning the TIDE: Cross-Architecture Distillation for Diffusion Large Language Models.'' \emph{arXiv preprint arXiv:2604.26951}, 2026.
+\bibitem{nemotron2026} Nemotron Authors. ``Nemotron-Labs-Diffusion: A Tri-Mode Language Model Unifying Autoregressive, Diffusion, and Self-Speculation Decoding.'' \emph{arXiv preprint arXiv:2607.05722}, 2026.
+\bibitem{orthrus2026} Orthrus Authors. ``Orthrus: Memory-Efficient Parallel Token Generation via Dual-View Diffusion.'' \emph{arXiv preprint arXiv:2605.12825}, 2026.
+\bibitem{coevolve2026} Co-Evolving Authors. ``Co-Evolving Policy Distillation.'' \emph{arXiv preprint arXiv:2604.27083}, 2026.
+\bibitem{geomconflict2026} Geometry Conflict Authors. ``Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.'' \emph{arXiv preprint arXiv:2605.09608}, 2026.
+\end{thebibliography}
+
+\end{document}
