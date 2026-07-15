@@ -1,0 +1,170 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Weak-to-Strong Generalization via Direct\\On-Policy Distillation}
+\author{Internbot --- Automated Research Summary}
+\date{July 15, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Feng et al.~\cite{feng2026direct} address a fundamental scalability bottleneck in LLM post-training: Reinforcement Learning with Verifiable Rewards (RLVR) must be re-run from scratch on every new, larger model, and the cost scales directly with model size. The natural alternative---run RL cheaply on a small model and transfer the gains to a larger student---fails under standard on-policy distillation (OPD) because the teacher's final policy \textbf{entangles} the useful RL-discovered improvement direction with the weak model's intrinsic capacity limitations.
+
+\paragraph{Why Standard OPD Fails in the Weak-to-Strong Setting.} When the student already exceeds the teacher, imitating the teacher's full policy can \emph{degrade} the student. The paper demonstrates this concretely: R1-Distill-7B starts at 56.7\% on AIME 2024, the post-RL teacher JustRL-1.5B achieves only 51.3\%, and vanilla OPD drags R1-Distill-7B \emph{down} to approximately 50\%. The weak teacher's final policy is a poor carrier of the RL supervision signal because it mixes what RL learned with what the weak model cannot express.
+
+\paragraph{Key Insight.} Instead of transferring the teacher's absolute policy, the paper proposes transferring only the \textbf{RL-induced policy shift}---the log-ratio between the teacher after RL and the teacher before RL. This difference isolates what RL changed, discarding what the weak model already preferred. Under the standard KL-regularized RL framework, this log-ratio is equivalent (up to scale and a per-prompt constant) to the implicit reward that trained the weak model, providing a dense, per-token supervision signal without ever querying a verifiable reward.
+
+\subsection{Method}
+
+The paper proposes \textbf{Direct-OPD} (Direct On-Policy Distillation), which treats a pair of weak-model checkpoints (pre-RL reference $\pi_{T_\mathrm{ref}}$ and post-RL teacher $\pi_T$) as an implicit reward source for training an arbitrary student $\pi_\theta$.
+
+\paragraph{Policy Shift as Implicit Reward.} The teacher's policy shift decomposes into dense per-token rewards:
+\[
+\Delta_T(y \mid x) = \sum_{t=1}^{T} r_t(y_t \mid s_t), \quad r_t(v) = \log \pi_T(v \mid s_t) - \log \pi_{T_\mathrm{ref}}(v \mid s_t)
+\]
+Each $r_t(v)$ is positive where RL encouraged token $v$ at prefix $s_t$ and negative where it suppressed it. By the policy-as-reward identity from KL-regularized RL (the same identity underlying DPO), $\Delta_T(y \mid x) = \frac{1}{\beta} r_T(x, y) - \log Z_T(x)$, recovering the reward up to a positive scale and per-prompt constant.
+
+\paragraph{Direct-OPD Objective.} The student maximizes:
+\[
+J_{\mathrm{Direct\text{-}OPD}}(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\left[\mathbb{E}_{y \sim \pi_\theta}\left[\Delta_T(y \mid x)\right] - \alpha \cdot D_{\mathrm{KL}}\!\left(\pi_\theta(\cdot \mid x) \,\|\, \pi_S(\cdot \mid x)\right)\right]
+\]
+where $\alpha > 0$ is a KL penalty anchoring the student to its own initialization $\pi_S$. The closed-form optimum is:
+\[
+\pi^*(y \mid x) \propto \pi_S(y \mid x) \cdot \left(\frac{\pi_T(y \mid x)}{\pi_{T_\mathrm{ref}}(y \mid x)}\right)^{1/\alpha}
+\]
+This shows the student is trained as if running KL-regularized RL with the teacher's implicit reward, using its own initialization as the reference---\textbf{without ever querying a verifiable reward}.
+
+\paragraph{Rao-Blackwellized Gradient.} At each prefix $s_t$, the action space is restricted to the student's top-$k$ tokens $S_t = \mathrm{TopK}_v\, \pi_\theta(v \mid s_t)$ with renormalized probabilities $\bar{p}_t(v)$. Instead of single-token REINFORCE sampling (high variance), the paper analytically marginalizes over the restricted support:
+\[
+\nabla_\theta J \approx \mathbb{E}_{x, \hat{y} \sim \pi_\theta}\!\left[\sum_t \sum_{v \in S_t} A_t^w(v) \cdot \nabla_\theta \log \pi_\theta(v \mid s_t)\right] - \alpha \cdot \nabla_\theta D_{\mathrm{KL}}(\pi_\theta \| \pi_S)
+\]
+where $A_t^w(v) = \mathrm{sg}\!\left(\bar{p}_t(v) \cdot r_t(v)\right)$ uses stop-gradient to prevent Jacobian leakage through the softmax weights.
+
+\paragraph{Adaptive KL Control.} The implicit reward's scale depends on the teacher's RL hyperparameters ($1/\beta$), which are encoded in the checkpoint pair but not recoverable. A fixed $\alpha$ cannot be calibrated across teacher-student pairs. The adaptive controller adjusts $\alpha$ at each iteration:
+\[
+\alpha_{m+1} = \mathrm{clip}\!\left(\alpha_m \cdot (1 + \epsilon \cdot \mathrm{sgn}(\bar{r}_m)),\; \alpha_{\min},\; \alpha_{\max}\right)
+\]
+where $\bar{r}_m$ is the batch-level mean of the student-weighted shift. This steers the dense reward toward zero on average, keeping the student in a balanced regime where the teacher/reference comparison remains informative.
+
+\paragraph{Training Setup.} Student top-$k = 16$, global batch size 64, rollout $n = 4$ samples per prompt, learning rate $10^{-6}$, 300 training steps, maximum response length 2048 tokens. Training data: Skywork-OR1-RL-Data math subset. The entire transfer stage takes approximately 4 hours on 8 A100 GPUs.
+
+\subsection{Results}
+
+\paragraph{Weak-to-Strong Transfer.} Using the JustRL-1.5B teacher pair (R1-Distill-1.5B $\to$ JustRL-1.5B):
+\begin{itemize}
+\item Qwen3-1.7B: \textbf{58.3\%} AIME24 (+10.0), \textbf{43.2\%} AIME25 (+6.4)
+\item Qwen3-4B: \textbf{77.6\%} AIME24 (+5.1), \textbf{68.8\%} AIME25 (+3.2)
+\item R1-Distill-7B: \textbf{63.1\%} AIME24 (+6.4), \textbf{48.8\%} AIME25 (+8.3)
+\end{itemize}
+Both Qwen3-4B (72.5\%) and R1-Distill-7B (56.7\%) already \emph{exceed} the post-RL teacher (51.3\%) before transfer, yet Direct-OPD still improves them substantially---genuine weak-to-strong generalization.
+
+\paragraph{Outperforms Direct RL.} At matched RL steps, running RL on R1-Distill-1.5B and transferring with Direct-OPD gives better R1-Distill-7B performance than running RL directly on R1-Distill-7B, at roughly half the compute cost.
+
+\paragraph{Sequential Composition.} Two independent teacher shifts (JustRL-1.5B, then QuestA-Nemotron-1.5B) applied sequentially to Qwen3-1.7B yield cumulative gains: +15.5 on AIME24 and +10.0 on AIME25, demonstrating that independent RL runs encode complementary abilities.
+
+\paragraph{Cross-Pattern Transfer.} When transferring across model families (JustRL-1.5B to Qwen3-1.7B), teacher-student token overlap remains \emph{low} throughout training, yet accuracy still improves. The gains come from the RL-induced direction evaluated on the student's visited states, not from progressive token-level imitation.
+
+\subsection{Limitations}
+
+\textbf{Conditional signal reliability}: Direct-OPD can fail when the teacher's policy shift is not meaningful on student-visited states. There is no guarantee the RL direction transfers for arbitrary teacher-student pairs.
+
+\textbf{Benchmark narrowness}: All evaluations use only AIME 2024/2025 (30 problems each). No evaluation on broader math benchmarks (MATH-500, GSM8K) or non-math tasks (coding, alignment, open-ended QA).
+
+\textbf{Scale ceiling unknown}: The largest student is 7B. Whether transfers from 1.5B teachers remain effective for 32B+ students is untested.
+
+\textbf{Requires both checkpoints}: The method fundamentally needs both $\pi_{T_\mathrm{ref}}$ and $\pi_T$. If only the post-RL model is available (common for proprietary models), the method cannot be applied.
+
+\textbf{Unrecoverable reward scale}: The teacher's reward scale ($1/\beta$) is embedded in the checkpoint pair but not recoverable. The adaptive KL controller is a heuristic mitigation, not a principled solution.
+
+\textbf{Teacher RL uses KL coefficient 0}: The GRPO teacher training sets KL${}=0$, contradicting the theoretical justification (Eq.~6) which assumes $\beta > 0$. The method works empirically despite this discrepancy, likely because GRPO's clipping provides an implicit constraint.
+
+\subsection{Relevance to Our Research}
+
+This paper represents a paradigm shift for our T1 (LLM efficiency/distillation) thread. Our extensive OPD review corpus---Flow-OPD~\cite{flowopd2026}, Filter Then Reweight~\cite{filter2026}, ReNIO~\cite{renio2026}, DOPD~\cite{dopd2026}, Early Stopping~\cite{earlystop2026}, Learning to Foresee~\cite{foresee2026}, and most recently TOP-D~\cite{topd2026}---has focused on improving the \emph{mechanics} of distillation (stabilizing rewards, reweighting trajectories, truncating rollouts). Direct-OPD instead challenges \emph{what is being transferred}: not the teacher's policy but the teacher's \textbf{RL-induced improvement direction}. This reframes distillation from ``imitate the teacher'' to ``apply the teacher's learned reward to the student's own distribution.''
+
+The connection to TOP-D~\cite{topd2026} (reviewed yesterday) is immediate and complementary. TOP-D stabilizes OPD rewards via proximal teacher interpolation; Direct-OPD changes the reward source entirely from $\log(\pi_T / \pi_\theta)$ to $\log(\pi_T / \pi_{T_\mathrm{ref}})$. Both address reward instability but from orthogonal angles: TOP-D bounds the reward magnitude while keeping the absolute teacher as target; Direct-OPD uses a naturally bounded signal (the teacher's own shift) that avoids the unbounded ratio problem altogether, since both $\pi_T$ and $\pi_{T_\mathrm{ref}}$ share the same model family and thus have similar support.
+
+The policy-as-reward identity connects directly to our T2 (RL) reviews. Our MIPU review~\cite{mirage2026} showed that the real objective of LLM RL is monotonic inference policies; Direct-OPD extracts the implicit reward from a converged RL run and transfers it without re-running RL, sidestepping the training-inference mismatch entirely. Our BandPO review~\cite{bandpo2026} analyzed trust region mechanisms in LLM RL; Direct-OPD's adaptive KL controller is a lightweight alternative that achieves similar stabilization through reward-scale normalization rather than ratio clipping.
+
+The sequential composition result---stacking independent teacher shifts from different RL runs---has implications for our T3 (Continual Learning) thread. Our Co-Evolving Policy Distillation review~\cite{coevolve2026} studied mutual distillation between teacher and student; Direct-OPD's composability suggests a new continual learning paradigm where different RL training runs on small models produce a library of transferable policy shifts that can be selectively applied to larger models as needed.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Proximal Policy Shifts --- Combining TOP-D and Direct-OPD}
+
+\paragraph{Gap.} Direct-OPD uses the raw log-ratio $\log(\pi_T / \pi_{T_\mathrm{ref}})$ as the per-token reward. While this is better bounded than the standard OPD reward $\log(\pi_T / \pi_\theta)$ because teacher and reference share the same model family, it can still exhibit high variance when the teacher's RL produces extreme probability changes at certain tokens. TOP-D's proximal teacher interpolation~\cite{topd2026} provides a principled bounding mechanism, but was designed for standard OPD where the instability is between teacher and student. No one has applied proximal bounding to the \emph{policy shift} reward.
+
+\paragraph{Approach.} Construct a \textbf{proximal policy shift}:
+\begin{enumerate}
+\item Define a proximal post-RL teacher: $\tilde{\pi}_T(v \mid s_t) = \alpha \cdot \pi_T(v \mid s_t) + (1-\alpha) \cdot \pi_{T_\mathrm{ref}}(v \mid s_t)$.
+\item The proximal shift reward becomes: $\tilde{r}_t(v) = \log\!\left(\alpha \cdot \frac{\pi_T(v \mid s_t)}{\pi_{T_\mathrm{ref}}(v \mid s_t)} + 1 - \alpha\right)$, strictly bounded below by $\log(1-\alpha)$.
+\item Use $\tilde{r}_t(v)$ in place of $r_t(v)$ in the Direct-OPD gradient, with an adaptive $\alpha$ schedule that starts conservative (small $\alpha$) and increases as training stabilizes.
+\end{enumerate}
+This inherits Direct-OPD's advantage of transferring the improvement direction rather than the absolute policy, while adding TOP-D's variance reduction guarantee.
+
+\paragraph{Feasibility.} The proximal shift is a trivial algebraic modification---no extra forward passes. Validation: compare standard Direct-OPD vs.\ proximal Direct-OPD on R1-Distill-7B with the JustRL-1.5B teacher pair, measuring both final accuracy and per-token reward variance during training. Expected outcome: proximal bounding reduces reward variance by 40--60\% and improves final accuracy by 1--3\% by preventing gradient spikes from extreme teacher shifts.
+
+\subsection{Direction 2: Diffusion LLM Policy Shifts via Transition Kernel Ratios}
+
+\paragraph{Gap.} Direct-OPD's core insight---transferring the RL-induced improvement direction rather than the final policy---is formulated for autoregressive models where the log-ratio $\log(\pi_T / \pi_{T_\mathrm{ref}})$ factorizes cleanly into per-token rewards. For discrete diffusion LLMs (our T4 thread), there is no autoregressive factorization. The ``policy'' is a denoising transition kernel $p(x_{t-1} \mid x_t)$, and RL-trained diffusion models (V-GRPO~\cite{vgrpo2026}, Flow-DPPO~\cite{flowdppo2026}) produce checkpoint pairs that encode an analogous improvement direction in transition-kernel space. No one has explored transferring this direction to a stronger diffusion student.
+
+\paragraph{Approach.} Define a \textbf{diffusion policy shift} for discrete diffusion models:
+\begin{enumerate}
+\item Given a post-RL diffusion teacher $p_T(x_{t-1} \mid x_t)$ and its pre-RL reference $p_{T_\mathrm{ref}}(x_{t-1} \mid x_t)$, compute the per-step shift: $r_t(x_{t-1}, x_t) = \log p_T(x_{t-1} \mid x_t) - \log p_{T_\mathrm{ref}}(x_{t-1} \mid x_t)$.
+\item Train a diffusion student $p_\theta$ using this shift as a dense reward at each denoising step, analogous to Direct-OPD's per-token reward but applied to the reverse diffusion trajectory.
+\item Since discrete diffusion models predict all token positions simultaneously at each step, the shift naturally provides supervision across all positions---potentially richer than the sequential per-token signal in AR models.
+\end{enumerate}
+This would enable the first weak-to-strong transfer for diffusion LLMs: run RL cheaply on a small diffusion model and transfer the denoising improvement to a larger diffusion student.
+
+\paragraph{Feasibility.} The transition-kernel ratio is computable from two forward passes (one through each checkpoint), identical in cost to Direct-OPD's per-token ratio. Validation: train a small MDLM~\cite{sumi2026} with V-GRPO on math tasks, then transfer the shift to a 4$\times$ larger MDLM student. Compare against direct diffusion RL on the larger model. Expected outcome: diffusion Direct-OPD achieves 80--90\% of direct RL quality at 25\% of compute, matching the AR setting's efficiency gains.
+
+\subsection{Direction 3: Policy Shift Libraries for Continual Capability Composition}
+
+\paragraph{Gap.} Direct-OPD's sequential composition result (stacking JustRL and QuestA shifts yields cumulative +15.5\% on AIME24) demonstrates that independent RL runs encode complementary abilities. However, only two stages were tested, ordering effects were not studied, and the composition was limited to math. For continual learning scenarios (our T3 thread), a richer question arises: can a \emph{library} of domain-specific policy shifts---math, code, reasoning, alignment---be composed in arbitrary order to build a multi-capability student without catastrophic forgetting?
+
+\paragraph{Approach.} Design a \textbf{policy shift library} framework:
+\begin{enumerate}
+\item \textbf{Shift generation}: For each target domain $d$, run RL on a small model using domain-specific data/rewards, producing a checkpoint pair $(\pi_{T_\mathrm{ref}}^d, \pi_T^d)$ and the corresponding shift $\Delta_T^d$.
+\item \textbf{Shift compatibility scoring}: Before applying a shift to a student, estimate compatibility by computing $\mathbb{E}_{y \sim \pi_\theta}[\Delta_T^d(y)]$ on a held-out set. Shifts with consistently negative expected rewards on the student's distribution indicate misaligned improvement directions and should be skipped.
+\item \textbf{Ordered composition with forgetting monitoring}: Apply shifts sequentially, interleaving domain-specific stages. After each stage, evaluate on all previous domains. If forgetting exceeds a threshold, increase the KL penalty $\alpha$ for the next stage to anchor closer to the student's current state.
+\item \textbf{Parallel shift merging}: For compatible shifts, explore parallel application by averaging the per-token rewards: $r_t^{\mathrm{merged}}(v) = \sum_d w_d \cdot r_t^d(v)$, where $w_d$ are domain weights. This avoids the sequential ordering problem entirely.
+\end{enumerate}
+This bridges Direct-OPD with continual learning: the policy shift library is a modular, reusable collection of RL-discovered improvement directions that can be applied to any student at any time, connecting to our EvoEmbedding~\cite{evoembedding2026} review (evolvable representations) and Proactive Memory~\cite{proactivemem2026} review (intervention policies for knowledge activation).
+
+\paragraph{Feasibility.} Shift generation is embarrassingly parallel (independent RL runs). Compatibility scoring uses existing rollout infrastructure. Parallel merging is a weighted sum---no additional forward passes. Validation: generate shifts for math (AIME), code (LiveCodeBench), and reasoning (GPQA) using three independent RL runs on Qwen3-1.7B, then compose them into Qwen3-4B. Compare sequential composition (3 orderings) vs.\ parallel merging vs.\ multi-task RL directly on Qwen3-4B. Expected outcome: parallel shift merging achieves 90\%+ of multi-task RL quality at 30\% of compute, with no ordering sensitivity and minimal cross-domain forgetting.
+
+\section{Conclusion}
+
+Direct-OPD reframes on-policy distillation from ``imitate the teacher's policy'' to ``apply the teacher's RL-discovered improvement direction to the student's own distribution.'' By transferring the policy shift $\log(\pi_T / \pi_{T_\mathrm{ref}})$ rather than the absolute policy $\pi_T$, it achieves genuine weak-to-strong generalization---improving students that already exceed the post-RL teacher---at a fraction of the compute cost of direct RL. The Rao-Blackwellized gradient eliminates token-sampling variance, and the adaptive KL controller handles the unrecoverable reward scale. For our research program, this paper provides the missing ``what to transfer'' answer that our OPD corpus has been working toward: not the teacher's full distribution (standard OPD), not a bounded version of it (TOP-D), but the \emph{direction of improvement} that RL discovered, evaluated on the student's own states. The three follow-up directions---proximal policy shifts (combining with TOP-D's bounding), diffusion policy shifts (extending to T4), and policy shift libraries (continual composition for T3)---position Direct-OPD as a unifying transfer mechanism across our entire research program: cheap RL runs on small models generate reusable, composable improvement directions that can be applied to any target model.
+
+\begin{thebibliography}{99}
+\bibitem{feng2026direct} Feng, S., Gao, H., Chi, H., et al. ``Weak-to-Strong Generalization via Direct On-Policy Distillation.'' \emph{arXiv preprint arXiv:2607.05394}, 2026.
+\bibitem{flowopd2026} Flow-OPD Authors. ``Flow-OPD: On-Policy Distillation for Flow Matching Models.'' \emph{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{filter2026} Filter Then Reweight Authors. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{renio2026} ReNIO Authors. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{dopd2026} DOPD Authors. ``DOPD: Dual On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.30626}, 2026.
+\bibitem{earlystop2026} Early Stopping Authors. ``Less is More: Early Stopping Rollout for On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.27028}, 2026.
+\bibitem{foresee2026} Foresee Authors. ``Learning to Foresee: Unveiling the Unlocking Efficiency of On-Policy Distillation.'' \emph{arXiv preprint arXiv:2605.11739}, 2026.
+\bibitem{topd2026} TOP-D Authors. ``Trust Region Policy Distillation.'' \emph{arXiv preprint arXiv:2607.04751}, 2026.
+\bibitem{mirage2026} Liang, J., et al. ``The Mirage of Optimizing Training Policies: Monotonic Inference Policies as the Real Objective for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2606.29526}, 2026.
+\bibitem{bandpo2026} BandPO Authors. ``BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2603.04918}, 2026.
+\bibitem{coevolve2026} Co-Evolving Authors. ``Co-Evolving Policy Distillation.'' \emph{arXiv preprint arXiv:2604.27083}, 2026.
+\bibitem{vgrpo2026} V-GRPO Authors. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{flowdppo2026} Flow-DPPO Authors. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{sumi2026} Sumi Authors. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{evoembedding2026} Li, H., et al. ``EvoEmbedding: Evolvable Representations for Long-Context Retrieval and Agentic Memory.'' \emph{arXiv preprint arXiv:2606.21649}, 2026.
+\bibitem{proactivemem2026} Wu, Y., et al. ``Remember When It Matters: Proactive Memory Agent for Long-Horizon Agents.'' \emph{arXiv preprint arXiv:2607.08716}, 2026.
+\end{thebibliography}
+
+\end{document}
