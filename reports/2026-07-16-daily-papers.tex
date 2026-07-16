@@ -1,0 +1,167 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Search Beyond What Can Be Taught --- Evolving\\the Knowledge Boundary in Agentic Visual Generation}
+\author{Internbot --- Automated Research Summary}
+\date{July 16, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Wang et al.~\cite{wang2026searchgen} identify a structural failure mode in text-to-image generators that existing benchmarks completely miss: \textbf{world-knowledge absence}. While generators achieve $>$4.0/5.0 on compositionality benchmarks like GenAI-Bench, they collapse to $<$30/100 on prompts requiring knowledge of specific entities, cultural symbols, post-cutoff events, or niche typography. This 40+ point gap---invisible to standard evaluation---arises because generators are trained on fixed corpora with inherent knowledge cutoffs, yet user prompts are unbounded and evolving.
+
+\paragraph{Why Naive Search Fails.} The natural remedy---equipping generators with web search---introduces two modality-specific failure modes. \textbf{Concept corruption} (gating failure): search fires on prompts the generator already handles well, and the returned reference overrides accurate internal knowledge because the conditioning architecture has no confidence-based gating mechanism. \textbf{Copy effect} (filtering failure): a reference carries too much raw pixel information and becomes a copying template rather than a knowledge supplement, reproducing incidental background, lighting, and framing from the search result.
+
+\paragraph{Root Cause.} Both problems trace to a single concept: the \textbf{generator-specific knowledge boundary}---the partition between knowledge the generator can internalize through training (stable, low-dimensional concepts) and knowledge that must remain in external context (evolving, long-tail, or compositional concepts). Crucially, this boundary depends on the specific generator's parameters, shifts as the generator improves, and cannot be specified a priori. A search policy that helps a weaker generator may harm a stronger one.
+
+\subsection{Method}
+
+The paper proposes a \textbf{co-training framework} (``Teach, Then Search'') that jointly improves a generator and a search-reasoning agent, with the agent's search policy calibrated to the generator's specific knowledge boundary.
+
+\paragraph{Knowledge Boundary Formalization.} For a generator $G_\theta$, prompt distribution $\mathcal{P}$, and quality function $Q \in [0,1]$, the knowledge space $\mathcal{K}$ is partitioned into:
+\[
+\mathcal{K}_{\mathrm{int}}(\theta) = \{k \in \mathcal{K} : \mathbb{E}_{p \mid k}[Q(G_\theta, p, \mathrm{Search}(k)) - Q(G_\theta, p, \varnothing)] < \varepsilon\}
+\]
+\[
+\mathcal{K}_{\mathrm{ctx}}(\theta) = \mathcal{K} \setminus \mathcal{K}_{\mathrm{int}}(\theta)
+\]
+$\mathcal{K}_{\mathrm{int}}$ contains knowledge units where search provides less than $\varepsilon$ benefit (already internalized); $\mathcal{K}_{\mathrm{ctx}}$ contains knowledge that must be externally supplied. The boundary $\mathcal{B}(\theta) = (\mathcal{K}_{\mathrm{int}}(\theta), \mathcal{K}_{\mathrm{ctx}}(\theta))$ is generator-specific and shifts under training: $\mathcal{K}_{\mathrm{int}}(\theta) \subseteq \mathcal{K}_{\mathrm{int}}(\theta')$ when $\theta'$ results from DPO on search-augmented demonstrations.
+
+\paragraph{Gate-Filter-Integrate Protocol.} The reasoner (Qwen3-VL-8B) executes a three-stage agent loop, each targeting a structurally distinct noise injection point:
+\begin{enumerate}
+\item \textbf{Gate} (Stage 1): Identify knowledge gaps in the prompt, classify each by type and severity (\{critical, important, moderate, minimal\}), propose at most 3 search queries with modality labels (\{image, web\}). Only \emph{critical} or \emph{important} gaps trigger search; otherwise, skip entirely.
+\item \textbf{Filter} (Stage 2): From search results, select the single reference per query that most directly fills the identified gap, minimizing extraneous content to reduce copy effects.
+\item \textbf{Integrate} (Stage 3): Fuse original prompt, gap analysis, and retrieved references into an enriched text specification with grounded citations specifying exactly what to borrow and what to create new. This routes visual references through natural language, preventing raw pixel conditioning from dominating.
+\end{enumerate}
+
+\paragraph{Phase 0: Supervised Warm-Start.} SFT of Qwen3-VL-8B on ${\sim}$20K expert-annotated trajectories covering all three stages. Standard cross-entropy loss, 5--6 epochs, learning rate $10^{-5}$, full-parameter fine-tuning with frozen ViT. This produces a well-structured reasoner that follows the protocol but remains \emph{generator-agnostic}.
+
+\paragraph{Phase 1: Teach What the Generator Can Internalize (Online Iterative DPO).} For each episode, sample prompts, generate search-enriched specifications via the Phase~0 reasoner, generate $M$ images per prompt from the generator, score with a VLM judge, and construct preference pairs (best vs.\ worst). Update the generator via flow-matching DPO:
+\[
+\mathcal{L}_{\mathrm{DPO}}(\theta) = -\mathbb{E}\!\left[\log \sigma\!\left(\beta \left(\log \frac{v_\theta(x_t^w \mid \tilde{p})}{v_{\theta_{\mathrm{ref}}}(x_t^w \mid \tilde{p})} - \log \frac{v_\theta(x_t^l \mid \tilde{p})}{v_{\theta_{\mathrm{ref}}}(x_t^l \mid \tilde{p})}\right)\right)\right]
+\]
+where $v_\theta$ is the flow-matching velocity field (not a denoising network), $\beta = 100$, and the reference model is updated via EMA with decay 0.99. This serves a dual function: (1)~knowledge internalization---DPO reinforces the generator's best outputs, absorbing stable visual knowledge into parameters; (2)~noise robustness---training on search-augmented inputs teaches the generator to incorporate references without being dominated by their noise.
+
+\paragraph{Phase 2: Search What the Generator Cannot Be Taught (Rejection-Sampling FT).} Recalibrate the reasoner to the DPO-strengthened generator's shifted boundary. Roll out $N_{\mathrm{traj}}$ trajectories per prompt from the Phase~0 reasoner, generate images from the Phase~1 generator, score, and compute group-relative advantage:
+\[
+A_n = \frac{s_n - \bar{s}}{\sigma_s + \delta}
+\]
+Retain only positive-advantage trajectories ($A_n > 0$) and SFT the reasoner on this filtered set. The reasoner learns the strengthened generator's boundary without explicit boundary labels---trajectories where correct abstention from search yields high scores are reinforced, while unnecessary search that corrupts output is discarded.
+
+\paragraph{Compute Budget.} Phase~0: ${\sim}$32 GPU-hours; Phase~1: ${\sim}$192 GPU-hours; Phase~2: ${\sim}$32 GPU-hours. Total: ${\sim}$256 GPU-hours on 8$\times$H20 GPUs.
+
+\subsection{Results}
+
+\paragraph{The World-Knowledge Gap.} On SearchGen-Bench (651 search-intensive prompts, 0--100 scale), open-weight generators score 21--28 while scoring 49--67 on NoSearch prompts (100 prompts where parametric knowledge suffices). The gap ranges from 10 points (GPT-Image-2) to 48 points (Qwen-Image-2), confirming the bottleneck is knowledge absence, not rendering quality.
+
+\paragraph{Naive Search Harms.} Blind search (always search) degrades Qwen-Image-2 from 70.7 to 60.4 on NoSearch prompts---a 14.6\% relative loss on prompts already handled well. Reasoned search (frontier VLM as selective gating) preserves NoSearch quality while improving search-intensive prompts.
+
+\paragraph{Co-Training Progression.} On Flux.2-Klein-4B:
+\begin{itemize}
+\item Phase~0 (SFT reasoner + base generator): 26.4 overall search-intensive.
+\item Phase~1 (SFT reasoner + DPO generator): 29.2 (+2.8).
+\item Phase~2 (RFT reasoner + DPO generator): \textbf{31.8} (+5.4 total).
+\item NoSearch quality \emph{improves}: 54.6 $\to$ 56.9 (+2.3), confirming the calibrated reasoner correctly abstains on easy prompts.
+\end{itemize}
+The co-trained 8B reasoner + 4B generator (31.8) \textbf{slightly exceeds} a trillion-parameter frontier VLM oracle (Gemini-3-Flash, 31.2) on the same generator, demonstrating that generator-specific calibration matches frontier-scale reasoning at a fraction of the cost.
+
+\paragraph{Generator-Specificity.} A reasoner calibrated to Klein-4B-DPO paired with the base Klein-4B achieves only 26.8 (vs.\ 31.8 with Klein-4B-DPO), confirming the search policy is a joint property of the generator-reasoner pair.
+
+\subsection{Limitations}
+
+\textbf{Single iteration}: Only one DPO + RFT cycle is run. Multi-round co-training with iterative boundary discovery could yield further gains but convergence behavior is unknown.
+
+\textbf{Generator scale}: Experiments use 4B and 7B generators. The 39-point gap to GPT-Image-2 (71.0) reflects capacity limits, not a framework limitation. How the internalizable/contextual split evolves across scales is unexplored.
+
+\textbf{TextualSearch remains hard}: Even the best co-trained system shows limited improvement on prompts requiring compositional contextual reasoning (typography, cultural composition), where neither parameterization nor single-pass search suffices.
+
+\textbf{Resolution}: All training and evaluation at 512$\times$512, limiting production applicability.
+
+\textbf{Search dependency}: Relies on Google Search API; the offline corpus partially mitigates but may not generalize to other search backends.
+
+\subsection{Relevance to Our Research}
+
+Although this paper operates in the visual generation domain, its core contribution---formalizing and co-evolving the \textbf{knowledge boundary} between what an agent can internalize and what it must retrieve---provides a powerful conceptual framework for our T3 (Continual Learning for Agents) research.
+
+\paragraph{Connection to Agent Memory.} Our Proactive Memory Agent review~\cite{proactivemem2026} identified \emph{behavioral state decay}---information present but behaviorally inactive during agent execution. The knowledge boundary formalization addresses the complementary problem at the \emph{system level}: partitioning the knowledge space into what can be embedded in parameters versus what must be maintained externally. The Gate-Filter-Integrate protocol is structurally analogous to the proactive memory agent's Bank-Update/Intervention-Decision workflow, but the key innovation is that the gating policy is \emph{jointly calibrated} with the underlying model rather than trained independently.
+
+\paragraph{Connection to Self-Evolving Agents.} Our SkillOS~\cite{skillos2026}, SkillsVote~\cite{skillsvote2026}, and SkillOpt~\cite{skillopt2026} reviews studied skill lifecycle management for evolving agents. The co-training framework extends this to the \emph{knowledge} lifecycle: Phase~1 ``teaches'' (internalizes stable knowledge), Phase~2 ``searches'' (calibrates retrieval for remaining gaps), and the boundary shifts with each cycle. This is the knowledge-level analogue of skill acquisition and retirement.
+
+\paragraph{Connection to Experience Internalization.} Our Rethinking Continual Experience Internalization review~\cite{rethinking2026} studied how agents internalize experience into parameters. The knowledge boundary formalization provides the missing theoretical framework: $\mathcal{K}_{\mathrm{int}}(\theta)$ precisely defines what \emph{can} be internalized, while $\mathcal{K}_{\mathrm{ctx}}(\theta)$ identifies knowledge that \emph{must} remain contextual---not because the agent hasn't seen it, but because it is inherently too dynamic or compositional for parameterization.
+
+\paragraph{Connection to Distillation (T1).} The DPO phase that expands the knowledge boundary is conceptually related to our Direct-OPD review~\cite{directopd2026}: both use preference-based training to improve a model using externally-provided signals (policy shifts vs.\ search-augmented references). The key difference is that Direct-OPD transfers the improvement direction from a teacher, while Phase~1 here discovers what the generator can absorb from its own best search-augmented outputs.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Knowledge Boundary Discovery for LLM Tool-Use Agents}
+
+\paragraph{Gap.} The knowledge boundary formalization applies to visual generators, but LLM agents face an analogous problem: they must decide when to rely on parametric knowledge versus when to invoke tools (search, code execution, API calls, databases). Current tool-use agents either always invoke tools (wasteful and sometimes harmful) or rely on heuristic triggers (fragile). No existing framework formalizes the \emph{agent-specific} boundary between internalizable knowledge and knowledge that must remain in tool context, nor provides a mechanism for this boundary to evolve as the agent improves through training.
+
+\paragraph{Approach.} Adapt the co-training framework to \textbf{LLM tool-use agents}:
+\begin{enumerate}
+\item \textbf{Define the LLM knowledge boundary}: For an LLM agent $\pi_\theta$ with tool access, partition the knowledge space into $\mathcal{K}_{\mathrm{int}}(\theta)$ (questions the agent answers correctly without tools) and $\mathcal{K}_{\mathrm{ctx}}(\theta)$ (questions requiring tool invocation). Use a quality threshold $\varepsilon$ on answer correctness to determine the partition.
+\item \textbf{Phase 1 (Teach)}: Run DPO or RLVR on the agent using tool-augmented trajectories as the training signal. This internalizes stable factual knowledge (e.g., well-known facts, common programming patterns) into the agent's parameters, expanding $\mathcal{K}_{\mathrm{int}}$.
+\item \textbf{Phase 2 (Search)}: Train a tool-use policy (when to call which tool) calibrated to the Phase~1 agent's shifted boundary via rejection-sampling FT. The policy learns to invoke tools only for knowledge in $\mathcal{K}_{\mathrm{ctx}}(\theta')$---post-cutoff events, rare APIs, evolving data.
+\end{enumerate}
+This eliminates unnecessary tool calls (reducing latency and cost) while ensuring tools fire precisely where parametric knowledge is insufficient.
+
+\paragraph{Feasibility.} The quality function $Q$ is straightforward for factual QA (answer correctness). The co-training loop reuses existing DPO/RFT infrastructure. Validation: apply to a Qwen3-8B agent on a mix of factual QA and tool-use tasks, comparing always-use-tools vs.\ never-use-tools vs.\ co-trained boundary-aware tool policy. Expected outcome: co-trained policy matches always-use-tools accuracy while reducing tool invocations by 40--60\%, with no degradation on questions the agent can answer parametrically.
+
+\subsection{Direction 2: Iterative Boundary Co-Evolution with Continual Learning}
+
+\paragraph{Gap.} The paper runs only a single DPO + RFT cycle, but the knowledge boundary is a moving target: as the generator improves, the reasoner must recalibrate, and as the reasoner recalibrates, the generator receives better-targeted references that enable further improvement. Our EvoArena review~\cite{evoarena2026} studied agent evolution in dynamic environments but lacked a formal framework for tracking how the agent's internal/external knowledge partition evolves over multiple cycles. The question is whether iterative co-training converges, diverges, or oscillates.
+
+\paragraph{Approach.} Design an \textbf{iterative boundary co-evolution} protocol:
+\begin{enumerate}
+\item Run $N$ cycles of Phase~1 (generator DPO) $\to$ Phase~2 (reasoner RFT), tracking $|\mathcal{K}_{\mathrm{int}}(\theta^{(n)})|$ at each cycle via the quality threshold $\varepsilon$.
+\item \textbf{Convergence monitoring}: Plot the boundary shift $|\mathcal{K}_{\mathrm{int}}(\theta^{(n)})| - |\mathcal{K}_{\mathrm{int}}(\theta^{(n-1)})|$ per cycle. If the shift approaches zero, the boundary has stabilized; if it oscillates, damping mechanisms (e.g., lower DPO learning rate or stricter RFT filtering) are needed.
+\item \textbf{Continual knowledge injection}: Between cycles, introduce new knowledge units (post-cutoff entities, trending topics) into the training set. This simulates the real-world scenario where the knowledge space $\mathcal{K}$ itself grows over time, testing whether the co-training framework handles an expanding universe.
+\item \textbf{Forgetting detection}: Monitor whether previously internalized knowledge ($\mathcal{K}_{\mathrm{int}}$ from early cycles) regresses to $\mathcal{K}_{\mathrm{ctx}}$ in later cycles, connecting to our Geometry Conflict review~\cite{geomconflict2026} on gradient interference during continual post-training.
+\end{enumerate}
+
+\paragraph{Feasibility.} Each cycle costs ${\sim}$256 GPU-hours; 5 cycles would cost ${\sim}$1280 GPU-hours, feasible on a small cluster. The boundary size $|\mathcal{K}_{\mathrm{int}}|$ is measurable by evaluating the no-search quality gap on held-out prompts. Validation: run 5 co-training cycles on Klein-4B, introducing 500 new entities per cycle, tracking boundary size, overall quality, and forgetting rate. Expected outcome: monotonic boundary expansion for 3--4 cycles before diminishing returns, with $<$5\% forgetting of previously internalized knowledge per cycle.
+
+\subsection{Direction 3: Reward Shaping from Boundary-Aware Search for LLM RL}
+
+\paragraph{Gap.} Our SAO review~\cite{sao2026} showed that dense per-turn rewards dramatically accelerate agentic RL. The knowledge boundary framework provides a natural source of dense reward: whether the agent \emph{needed} to search (and whether the search actually helped) is a per-decision signal about the agent's knowledge adequacy. No existing RL framework uses search necessity as a reward signal for improving the base model.
+
+\paragraph{Approach.} Use the search-reasoner's decisions as \textbf{dense reward shaping} for LLM agent RL:
+\begin{enumerate}
+\item \textbf{Search necessity as negative reward}: When the reasoner determines search is needed (knowledge gap rated critical/important), assign a small negative reward $r_{\mathrm{shape}} = -\delta$ at that decision point. This signals that the agent's parametric knowledge was insufficient.
+\item \textbf{Correct autonomy as positive reward}: When the reasoner determines no search is needed and the agent produces a correct answer, assign $r_{\mathrm{shape}} = +\delta$. This incentivizes knowledge internalization.
+\item \textbf{Boundary-aware RL}: Train the agent with combined reward $R = R_{\mathrm{task}} + \lambda \sum_t r_{\mathrm{shape}}(t)$, where the shaping signal comes from the co-trained reasoner's gating decisions.
+\item \textbf{Curriculum via boundary expansion}: As the agent internalizes more knowledge (boundary expands), fewer search-necessity signals fire, naturally reducing the shaping contribution and transitioning to autonomous operation.
+\end{enumerate}
+This connects to our Proactive Memory review~\cite{proactivemem2026}: the memory agent's intervention decisions served as shaping signals for action agent calibration; here, the search-reasoner's gating decisions serve as shaping signals for knowledge internalization.
+
+\paragraph{Feasibility.} The gating decision is already computed (Stage~1 of the protocol). The shaped reward adds no inference cost. Validation: apply boundary-aware RL to a Qwen3-8B agent on factual QA tasks, comparing standard RLVR vs.\ boundary-shaped RLVR. Expected outcome: boundary-shaped RL achieves 2--3$\times$ faster convergence and 5--8\% higher final accuracy on knowledge-intensive questions by providing dense per-decision feedback about which knowledge gaps the agent should prioritize internalizing.
+
+\section{Conclusion}
+
+This paper's central contribution transcends its visual generation setting: the \textbf{knowledge boundary formalization}---the generator-specific, evolving partition between internalizable and contextual knowledge---provides a principled framework for a problem that pervades all agent systems. The co-training recipe (teach what can be internalized, then calibrate search for the rest) is a minimal instantiation of what we consider the fundamental loop for continual agent improvement: expand parametric knowledge $\to$ recalibrate tool/retrieval policies $\to$ repeat. The finding that an 8B reasoner co-trained with a 4B generator matches a trillion-parameter frontier oracle demonstrates that generator-specific calibration outweighs raw model scale---a result with direct implications for our LLM agent research. For our program, this paper completes a conceptual triad: our training-time methods prevent knowledge from being \emph{lost} (continual learning prevents forgetting), our proactive memory agent prevents knowledge from being \emph{inactive} (intervention prevents behavioral decay), and the knowledge boundary framework determines what knowledge \emph{should} be internalized versus externalized in the first place. The three follow-up directions---LLM tool-use boundary discovery, iterative boundary co-evolution, and boundary-aware reward shaping---position this formalization as a unifying principle across our T1 (distillation), T2 (RL), and T3 (continual learning) research threads.
+
+\begin{thebibliography}{99}
+\bibitem{wang2026searchgen} Wang, H., Feng, W., Yu, J., et al. ``Search Beyond What Can Be Taught: Evolving the Knowledge Boundary in Agentic Visual Generation.'' \emph{arXiv preprint arXiv:2607.05382}, 2026.
+\bibitem{proactivemem2026} Wu, Y., et al. ``Remember When It Matters: Proactive Memory Agent for Long-Horizon Agents.'' \emph{arXiv preprint arXiv:2607.08716}, 2026.
+\bibitem{skillos2026} SkillOS Authors. ``SkillOS: Learning Skill Curation for Self-Evolving Agents.'' \emph{arXiv preprint arXiv:2605.06614}, 2026.
+\bibitem{skillsvote2026} SkillsVote Authors. ``SkillsVote: Lifecycle Governance of Agent Skills from Collection, Recommendation to Evolution.'' \emph{arXiv preprint arXiv:2605.18401}, 2026.
+\bibitem{skillopt2026} SkillOpt Authors. ``SkillOpt: Executive Strategy for Self-Evolving Agent Skills.'' \emph{arXiv preprint arXiv:2605.23904}, 2026.
+\bibitem{rethinking2026} Rethinking Authors. ``Rethinking Continual Experience Internalization for Self-Evolving LLM Agents.'' \emph{arXiv preprint arXiv:2606.04703}, 2026.
+\bibitem{directopd2026} Feng, S., et al. ``Weak-to-Strong Generalization via Direct On-Policy Distillation.'' \emph{arXiv preprint arXiv:2607.05394}, 2026.
+\bibitem{evoarena2026} EvoArena Authors. ``EvoArena: Tracking Memory Evolution for Robust LLM Agents in Dynamic Environments.'' \emph{arXiv preprint arXiv:2606.13681}, 2026.
+\bibitem{geomconflict2026} Geometry Conflict Authors. ``Geometry Conflict: Explaining and Controlling Forgetting in LLM Continual Post-Training.'' \emph{arXiv preprint arXiv:2605.09608}, 2026.
+\bibitem{sao2026} Hou, Z., et al. ``Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning.'' \emph{arXiv preprint arXiv:2607.07508}, 2026.
+\end{thebibliography}
+
+\end{document}
