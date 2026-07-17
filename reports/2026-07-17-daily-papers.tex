@@ -1,0 +1,186 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Ring-Zero --- Scaling Zero RL to a Trillion\\Parameters for Emergent Reasoning}
+\author{Internbot --- Automated Research Summary}
+\date{July 17, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Tang et al.~\cite{tang2026ringzero} investigate the fundamental question: \textbf{how do the training dynamics and emergent capabilities of ``zero RL'' evolve when applied at the trillion-parameter scale?} Zero RL refers to RLVR applied directly to a pretrained base model, bypassing supervised fine-tuning on human-annotated chain-of-thought (CoT) data entirely. While pioneered by DeepSeek-R1, prior zero RL work has been restricted to models under 100B parameters.
+
+\paragraph{Three Deficiencies of Naive Zero RL.}
+\begin{enumerate}
+\item \textbf{Poor readability}: Generated CoT traces lack logical formatting, step structure, and phase transitions---presenting as unstructured token streams.
+\item \textbf{Length inertia}: Standard RLVR algorithms (GRPO) use a token-level loss that sums gradient contributions without normalizing by response length, implicitly assigning higher cumulative credit to longer sequences. The model discovers a ``lazy shortcut''---generating more tokens becomes mathematically safer regardless of reasoning value. Even for problems solved correctly on the first attempt, response length expands unconditionally.
+\item \textbf{No adaptive reasoning depth}: A single fixed response budget wastes compute on easy problems or starves hard ones.
+\end{enumerate}
+
+\paragraph{High-Quality CoT Definition.} Beyond final-answer correctness, the paper requires: (1)~\emph{comprehensibility}---transparent logical structure with explicit causal dependencies; (2)~\emph{reproducibility}---generalizable strategies transferable through distillation; (3)~\emph{efficiency}---concise paths without redundant derivations.
+
+\subsection{Method}
+
+The pipeline consists of four sequential phases applied to the Ling-2.5-1T-Base model (1 trillion parameters, 63B activated, MoE architecture with hybrid MLA + Lightning Attention layers).
+
+\paragraph{Phase 1: First Stage RL (Reasoning Elicitation).} Uses clipped importance-sampling policy gradient with a \textbf{token-level loss} to aggressively bootstrap reasoning from the base model:
+\[
+J(\theta) = \mathbb{E}_{q \sim \mathcal{D},\, \{o_i\} \sim \pi_S}\!\left[\sum_{i=1}^{G}\sum_{t=1}^{|o_i|} \mathrm{sg}(\hat{\rho}_{i,t}) \cdot \hat{A}_{i,t} \cdot \log \pi_M^\theta(o_{i,t} \mid q, o_{i,<t})\right]
+\]
+where $\pi_S$ is the inference engine (SGLang), $\pi_M^\theta$ is the training engine (Megatron), $\hat{A}_{i,t}$ is the GRPO-style group-normalized advantage, and $\mathrm{sg}(\cdot)$ denotes stop-gradient on the clipped ratio. The token-level formulation (no $1/|o_i|$ normalization) deliberately favors longer responses to incentivize reasoning chain growth from scratch.
+
+\textbf{Training-inference ratio correction}: A critical innovation addresses the numerical mismatch between SGLang (inference) and Megatron (training). The importance ratio uses training-engine logits as the numerator:
+\[
+\rho_{i,t} = \frac{\pi_M^\theta(o_{i,t} \mid q, o_{i,<t})}{\pi_S^{\theta_{\mathrm{old}}}(o_{i,t} \mid q, o_{i,<t})}, \quad \hat{\rho}_{i,t} = \mathrm{clip}(\rho_{i,t},\, -\infty,\, 5.0)
+\]
+This eliminates phantom divergence from floating-point discrepancies. Standard approaches (using only inference-engine logits) cause training collapse at ${\sim}$800 steps; this fix provides perfect stability.
+
+\textbf{KL penalty}: $\mathcal{L}_{\mathrm{KL}} = \beta \cdot D_{\mathrm{KL}}(\pi_M^\theta \| \pi_{\mathrm{ref}})$ with $\beta = 10^{-4}$ (K3 divergence). The reference model is \textbf{updated every 400 steps} to prevent staleness. Combined objective: $\mathcal{L} = -J(\theta) + \beta \cdot \mathcal{L}_{\mathrm{KL}}$.
+
+\textbf{Curriculum}: Context window progressively doubles from 4k to 64k every 800 steps.
+
+\paragraph{Phase 2: Self-Distillation (Compression).} After Phase~1, CoT traces are excessively verbose and the training-inference gap has accumulated to dangerous levels. The solution: (1)~select the \emph{shortest correct} rollout per query from the Phase~1 expert policy; (2)~apply self-evaluation filtering to trim remaining redundancy; (3)~fine-tune the \emph{original base model} (not the RL-trained model) on these compressed traces via standard SFT (3 epochs, LR $7 \times 10^{-5}$, 64k sequence length). This simultaneously compresses reasoning and wipes accumulated numerical errors.
+
+\paragraph{Phase 3: Second Stage RL (Sustained Optimization).} The critical change: switch from token-level to \textbf{sample-level loss} with $1/|o_i|$ normalization:
+\[
+\mathcal{L}_{\mathrm{II}}(\theta) = -\mathbb{E}\!\left[\sum_{i=1}^{G} \frac{1}{|o_i|}\sum_{t=1}^{|o_i|} \mathrm{sg}(\hat{\rho}_{i,t}) \cdot \hat{A}_{i,t} \cdot \log \pi_\theta(o_{i,t} \mid q, o_{i,<t})\right]
+\]
+This keeps gradient magnitude independent of output length, preventing the length inertia observed in Phase~1. The KL penalty is \textbf{removed}---the distilled model provides a strong starting point, making KL regularization unnecessarily restrictive.
+
+\paragraph{Phase 4: Third Stage RL (Adaptive Reasoning Depth).} Questions are partitioned into three difficulty tiers $\mathcal{T} = \{T_l, T_m, T_h\}$ with budgets 4k, 16k, and 64k tokens respectively. Each tier has a specific system prompt $p_k$ signaling the available reasoning budget. Joint training across tiers teaches \emph{cognitive routing}---concise responses for trivial problems, extended CoT for complex ones.
+
+\paragraph{Mixed-Precision Control.} The exponential function in softmax amplifies small numerical errors. Solution: compute attention softmax and LM head in \textbf{FP32} while keeping the model body in BF16. This eliminates sudden loss spikes at the trillion-parameter scale.
+
+\paragraph{Training Setup.} 320$\times$H200 GPUs, batch size 512$\to$256, LR $2 \times 10^{-6}$ (constant), 16 rollouts per question, temperature 1.0, IS upper clip 5.0.
+
+\subsection{Results}
+
+\paragraph{Training Progression on AIME 2026.}
+\begin{itemize}
+\item First Stage RL: 84.2\%
+\item Self-Distillation: 88.1\% (+3.9)
+\item Second Stage RL: 92.5\% (+4.4)
+\item Second Stage RL + Yarn=2: \textbf{93.2\%} (+0.7)
+\end{itemize}
+Each phase yields measurable improvement, with Second Stage RL providing the largest single-phase gain.
+
+\paragraph{Adaptive Tiers (Third Stage).} Low tier (4k budget): 68.8\% AIME'26 using only 2,353 tokens on average. Medium tier (16k): 90.8\%. High tier (128k): 91.4\%---slightly below the Second Stage peak (93.2\%) due to negative transfer from multi-tier joint training.
+
+\paragraph{Scale Effects.} Under identical training, the 1T model achieves 84.2\% on AIME'26 at 3,600 steps versus 65.3\% for the 104B model at 5,200 steps---a 19-point advantage with fewer training steps, demonstrating both higher ceiling and superior sample efficiency.
+
+\paragraph{CoT Quality.}
+\begin{itemize}
+\item \textbf{Comprehensibility}: Dominant win rates in pairwise LLM-as-a-Judge comparisons against GLM-5.1, Kimi-K2.6, MiniMax-M2.7, and Qwen3.5-397B across all 90 AIME problems.
+\item \textbf{Reproducibility}: Distilling Ring-Zero traces (100K samples) into Qwen2.5-32B yields 78.4\% vs.\ 72.6\% from DeepSeek-R1 traces (800K samples)---\textbf{+5.8 points with 1/8th the data}.
+\item \textbf{Efficiency}: 6,368 average tokens on correctly-solved AIME problems---\textbf{less than half} of competing models.
+\end{itemize}
+
+\paragraph{Discovery vs.\ Sharpening.} Pass@1024 increases during early training then plateaus, while pass@1 continues climbing. This reveals two sequential RL phases: \emph{discovery} (expanding the reasoning boundary by unlocking dormant pretraining patterns) followed by \emph{sharpening} (refining the output distribution within the established boundary).
+
+\paragraph{Frontier Comparison.} Ring-Zero (93.2\% AIME'26) trails GPT-5.5 (98.3\%) and Gemini 3.1 Pro (98.2\%) by ${\sim}$5 points. On IMOAnswerBench, the gap widens to ${\sim}$16 points (75.5\% vs.\ 91.4\%). These frontier models use SFT, RLHF, and other training beyond pure zero RL.
+
+\subsection{Limitations}
+
+\textbf{Math-only evaluation}: All seven benchmarks are purely mathematical reasoning. No evaluation on code, scientific reasoning, or general tasks.
+
+\textbf{Pretrained priors as rigid ceiling}: Zero RL can only sharpen knowledge already embedded during pretraining. If specific mathematical concepts are absent from pretraining data, RL cannot invent them.
+
+\textbf{Negative transfer in multi-tier}: Third Stage RL's High mode (91.4\%) drops below Second Stage peak (93.2\%) due to interference from Low/Medium training signals.
+
+\textbf{Length control remains heuristic}: The two-phase approach (self-distillation compression $\to$ sample-level loss) is acknowledged as a ``heuristic workaround.'' A unified RL objective jointly optimizing quality and efficiency remains open.
+
+\textbf{Context anxiety}: The model abandons rigorous reasoning for heuristic guesses when approaching its token budget---a functional bug framed as an emergent behavior.
+
+\textbf{Compute accessibility}: Training on 320$\times$H200 GPUs with a trillion parameters is infeasible for most research groups.
+
+\subsection{Relevance to Our Research}
+
+This paper provides the most comprehensive empirical study of RL scaling dynamics for our T2 (RL/Reward Modeling) thread, revealing principles that govern all our reviewed RL methods at sufficient scale.
+
+\paragraph{Connection to RLVR Foundations.} Our BandPO review~\cite{bandpo2026} analyzed trust region mechanisms in LLM RL; Ring-Zero's transition from clipped IS with KL penalty (Phase~1) to sample-level loss without KL (Phase~3) demonstrates that the optimal RL configuration \emph{changes during training}---stabilization mechanisms essential for bootstrapping become harmful for sustained optimization. Our MIPU review~\cite{mirage2026} showed that the real objective is monotonic inference policies; Ring-Zero's discovery-then-sharpening analysis provides the mechanistic explanation---discovery expands the reasoning boundary (pass@1024 rises) while sharpening aligns the output distribution (pass@1 catches up).
+
+\paragraph{Connection to Token-Level Credit Assignment.} Our DelTA review~\cite{delta2026} proposed discriminative token credit assignment for RLVR. Ring-Zero's length inertia analysis reveals \emph{why} token-level credit matters: without $1/|o_i|$ normalization, the model exploits length as a reward hack. The ablation showing token-level loss promotes length growth while sample-level loss keeps it flat directly validates DelTA's premise that per-token signal quality determines RL efficiency.
+
+\paragraph{Connection to Agentic RL.} Our SAO review~\cite{sao2026} demonstrated single-rollout async RL for agents with 97.3\% AIME2025. Ring-Zero's training-inference ratio correction---using training-engine logits as the IS numerator---addresses the same fundamental problem SAO's frozen-attention value model addresses: ensuring the optimization signal accurately reflects the current policy rather than a stale or numerically divergent estimate.
+
+\paragraph{Connection to Distillation (T1).} The self-distillation phase (Phase~2) connects to our extensive OPD corpus. Ring-Zero distills the expert's \emph{shortest correct} rollout into the \emph{base model}---this is conceptually similar to Direct-OPD's~\cite{directopd2026} transfer of the RL-induced improvement direction. The remarkable distillation efficiency (100K samples outperforming 800K from DeepSeek-R1) validates our thesis that CoT quality, not quantity, determines distillation effectiveness.
+
+\paragraph{Emergent Behaviors.} The five emergent behaviors at 1T scale---particularly self-verification and parallel reasoning---directly connect to our Proactive Memory review~\cite{proactivemem2026}. At sufficient scale, the model spontaneously develops the self-monitoring capabilities that at smaller scales require explicit external modules (memory agents, verification pipelines). This suggests that some of our T3 research directions (proactive intervention, self-verification) may become less relevant as base model scale increases, shifting the research frontier toward methods that complement rather than substitute for emergent capabilities.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Unified Length-Quality RL Objective via Proximal Efficiency Rewards}
+
+\paragraph{Gap.} Ring-Zero acknowledges that its length control is a ``heuristic workaround''---the two-phase approach (self-distillation compression followed by sample-level loss) is effective but not principled. The token-level loss is needed for bootstrapping (Phase~1) but causes length inertia; the sample-level loss prevents growth but cannot actively \emph{compress}. No existing objective jointly optimizes reasoning quality and token efficiency within a single RL framework.
+
+\paragraph{Approach.} Design a \textbf{length-aware RL objective} that integrates efficiency into the reward:
+\begin{enumerate}
+\item \textbf{Proximal efficiency reward}: Augment the accuracy reward with a length penalty: $r_i = r_{\mathrm{acc},i} - \lambda \cdot \max(0, |o_i| - |o_i^*|) / |o_i|$, where $|o_i^*|$ is the length of the shortest correct solution in the rollout group. This penalizes responses longer than the empirical minimum while leaving short correct solutions unpenalized.
+\item \textbf{Curriculum $\lambda$ schedule}: Start with $\lambda = 0$ (pure accuracy optimization, equivalent to Phase~1) and gradually increase $\lambda$ as training progresses (transitioning to efficiency-aware optimization). This eliminates the need for a separate self-distillation phase.
+\item \textbf{Adaptive normalization}: Use a hybrid loss that interpolates between token-level and sample-level normalization based on training progress: $w(t) = (1 - \alpha_t) \cdot 1 + \alpha_t \cdot (1/|o_i|)$, where $\alpha_t$ increases from 0 to 1 during training.
+\end{enumerate}
+This unifies Ring-Zero's four phases into a single continuous RL objective with scheduled hyperparameters.
+
+\paragraph{Feasibility.} The proximal efficiency reward uses only within-group statistics (already computed for GRPO). The $\lambda$ schedule is a single hyperparameter. Validation: apply to Ling-2.5-flash-Base (104B), comparing Ring-Zero's four-phase pipeline vs.\ the unified objective on AIME 2024/2025 accuracy and average token count. Expected outcome: comparable accuracy ($\pm$1\%) with 30--50\% fewer tokens and no separate self-distillation phase.
+
+\subsection{Direction 2: Discovery-Sharpening Phase Detection for Adaptive RL}
+
+\paragraph{Gap.} Ring-Zero identifies two sequential RL phases---discovery (pass@1024 rises) and sharpening (pass@1024 plateaus, pass@1 climbs)---but the transition is observed post-hoc. The training pipeline does not adapt to these phases in real time. Our DVAO review~\cite{dvao2026} showed that adaptive advantage optimization improves multi-reward RL; the discovery-sharpening transition represents a fundamental shift in what RL is optimizing (boundary expansion vs.\ distribution refinement) that should trigger different training strategies.
+
+\paragraph{Approach.} Design a \textbf{phase-aware adaptive RL controller}:
+\begin{enumerate}
+\item \textbf{Phase detection}: Monitor the gap $\Delta_t = \mathrm{pass@}k_t - \mathrm{pass@}k_{t-\tau}$ using periodic evaluation ($k = 64$ as a practical proxy for pass@1024). When $\Delta_t < \varepsilon$ for $n$ consecutive checkpoints, declare the transition to sharpening phase.
+\item \textbf{Discovery-phase strategy}: Use token-level loss with KL penalty (Ring-Zero Phase~1 configuration). Prioritize diversity---higher temperature, larger rollout groups, broader curriculum.
+\item \textbf{Sharpening-phase strategy}: Switch to sample-level loss without KL (Ring-Zero Phase~3). Prioritize consistency---lower temperature, focused data curriculum on problems with high pass@$k$ but low pass@1 (the model ``knows'' the solution but doesn't reliably produce it).
+\item \textbf{Automatic self-distillation trigger}: If the training-inference ratio divergence exceeds a threshold during discovery phase, automatically trigger a self-distillation reset without waiting for a fixed schedule.
+\end{enumerate}
+This makes Ring-Zero's manually-sequenced phases into a self-regulating loop.
+
+\paragraph{Feasibility.} Phase detection requires periodic evaluation runs (every 100 steps, ${\sim}$1\% overhead). The strategy switching reuses existing hyperparameter configurations. Validation: compare Ring-Zero's fixed four-phase pipeline vs.\ adaptive phase detection on the 104B model. Expected outcome: 10--20\% fewer total training steps to reach the same accuracy, because the discovery$\to$sharpening transition is detected and acted upon in real time rather than at a fixed schedule.
+
+\subsection{Direction 3: Zero RL for Diffusion LLMs via Score-Level Reward Bootstrapping}
+
+\paragraph{Gap.} Ring-Zero demonstrates that zero RL can bootstrap reasoning from a pretrained AR base model without any SFT. Our T4 (Diffusion LLM) thread has studied RL for diffusion models (V-GRPO~\cite{vgrpo2026}, Flow-DPPO~\cite{flowdppo2026}, NormGuard~\cite{normguard2026}), but all start from models that have already been trained for generation. No one has attempted \emph{zero RL} for diffusion LLMs---bootstrapping reasoning capabilities in a discrete diffusion model directly from a pretrained masked language model, without any generation-specific fine-tuning.
+
+\paragraph{Approach.} Adapt Ring-Zero's pipeline to \textbf{discrete diffusion LLMs}:
+\begin{enumerate}
+\item \textbf{Score-level bootstrapping}: In discrete diffusion, the ``policy'' is the denoising score function $s_\theta(x_t, t)$. Define a score-level reward analogous to Ring-Zero's token-level reward: at each denoising step, evaluate whether the partially denoised output is moving toward a correct answer (using the verifiable reward on the fully denoised completion). Use this as a dense per-step reward signal.
+\item \textbf{Discovery phase for diffusion}: Use a step-level loss (analogous to Ring-Zero's token-level loss) to incentivize the diffusion model to produce \emph{longer denoising trajectories}---more refinement steps---which corresponds to deeper reasoning in the diffusion paradigm.
+\item \textbf{Sharpening phase}: Switch to trajectory-level loss (analogous to sample-level loss) with $1/T$ normalization to prevent unnecessary denoising steps, producing efficient generation.
+\item \textbf{Training-inference mismatch}: Apply Ring-Zero's ratio correction (training-engine scores as numerator) to address the analogous precision mismatch between training and inference in diffusion sampling.
+\end{enumerate}
+This would establish the first zero RL pipeline for diffusion LLMs, testing whether the discovery-sharpening dynamics and emergent behaviors generalize beyond the autoregressive paradigm.
+
+\paragraph{Feasibility.} The score-level reward computation reuses existing denoising forward passes. The step-level vs.\ trajectory-level loss switch is a direct analogue of Ring-Zero's token vs.\ sample normalization. Validation: apply zero RL to a pretrained MDLM~\cite{sumi2026} (without any generation fine-tuning) on math tasks, tracking whether reasoning emerges through denoising refinement. Expected outcome: zero RL bootstraps basic reasoning in diffusion LLMs, reaching 60--70\% of AR model performance on AIME 2024, with discovery-sharpening dynamics visible in the per-step quality trajectory.
+
+\section{Conclusion}
+
+Ring-Zero's central contribution is demonstrating that the trillion-parameter scale qualitatively changes zero RL dynamics: behaviors that require explicit engineering at 104B---structured formatting, self-verification, parallel reasoning---emerge spontaneously at 1T, validating the ``bitter lesson'' for LLM reasoning. The four-phase pipeline (token-level RL $\to$ self-distillation $\to$ sample-level RL $\to$ tier-based RL) provides a practical recipe, but the more enduring insight is the \emph{discovery-sharpening} decomposition of RL training: early RL expands the reasoning boundary by unlocking dormant pretraining patterns, while later RL refines the output distribution within that boundary. For our research program, this decomposition recontextualizes all our T2 reviews---the various RL innovations we've studied (trust regions, token-level credit, importance sampling corrections) are all operating within either the discovery or sharpening phase, and the optimal strategy differs fundamentally between them. The three follow-up directions---unified length-quality objectives, adaptive phase detection, and zero RL for diffusion LLMs---aim to make these phase dynamics explicit, automatic, and generalizable across architectures.
+
+\begin{thebibliography}{99}
+\bibitem{tang2026ringzero} Tang, X., Cao, G., Liu, Y., et al. ``Ring-Zero: Scaling Zero RL to a Trillion Parameters for Emergent Reasoning.'' \emph{arXiv preprint arXiv:2607.12395}, 2026.
+\bibitem{bandpo2026} BandPO Authors. ``BandPO: Bridging Trust Regions and Ratio Clipping via Probability-Aware Bounds for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2603.04918}, 2026.
+\bibitem{mirage2026} Liang, J., et al. ``The Mirage of Optimizing Training Policies: Monotonic Inference Policies as the Real Objective for LLM Reinforcement Learning.'' \emph{arXiv preprint arXiv:2606.29526}, 2026.
+\bibitem{delta2026} DelTA Authors. ``DelTA: Discriminative Token Credit Assignment for Reinforcement Learning from Verifiable Rewards.'' \emph{arXiv preprint arXiv:2605.21467}, 2026.
+\bibitem{sao2026} Hou, Z., et al. ``Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning.'' \emph{arXiv preprint arXiv:2607.07508}, 2026.
+\bibitem{directopd2026} Feng, S., et al. ``Weak-to-Strong Generalization via Direct On-Policy Distillation.'' \emph{arXiv preprint arXiv:2607.05394}, 2026.
+\bibitem{proactivemem2026} Wu, Y., et al. ``Remember When It Matters: Proactive Memory Agent for Long-Horizon Agents.'' \emph{arXiv preprint arXiv:2607.08716}, 2026.
+\bibitem{dvao2026} DVAO Authors. ``DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.'' \emph{arXiv preprint arXiv:2605.25604}, 2026.
+\bibitem{vgrpo2026} V-GRPO Authors. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{flowdppo2026} Flow-DPPO Authors. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{normguard2026} NormGuard Authors. ``NormGuard: Reward-Preserving Norm Constraints in Flow-Matching Reinforcement Learning.'' \emph{arXiv preprint arXiv:2606.27771}, 2026.
+\bibitem{sumi2026} Sumi Authors. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\end{thebibliography}
+
+\end{document}
