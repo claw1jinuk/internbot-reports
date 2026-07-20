@@ -1,0 +1,181 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: SEED --- Self-Evolving On-Policy Distillation\\for Agentic Reinforcement Learning}
+\author{Internbot --- Automated Research Summary}
+\date{July 18, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Wu et al.~\cite{wu2026seed} address the \textbf{supervision gap} in outcome-based RL for LLM agents: sparse, trajectory-level rewards (binary success/failure) provide no guidance about which intermediate actions, observations, or tool calls should be reinforced or corrected. In long-horizon agentic tasks involving multi-turn interaction, a single scalar reward cannot tell the agent where it went right or wrong.
+
+\paragraph{Why Existing Approaches Fall Short.} Standard GRPO broadcasts one trajectory-level advantage to all valid action tokens, providing no decision-level credit assignment. A failed trajectory may contain useful partial behaviors punished uniformly; a successful trajectory may contain reusable strategies never identified. Static skill libraries (Trace2Skill, SkillOS) freeze supervision at collection time and cannot adapt to the policy's evolving trajectory distribution. One-time distillation from a fixed teacher becomes stale as the student improves.
+
+\paragraph{Key Insight.} Completed trajectories contain rich \emph{hindsight information} unavailable during online decision-making. Once an episode terminates, the full interaction history reveals which subgoals were achieved, where the agent deviated, and which behavioral patterns transfer. Effective hindsight supervision must be (1)~\emph{on-policy}---derived from the current policy's own trajectories, (2)~\emph{dense}---guiding individual action tokens, not just the final outcome, and (3)~\emph{self-evolving}---advancing with the policy rather than fixed to a static teacher.
+
+\subsection{Method}
+
+SEED is a two-stage framework where the \emph{same model} serves as both the agent (actor) and the trajectory analyzer, creating a self-evolving loop.
+
+\paragraph{Stage 1: Hindsight Skill SFT.} Initialize the policy with the ability to analyze completed trajectories and produce natural-language ``hindsight skills''---reusable behavioral guidance extracted from full episodes.
+\begin{enumerate}
+\item \textbf{Trajectory collection}: For $M = 180$ training tasks, collect $K_0 = 8$ rollout trajectories per task using the base policy $\pi_{\theta_{\mathrm{base}}}$, yielding 1,440 trajectories.
+\item \textbf{Skill annotation}: An external analyzer $\mathcal{A}_{\mathrm{ext}}$ (GLM-5.2) produces a hindsight-skill annotation $s_\tau = \mathcal{A}_{\mathrm{ext}}(\tau)$ for each trajectory. For successes, $s_\tau$ captures reusable strategies; for failures, corrective guidance.
+\item \textbf{SFT}: Fine-tune the policy with standard autoregressive NLL on the annotated corpus (3 epochs). The resulting checkpoint $\theta_{\mathrm{sft}}$ initializes both the RL actor and the synchronized trajectory analyzer.
+\end{enumerate}
+
+\paragraph{Stage 2: Self-Evolving On-Policy Distillation.} At each update iteration, freeze the current policy as $\pi_{\theta_{\mathrm{old}}}$, which serves as both the trajectory collector and the hindsight analyzer.
+
+\textbf{On-policy skill generation}: For each task $q$, sample $N = 8$ trajectories from $\pi_{\theta_{\mathrm{old}}}$. The analyzer (same model) generates hindsight skills: $s_q^{(n)} = \mathcal{A}_{\theta_{\mathrm{old}}}(\tau_q^{(n)})$. Refreshing $\theta_{\mathrm{old}}$ changes \emph{both} the trajectories encountered \emph{and} the analysis quality---the self-evolving loop.
+
+\textbf{Paired contextual re-scoring}: For each action token $a_{q,n,t,l}$ in trajectory $\tau_q^{(n)}$, compute two log-probabilities through the \emph{same} trainable model $\pi_\theta$ but with different input contexts:
+\begin{itemize}
+\item \textbf{Teacher branch} (skill-conditioned): $\ell^{\mathrm{skill}} = \log \pi_\theta(a_{q,n,t,l} \mid \tilde{h}, a_{q,n,t,<l})$ where $\tilde{h} = \mathcal{H}(h_{q,n,t}, s_q^{(n)})$ prepends the hindsight skill.
+\item \textbf{Student branch} (ordinary): $\ell^{\theta} = \log \pi_\theta(a_{q,n,t,l} \mid h_{q,n,t}, a_{q,n,t,<l})$ without skill context.
+\end{itemize}
+Gradients flow exclusively through the student branch.
+
+\textbf{Confidence gate}: The detached skill-induced log-probability shift drives a sigmoid gate:
+\[
+\Delta = \mathrm{sg}[\ell^{\mathrm{skill}} - \ell^{\theta}], \quad g = \sigma(\beta_{\mathrm{opd}} \cdot \Delta)
+\]
+where $\beta_{\mathrm{opd}} = 5.0$ controls gate sharpness. Positive shifts (skill supports the token) yield larger gates; negative shifts attenuate supervision. This prevents noisy or incorrect skill annotations from corrupting the policy.
+
+\textbf{OPD loss}:
+\[
+\mathcal{L}_{\mathrm{opd}}(\theta) = \mathbb{E}_{q,n,t,l}\!\left[m \cdot g \cdot \left(\mathrm{sg}[\ell^{\mathrm{skill}}] - \ell^{\theta}\right)\right]
+\]
+where $m$ is a valid-token mask. The gradient simplifies to gate-weighted negative log-likelihood: $\nabla_\theta \mathcal{L}_{\mathrm{opd}} = -\mathbb{E}[m \cdot g \cdot \nabla_\theta \ell^{\theta}]$.
+
+\textbf{RL loss (GRPO)}: Standard group-relative advantage $\hat{A}_{q,n}^{\mathrm{rl}} = (R(\tau_q^{(n)}) - \mu_q)/(\sigma_q + \varepsilon)$ with clipped PPO surrogate and KL penalty ($\beta_{\mathrm{KL}} = 0.01$).
+
+\textbf{Joint objective}:
+\[
+\mathcal{L}_{\mathrm{SEED}}(\theta) = \mathcal{L}_{\mathrm{rl}}(\theta) + \lambda_{\mathrm{opd}} \cdot \mathcal{L}_{\mathrm{opd}}(\theta)
+\]
+with $\lambda_{\mathrm{opd}} = 0.01$. At inference time, skills are removed entirely---the agent acts only from ordinary interaction history with zero additional overhead.
+
+\paragraph{Training Setup.} 150 steps, LR $10^{-6}$, PPO clip 0.2, 8$\times$A800 GPUs.
+
+\subsection{Results}
+
+\paragraph{Main Results.} Across three model scales and five benchmarks:
+\begin{itemize}
+\item \textbf{ALFWorld} (embodied control): Qwen2.5-3B: SEED 91.8\% vs.\ GRPO 75.0\% (+16.8). Qwen3-1.7B: SEED 92.0\% vs.\ GRPO 46.1\% (\textbf{+45.9}). Qwen2.5-7B: SEED 96.1\% vs.\ GRPO 81.2\% (+14.9).
+\item \textbf{WebShop} (web navigation): Qwen2.5-3B success rate: SEED 78.9\% vs.\ GRPO 63.3\% (+15.6). Qwen3-1.7B: SEED 77.3\% vs.\ GRPO 38.3\% (+39.0).
+\item \textbf{Search QA}: Qwen2.5-3B: SEED 45.7\% vs.\ GRPO 36.4\% (+9.3).
+\end{itemize}
+
+\paragraph{Sample Efficiency.} At 60\% of training data, SEED achieves 80.7\% on ALFWorld, exceeding GRPO's 75.0\% at 100\% data. At 40\% data, SEED (58.9\%) matches GRPO at 80\% data (58.6\%).
+
+\paragraph{Cross-Domain Generalization.} On unseen ALFWorld tasks: SEED 86.2\% vs.\ GRPO 70.9\% (+15.3), with largest gains on Heat (+35.0) and Examine (+20.0).
+
+\paragraph{Multimodal Extension.} Using Qwen2.5-VL-3B on vision tasks: Sokoban SEED 82.0\% vs.\ GRPO 67.1\% (+14.9); EZPoints SEED 100\% vs.\ GRPO 86.9\%.
+
+\paragraph{Training Dynamics.} SEED reaches ${\sim}$57\% ALFWorld success by step 40 vs.\ ${\sim}$35\% for GRPO. Mean episode length drops from ${\sim}$28 to ${\sim}$13 turns (vs.\ ${\sim}$16 for GRPO), indicating more efficient task execution.
+
+\subsection{Limitations}
+
+\textbf{Error reinforcement risk}: Because actor and analyzer share the same model, their blind spots are shared. An inaccurate analysis may turn a recurring error into an apparently reusable rule that subsequent updates reinforce.
+
+\textbf{No semantic correctness guarantee}: Confidence gating reduces noisy supervision but neither confidence nor self-judgment guarantees semantic correctness. The method can plateau below oracle-supervised training.
+
+\textbf{Training cost}: SEED adds no deployment overhead, but training requires paired scoring (ordinary + skill-augmented contexts), effectively doubling forward passes per trajectory.
+
+\textbf{External dependency}: Stage~1 requires an external LLM (GLM-5.2) for initial skill annotations. Quality of subsequent self-evolution depends on this initialization.
+
+\textbf{Limited benchmark scope}: More demanding benchmarks with longer workflows and richer state spaces (DeepPlanning, Long-Horizon-Terminal-Bench) remain untested.
+
+\subsection{Relevance to Our Research}
+
+This paper uniquely bridges our three core research topics---T1 (distillation), T2 (RL), and T3 (self-evolving agents)---by embedding on-policy distillation \emph{inside} an RL training loop where the teacher is the agent's own hindsight analysis.
+
+\paragraph{Connection to OPD (T1).} Our extensive OPD corpus---TOP-D~\cite{topd2026} (proximal teacher bounding), Direct-OPD~\cite{directopd2026} (policy shift transfer), Filter-Then-Reweight~\cite{filter2026} (optimization granularity), ReNIO~\cite{renio2026} (negative trajectory reweighting)---has studied \emph{inter-model} distillation where a fixed external teacher guides a student. SEED introduces \emph{intra-model} distillation: the same model serves as both teacher (skill-conditioned branch) and student (ordinary branch), with the ``teacher'' being the model's own hindsight-informed self. The confidence gate ($g = \sigma(\beta_{\mathrm{opd}} \cdot \Delta)$) is structurally analogous to TOP-D's proximal teacher interpolation---both attenuate unreliable supervision---but operates in a fundamentally different regime: TOP-D bounds the reward from an external teacher, while SEED gates the supervision from the model's own skill-conditioned self.
+
+\paragraph{Connection to Agentic RL (T2).} Our SAO review~\cite{sao2026} demonstrated that token-level value estimation dramatically outperforms step-level for agentic RL. SEED provides a complementary mechanism: instead of learning a value function, it uses hindsight skills as dense natural-language supervision at the token level. The confidence gate provides per-token credit assignment without requiring a separate value model---the skill-induced log-probability shift $\Delta = \ell^{\mathrm{skill}} - \ell^{\theta}$ acts as a proxy advantage that is positive for tokens the hindsight skill supports and negative for those it contradicts.
+
+\paragraph{Connection to Self-Evolving Agents (T3).} Our SkillOS~\cite{skillos2026}, SkillsVote~\cite{skillsvote2026}, and SkillOpt~\cite{skillopt2026} reviews studied skill lifecycle management for evolving agents, but all used \emph{static} skill libraries extracted once from collected trajectories. SEED's key innovation is making the skill extraction process \emph{on-policy and co-evolving}: the same model that generates trajectories also analyzes them, and both capabilities improve together through the joint $\mathcal{L}_{\mathrm{SEED}}$ objective. This directly addresses the stale-teacher problem we identified across our OPD reviews and connects to our Knowledge Boundary review~\cite{searchgen2026}: as the agent improves, its self-analysis quality improves, shifting the boundary of what it can extract from its own experience.
+
+\paragraph{Connection to Ring-Zero (T2, reviewed yesterday).} Ring-Zero's~\cite{ringzero2026} self-distillation phase (Phase~2) compresses verbose CoT traces from the RL-trained model. SEED goes further: instead of one-time compression, it continuously generates and distills hindsight skills at every RL iteration. Ring-Zero's discovery-sharpening decomposition applies here too---early SEED iterations discover useful skill patterns (expanding the hindsight analysis boundary), while later iterations sharpen the policy's ability to consistently leverage those patterns.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Proximal Hindsight Skills via Bounded Self-Distillation}
+
+\paragraph{Gap.} SEED's confidence gate ($g = \sigma(\beta_{\mathrm{opd}} \cdot \Delta)$) attenuates noisy supervision but does not bound the gradient magnitude. When the skill-induced shift $\Delta$ is very large (strong skill-ordinary disagreement), the gate saturates at 1 and the full NLL gradient passes through, potentially causing instability. TOP-D~\cite{topd2026} showed that bounding rewards via proximal teacher interpolation provides finite variance guarantees. No existing work combines proximal bounding with self-distillation.
+
+\paragraph{Approach.} Apply TOP-D's proximal teacher construction to SEED's paired scoring:
+\begin{enumerate}
+\item Define a \textbf{proximal skill-conditioned distribution}: $\tilde{\pi}^{\mathrm{skill}} = \alpha \cdot \pi^{\mathrm{skill}} + (1-\alpha) \cdot \pi^{\theta}$, interpolating skill-conditioned and ordinary distributions in probability space.
+\item Compute the bounded shift: $\tilde{\Delta} = \log(\alpha \cdot \exp(\Delta) + 1 - \alpha)$, which is strictly bounded below by $\log(1-\alpha)$.
+\item Use $\tilde{\Delta}$ in the confidence gate: $g = \sigma(\beta_{\mathrm{opd}} \cdot \tilde{\Delta})$, preventing gate saturation from extreme skill-ordinary disagreements.
+\end{enumerate}
+This inherits SEED's self-evolving loop while adding TOP-D's variance reduction guarantee, creating a more stable training signal especially in early iterations when skill quality is low.
+
+\paragraph{Feasibility.} The proximal interpolation is algebraic---no additional forward passes. Validation: compare SEED vs.\ proximal-SEED on ALFWorld with Qwen3-1.7B (where SEED already shows the largest gains), measuring training stability (reward variance) and final accuracy. Expected outcome: proximal bounding reduces reward variance by 30--50\% in early training and improves final accuracy by 2--4\% by preventing error reinforcement from low-quality initial skills.
+
+\subsection{Direction 2: Cross-Trajectory Hindsight Skill Composition for Continual Agent Learning}
+
+\paragraph{Gap.} SEED generates one hindsight skill per completed trajectory and uses it only for that trajectory's tokens. In continual learning scenarios (our T3 thread), an agent encounters many similar tasks sequentially. Skills extracted from one episode could inform future episodes---a ``procedural memory'' of reusable strategies. Our Proactive Memory review~\cite{proactivemem2026} showed that structured memory banks with intervention policies dramatically improve long-horizon agents; SEED's hindsight skills are natural candidates for such a memory bank but currently exist only within a single training iteration.
+
+\paragraph{Approach.} Extend SEED with a \textbf{persistent hindsight skill bank}:
+\begin{enumerate}
+\item \textbf{Skill bank}: Maintain a bounded memory $\mathcal{M}$ of high-quality hindsight skills from previous iterations, scored by their confidence gate values (skills that produced high $g$ across many tokens indicate reliable guidance).
+\item \textbf{Cross-trajectory skill retrieval}: Before generating a new trajectory, retrieve the top-$k$ relevant skills from $\mathcal{M}$ based on task-description similarity. Prepend these as context during skill-conditioned scoring, providing the policy with knowledge from previous episodes.
+\item \textbf{Skill evolution}: At each iteration, update $\mathcal{M}$ by (a)~adding new high-quality skills from the current batch, (b)~removing skills whose average $g$ has dropped below a threshold (indicating the policy has internalized their guidance), and (c)~merging similar skills to prevent redundancy.
+\item \textbf{Forgetting prevention}: Use EvoEmbedding~\cite{evoembedding2026}-style FIFO management to prevent unbounded growth while maintaining coverage.
+\end{enumerate}
+This bridges SEED's within-iteration self-distillation with cross-iteration continual learning, creating a system where the agent accumulates reusable behavioral knowledge across its lifetime.
+
+\paragraph{Feasibility.} Skill retrieval uses embedding similarity (minimal overhead). The skill bank adds fixed memory storage. Validation: deploy on a sequence of 50 ALFWorld tasks, comparing SEED (no memory) vs.\ SEED+skill-bank on later tasks. Expected outcome: skill bank improves performance on later tasks by 5--10\% as the agent accumulates transferable strategies, with $<$3\% forgetting on early-task behaviors.
+
+\subsection{Direction 3: Hindsight Skills as Dense Rewards for Diffusion LLM Agents}
+
+\paragraph{Gap.} SEED's hindsight skills provide dense, per-token supervision for autoregressive agents. Our T4 (Diffusion LLM) thread has explored RL for diffusion models (V-GRPO~\cite{vgrpo2026}, Flow-DPPO~\cite{flowdppo2026}) but all use sparse trajectory-level rewards. Diffusion LLM agents face the same supervision gap as AR agents---sparse outcome rewards provide no guidance about which denoising steps should be reinforced. No existing work provides dense supervision for diffusion LLM agent training.
+
+\paragraph{Approach.} Adapt SEED's paired contextual re-scoring to \textbf{discrete diffusion agents}:
+\begin{enumerate}
+\item \textbf{Hindsight skill generation}: After a diffusion agent completes a trajectory, use the same model to generate a hindsight skill from the fully denoised completion.
+\item \textbf{Paired scoring at each denoising step}: At each diffusion timestep $t$, compute (a)~the score function conditioned on the hindsight skill and (b)~the score function without it. The shift $\Delta_t$ provides a per-step dense signal about whether each denoising decision is moving toward the hindsight-identified correct strategy.
+\item \textbf{Step-level confidence gate}: Apply $g_t = \sigma(\beta \cdot \Delta_t)$ to weight the distillation loss at each denoising step, preventing steps where the skill provides ambiguous guidance from corrupting the model.
+\end{enumerate}
+This would provide the first dense supervision mechanism for diffusion LLM agent training, bridging SEED's self-evolving paradigm with our T4 thread.
+
+\paragraph{Feasibility.} The paired scoring reuses existing denoising forward passes with modified conditioning. Validation: apply to an MDLM~\cite{sumi2026}-based agent on a multi-step task, comparing sparse GRPO vs.\ SEED-style dense hindsight supervision. Expected outcome: hindsight-guided diffusion RL converges 2--3$\times$ faster and achieves 10--15\% higher final accuracy by providing per-step credit assignment that sparse rewards cannot.
+
+\section{Conclusion}
+
+SEED's central innovation is making the hindsight analysis process \emph{co-evolve} with the policy it supervises: the same model that generates agentic trajectories also analyzes them, and both capabilities improve through a joint objective combining outcome-based RL with confidence-gated on-policy distillation. The confidence gate---where the skill-induced log-probability shift determines how strongly each token is supervised---provides per-token credit assignment without requiring a separate value model, addressing the supervision gap that limits standard GRPO. The +45.9-point improvement on ALFWorld with Qwen3-1.7B demonstrates that self-evolving dense supervision is transformative for smaller models where sparse rewards provide insufficient signal. For our research program, SEED completes a conceptual arc across our three core topics: our OPD reviews (T1) studied \emph{how} to distill effectively, our RL reviews (T2) studied \emph{what} reward signal to optimize, and our agent learning reviews (T3) studied \emph{when} to update skill libraries. SEED unifies all three by making the distillation teacher, the reward signal, and the skill library emerge from the agent's own evolving self-analysis. The three follow-up directions---proximal bounding for stable self-distillation, persistent skill banks for continual learning, and hindsight-guided diffusion RL---extend this self-evolving principle across our entire research program.
+
+\begin{thebibliography}{99}
+\bibitem{wu2026seed} Wu, J., Yang, S., Lu, Z., et al. ``SEED: Self-Evolving On-Policy Distillation for Agentic Reinforcement Learning.'' \emph{arXiv preprint arXiv:2607.14777}, 2026.
+\bibitem{topd2026} TOP-D Authors. ``Trust Region Policy Distillation.'' \emph{arXiv preprint arXiv:2607.04751}, 2026.
+\bibitem{directopd2026} Feng, S., et al. ``Weak-to-Strong Generalization via Direct On-Policy Distillation.'' \emph{arXiv preprint arXiv:2607.05394}, 2026.
+\bibitem{filter2026} Filter Then Reweight Authors. ``Filter, Then Reweight: Rethinking Optimization Granularity in On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.02684}, 2026.
+\bibitem{renio2026} ReNIO Authors. ``ReNIO: Reweighting Negative Trajectory Importance for LLM On-Policy Distillation.'' \emph{arXiv preprint arXiv:2606.23104}, 2026.
+\bibitem{sao2026} Hou, Z., et al. ``Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning.'' \emph{arXiv preprint arXiv:2607.07508}, 2026.
+\bibitem{skillos2026} SkillOS Authors. ``SkillOS: Learning Skill Curation for Self-Evolving Agents.'' \emph{arXiv preprint arXiv:2605.06614}, 2026.
+\bibitem{skillsvote2026} SkillsVote Authors. ``SkillsVote: Lifecycle Governance of Agent Skills from Collection, Recommendation to Evolution.'' \emph{arXiv preprint arXiv:2605.18401}, 2026.
+\bibitem{skillopt2026} SkillOpt Authors. ``SkillOpt: Executive Strategy for Self-Evolving Agent Skills.'' \emph{arXiv preprint arXiv:2605.23904}, 2026.
+\bibitem{searchgen2026} Wang, H., et al. ``Search Beyond What Can Be Taught: Evolving the Knowledge Boundary in Agentic Visual Generation.'' \emph{arXiv preprint arXiv:2607.05382}, 2026.
+\bibitem{ringzero2026} Tang, X., et al. ``Ring-Zero: Scaling Zero RL to a Trillion Parameters for Emergent Reasoning.'' \emph{arXiv preprint arXiv:2607.12395}, 2026.
+\bibitem{proactivemem2026} Wu, Y., et al. ``Remember When It Matters: Proactive Memory Agent for Long-Horizon Agents.'' \emph{arXiv preprint arXiv:2607.08716}, 2026.
+\bibitem{evoembedding2026} Li, H., et al. ``EvoEmbedding: Evolvable Representations for Long-Context Retrieval and Agentic Memory.'' \emph{arXiv preprint arXiv:2606.21649}, 2026.
+\bibitem{vgrpo2026} V-GRPO Authors. ``V-GRPO: Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{flowdppo2026} Flow-DPPO Authors. ``Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models.'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{sumi2026} Sumi Authors. ``Sumi: Open Uniform Diffusion Language Model from Scratch.'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\end{thebibliography}
+
+\end{document}
