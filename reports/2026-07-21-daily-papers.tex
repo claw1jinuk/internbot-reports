@@ -1,0 +1,133 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: RESOURCE2SKILL --- Distilling Executable Agent Skills from Human-Created Multimodal Resources}
+\author{Internbot Literature Review}
+\date{July 21, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Existing skill libraries for LLM-based software agents are constructed through three limited channels: hand-written by domain experts, accumulated from the agent's own interaction traces (self-play), or mined from text and code resources~\cite{fan2026resource2skill}. All three approaches systematically overlook the richest source of human procedural knowledge: \textbf{tutorial videos and other multimodal resources}. A video tutorial reveals temporal operation ordering, visual before-after effects of each editing step, and tacit design choices that are extremely difficult to express in text alone. Directly injecting raw video into agent context, however, is impractical---a single tutorial contains minutes of irrelevant setup, narration, and visual detail. Conversely, compressing video to plain text summaries discards precisely the dynamic and spatial information that makes video valuable.
+
+For creative software authoring tasks (slide design, 3D modeling, spreadsheet construction, web design, audio production, CAD drafting), success depends on reusable procedural know-how rather than isolated factual knowledge. The paper argues that a practical system must \emph{extract} procedural signals from videos and other multimodal resources, \emph{normalize} them into a reusable structured representation, and \emph{organize} the resulting knowledge so agents can efficiently retrieve and execute the right skill at inference time.
+
+\subsection{Method}
+
+\paragraph{Architecture overview.}
+Resource2Skill operates as a four-stage pipeline: (1)~\textbf{Construction}---distill multimodal resources into structured skill entries; (2)~\textbf{Wiki Organization}---organize skills in a hierarchical, domain-specific taxonomy; (3)~\textbf{Selection}---retrieve and select relevant skills at inference time; (4)~\textbf{Execution}---apply skills through a Model Context Protocol (MCP) mediated tool interface. Crucially, the same construction operator is reused online when the offline pool proves insufficient, so online acquisition introduces no separate pipeline.
+
+\paragraph{Skill representation.}
+Each skill is formalized as a tuple $s = (p, x_{\text{text}}, x_{\text{visual}}, x_{\text{code}}, m)$, where $p$ denotes the skill's path in a domain-specific taxonomy $\mathcal{T}_D$, $x_{\text{text}}$ contains structured prose (name, mechanism, applicability, inputs, expected effects), $x_{\text{visual}}$ holds thumbnails, screenshots, or rendered previews, $x_{\text{code}}$ provides executable procedure fragments, and $m$ stores metadata for filtering and provenance tracking. The three content modalities are explicitly designed as \emph{complementary}: text states applicability and mechanism; visuals preserve layout, style, and perceptual information; code provides tool-grounded execution patterns.
+
+\paragraph{Construction operator.}
+The construction operator $f_\theta$ maps each resource $r \in \mathcal{R}_D$ to candidate skills $\tilde{s}_{1:k} = f_\theta(r, D)$ through four steps: (i)~per-domain query templates retrieve resource bytes (video frames, repository trees, article text, reference artifacts) via resource connectors; (ii)~modality-specific deterministic preprocessors extract evidence (key-frame sampling for videos, AST-aware code region extraction for repositories, paragraph segmentation for articles); (iii)~a vision-capable language model produces a structured JSON skill payload; (iv)~a deterministic post-processor normalizes whitespace, validates JSON shape, and computes a stable skill identifier via SHA-1 hashing.
+
+\paragraph{Acceptance predicate.}
+A domain-specific acceptance predicate $A_D$ enforces five deterministic gates---completeness (schema validation), provenance (source-path verification), deduplication (SHA-1 hash matching), modality consistency (file-system resolution checks), and structural executability (sandboxed code execution)---yielding the accepted library $\Sigma_D = \{s = \text{normalize}(\tilde{s}) : \tilde{s} = f_\theta(r, D),\; r \in \mathcal{R}_D,\; A_D(\tilde{s}) = 1\}$. Notably, all five gates are rule-based rather than LM-as-judge calls, ensuring reproducibility.
+
+\paragraph{MetaBrowse selection.}
+Given a user brief $q$, skill selection proceeds in two stages. \emph{Stage~1 (lexical shortlisting)}: BM25 retrieval over the wiki taxonomy produces $K=20$ candidates, $C_K(q) = \text{TopK}_{s \in \Sigma_D}\;\text{BM25}(q, \text{name}(s) \oplus \text{tags}(s) \oplus \text{applicability}(s) \oplus p(s))$, where the taxonomy path $p(s)$ favors skills in topically relevant subtrees. \emph{Stage~2 (LM selection)}: the language model reads structured evidence for the shortlisted candidates and selects a subset $S(q) = \pi_\phi(q, \{\Phi(s) : s \in C_K(q)\})$ of $n=5$ entries. The total inference-time context budget is approximately 26--32k tokens, independent of library size.
+
+\paragraph{Online gap-filling.}
+When no adequate candidate exists in the offline pool, the same construction operator is invoked online with targeted queries, yielding up to 100 newly distilled skills maintained in a separate online pool (never folded back into the offline wiki during evaluation).
+
+\paragraph{Zero-training design.}
+A distinctive architectural choice is that the entire system operates \emph{without any fine-tuning or learned parameters}. The construction operator, acceptance predicate, and selection pipeline all rely on prompt-engineered calls to frontier vision-capable LMs combined with deterministic post-processing rules.
+
+\subsection{Results}
+
+The system is evaluated across \textbf{seven} creative authoring domains (Web, Excel, Reaper/audio, PPT, Blender, CAD, UE5) with four model backends (GPT-5.5, GPT-5.4, GPT-5.4 Mini, GPT-5.4 Nano) on 80 screened task briefs per domain.
+
+\paragraph{Main comparison.}
+Resource2Skill (w~Skills) beats the no-skill baseline (w/o~Skills) in \textbf{all 28 of 28} model-domain cells, averaging \textbf{56.8\%} vs.\ 45.0\% (+11.9~pp). Both off-the-shelf agent harnesses (Codex-H at 50.5\%, ClaudeCode-H at 50.4\%) improve over the no-skill agent but remain consistently below w~Skills, which wins in 26 of 28 cells. The largest gains appear on UE5 (+30--40~pp), while Reaper shows the smallest delta, reflecting the base model's already strong audio production priors.
+
+\paragraph{Scaling behavior.}
+Performance rises monotonically with library size and saturates near \textbf{200~skills}. The 0$\to$200 slice carries gains of +3.1 to +14.2~pp depending on domain, while the 400$\to$Full step adds at most +0.8~pp.
+
+\paragraph{Video is non-substitutable.}
+Holding out video drops the average score from 68.9\% to 59.4\% ($-$9.5~pp). A video-only library (66.8\%) outscores the three-source no-video library (59.4\%) by 7.4~pp, with the largest drops on Excel ($-$14.2~pp) and Web ($-$11.5~pp) where temporal operations carry the strongest signal.
+
+\paragraph{Online acquisition asymmetry.}
+Online gap-filling adds only +0.7~pp on standard tasks but \textbf{+21.6~pp on novel capability regions} where the offline pool has structural gaps, demonstrating the critical role of adaptive skill acquisition.
+
+\paragraph{Human evaluation.}
+A blinded A/B study (5~raters, 200 paired ratings across 7~domains) yields a 68.0\% win rate for w~Skills (85.5\% excluding ties), with per-domain win rates ranging from 77.8\% (CAD) to 95.7\% (UE5).
+
+\subsection{Limitations}
+
+The authors acknowledge several failure modes: (1)~\emph{partial grounding}---skills are selected but key bindings or parameters fail to resolve (e.g., Excel formula \#NAME? errors); (2)~\emph{overly literal composition}---the skill arm sticks closely to a single pattern, losing the variation a less-anchored agent would introduce; (3)~\emph{saturation}---marginal returns diminish sharply beyond $\sim$200 skills; (4)~the reliance on frontier closed-source models (GPT-5.x series) for both construction and evaluation limits reproducibility. The zero-training design also means the system cannot adapt from its own failures.
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to our work on \textbf{continual learning for LLM agents} (Topic~3). While our prior reviews have examined agent skill acquisition through self-play (SkillOS, SkillOpt, SkillsVote), experience internalization (APPO, EvoArena), and on-policy distillation (SEED, UI-MOPD), Resource2Skill introduces an orthogonal axis: \emph{offline skill distillation from human-created multimodal resources}. The finding that video tutorials are non-substitutable as a skill source---outperforming code, articles, and artifacts combined---has significant implications for how we design continual learning pipelines that can bootstrap agent capabilities before any online interaction. The hierarchical wiki organization and MetaBrowse selection also offer a practical template for skill library management in lifelong agent systems.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Closed-Loop Multimodal Skill Refinement via Online Experience}
+
+\paragraph{Gap.}
+Resource2Skill's zero-training design means offline-distilled skills are frozen after construction. The system cannot refine a partially-grounded skill (e.g., fixing an Excel formula that produces \#NAME? errors) based on execution feedback. Meanwhile, our reviewed online learning methods (SEED~\cite{seed2026}, APPO~\cite{appo2026}) evolve skills through RL but start from scratch without leveraging the rich procedural knowledge available in tutorials.
+
+\paragraph{Approach.}
+Design a closed-loop system where Resource2Skill-style offline distillation provides the initial skill library, and subsequent online agent interactions generate execution traces that are used to \emph{refine} existing skill entries. Specifically: (1)~when a skill's code body fails execution, capture the error trace and the agent's eventual fix as a paired (failure, correction) tuple; (2)~use contrastive preference optimization (DPO-style) to update the skill's code body while preserving its text and visual modalities; (3)~apply SEED's hindsight skill mechanism to generate natural-language annotations of \emph{why} the fix worked, enriching the skill's text body. The acceptance predicate's structural executability gate would serve as an automatic quality filter for refined entries.
+
+\paragraph{Feasibility.}
+High. Both the offline construction pipeline and online refinement loop are independently validated. The main engineering challenge is maintaining provenance tracking across refinement iterations. A pilot study on Excel (where partial grounding failures are well-documented) could demonstrate the concept within $\sim$200 GPU-hours using an open-source VLM for construction.
+
+\subsection{Direction 2: Hierarchical Skill Distillation for Diffusion-Based Agent Architectures}
+
+\paragraph{Gap.}
+Resource2Skill assumes an autoregressive agent that consumes skill context through standard prompt injection. Diffusion LLMs---which generate text through iterative denoising---cannot straightforwardly condition on 26--32k tokens of hierarchical skill context. Yet diffusion architectures (LLaDA2.0, Sumi, Nemotron-Labs-Diffusion) are increasingly competitive for structured generation tasks like code and design specifications, precisely the domains where Resource2Skill excels.
+
+\paragraph{Approach.}
+Adapt the Resource2Skill pipeline for diffusion LLM agents in two ways: (1)~\emph{skill-conditioned denoising}---encode selected skills as discrete conditioning tokens that modulate the noise schedule rather than occupying context window slots, analogous to classifier-free guidance but using skill embeddings; (2)~\emph{progressive skill absorption}---during the diffusion process's iterative refinement, inject skill guidance at early (coarse structure) and late (fine detail) steps separately, matching the skill's text modality to early steps and code modality to late steps. The MetaBrowse selection can remain unchanged, operating upstream of the generation process.
+
+\paragraph{Feasibility.}
+Moderate. The main challenge is designing an efficient skill-to-embedding mapping that preserves the multimodal structure (text + visual + code) in a compact conditioning signal. Recent work on cross-architecture distillation (TIDE, Nemotron-Labs-Diffusion) provides relevant techniques for bridging autoregressive skill representations and diffusion conditioning. An initial prototype could focus on the Web domain using LLaDA2.0 as the diffusion backend.
+
+\subsection{Direction 3: Temporal Skill Graphs for Long-Horizon Agent Planning}
+
+\paragraph{Gap.}
+Resource2Skill treats skills as independent, flat entries retrieved individually for each task. However, complex authoring tasks involve \emph{skill chains}---ordered sequences where one skill's output becomes another's input (e.g., ``create data table'' $\to$ ``apply conditional formatting'' $\to$ ``generate chart'' $\to$ ``style chart'' in Excel). The current system cannot represent or exploit these temporal dependencies, forcing the agent to rediscover composition patterns for every multi-step task.
+
+\paragraph{Approach.}
+Extend the hierarchical wiki with a \emph{temporal skill graph} $\mathcal{G} = (\Sigma_D, E)$ where edges $E$ encode observed co-occurrence and ordering relationships between skills. Construction: (1)~during offline distillation from tutorial videos, extract not just individual skills but \emph{transition events} where one operation's completion triggers the next; (2)~weight edges by co-occurrence frequency and temporal proximity across the resource corpus; (3)~at inference time, augment MetaBrowse with a graph-walk step: after selecting the initial skill $s_1$, expose the agent to $s_1$'s top-$k$ successors in $\mathcal{G}$ as a planning scaffold. The graph structure would also enable \emph{prerequisite checking}---flagging when a skill's input requirements are unmet and suggesting the prerequisite skill.
+
+\paragraph{Feasibility.}
+High. Transition extraction from video key-frames is a natural extension of the existing construction operator's temporal analysis. The graph can be built offline with no additional LM calls---only deterministic co-occurrence counting. The main research question is whether graph-guided selection outperforms the current flat MetaBrowse on multi-step benchmarks. A controlled evaluation using Excel dashboard construction tasks (which are naturally multi-step) would directly test this hypothesis.
+
+\section{Conclusion}
+
+Resource2Skill presents a zero-training system for building multimodal skill libraries by distilling procedural knowledge from tutorial videos, code repositories, articles, and reference artifacts into structured, executable skill entries organized in hierarchical domain-specific wikis. The key empirical finding is that video tutorials are a non-substitutable knowledge source (+7.4~pp over all non-video sources combined), and the full system delivers a consistent +11.9~pp average lift across seven creative authoring domains and four model backends. The MetaBrowse hierarchy-then-LM selection mechanism outperforms both flat retrieval and dense embedding approaches while maintaining a fixed 26--32k token budget independent of library size. For continual agent learning research, this work opens an important axis: bootstrapping agent capabilities from existing human knowledge artifacts before any online interaction, complementing the online self-improvement paradigms (SEED, GRPO, APPO) we have previously reviewed. The three follow-up directions---closed-loop skill refinement, diffusion-conditioned skill injection, and temporal skill graphs---each address a specific gap between Resource2Skill's static offline distillation and the dynamic, compositional demands of lifelong agent learning.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+\bibitem[Fan et~al.(2026)]{fan2026resource2skill}
+Y.~Fan, Z.~Di, Z.~Wen, Y.~Yang, M.~Cheng, Q.~Dai, B.~Liu, K.~Qiu, Y.~Dong, J.~Li, C.~Luo.
+\newblock Resource2Skill: Distilling Executable Agent Skills from Human-Created Multimodal Resources.
+\newblock \emph{arXiv preprint arXiv:2606.29538}, 2026.
+
+\bibitem[{SEED Authors}(2026)]{seed2026}
+{SEED Authors}.
+\newblock {SEED}: Self-Evolving On-Policy Distillation for Agentic Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2607.14777}, 2026.
+
+\bibitem[{APPO Authors}(2026)]{appo2026}
+{APPO Authors}.
+\newblock {APPO}: Agentic Procedural Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2606.12384}, 2026.
+\end{thebibliography}
+
+\end{document}
