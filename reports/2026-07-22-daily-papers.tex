@@ -1,0 +1,144 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Masked Diffusion Language Models are Strong and Steerable Text-Based World Models for Agentic RL}
+\author{Internbot Literature Review}
+\date{July 22, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+A fundamental bottleneck in agentic reinforcement learning is the creation of diverse, realistic training environments~\cite{deshpande2026masked}. Hand-curated RL environments have fixed task and reward difficulties; as agent performance improves, reward signals become sparse over longer horizons, causing agents to encounter fewer diverse situations and ultimately suffer mode collapse. World models---learned simulators that generate synthetic environment rollouts---offer a solution, but existing approaches based on autoregressive (AR) language models exhibit three structural problems:
+
+\begin{enumerate}
+    \item \textbf{Prefix mode collapse.} The left-to-right factorization $\prod_i p(x_i \mid x_{<i})$ forces commitment to a single generation ordering. Samples concentrate around a narrow set of high-probability prefixes, reducing diversity. If the model hallucinates early tokens, all subsequent tokens condition on that hallucinated prefix, causing within-state error accumulation.
+    \item \textbf{Inability to condition on globally interdependent state anchors.} In agentic environments, state components (ticket IDs, status fields, API response codes) are globally interdependent---later fields constrain earlier fields and vice versa. AR models cannot naturally condition on arbitrary known positions scattered throughout the sequence.
+    \item \textbf{Limited steerability.} AR models lack a natural mechanism to condition generation on constraints placed at arbitrary output positions, making it difficult to steer the world model toward specific scenarios such as forced tool failures or particular error states.
+\end{enumerate}
+
+Masked diffusion language models (MDLMs) address all three problems through bidirectional denoising: predicting masked tokens by attending to anchor tokens on \emph{both sides}, producing completions consistent with the full context. Moreover, the MDLM objective is equivalent to an any-order autoregressive likelihood bound, enabling conditioning on arbitrary known positions at inference time without architectural modifications.
+
+\subsection{Method}
+
+\paragraph{Structured state decomposition.}
+The paper formalizes environment states as five explicit components: $e_0$ (initial environment state), $c_t$ (task context at step $t$), $\mathcal{T}$ (tool schemas), $\mathcal{R}$ (domain rules), and $\mathcal{D}$ (steering directives). The world model learns:
+\begin{equation}
+    p_\theta(c_{t+1} \mid e_0, c_{\leq t}, a_{\leq t};\; \mathcal{T}, \mathcal{R}, \mathcal{D})
+\end{equation}
+grounding predictions in the full action-observation history, tool definitions, domain constraints, and steering directives.
+
+\paragraph{MDLM training loss.}
+The forward process samples a diffusion time $\tau \sim U(0, 1]$ and independently replaces each token in the target next-state $x^{(t+1)}$ with a mask token $[\texttt{M}]$ with probability $\tau$, producing a corrupted sequence $x_\tau^{(t+1)}$. The reverse process is trained via:
+\begin{equation}
+    \mathcal{L}_{\text{MDLM}}(\theta) = -\mathbb{E}_{\tau, x^{(t+1)}, x_\tau^{(t+1)}} \left[ \frac{1}{\tau} \sum_{k=1}^{L} \mathbf{1}[x_{k,\tau}^{(t+1)} = [\texttt{M}]] \cdot \log p_\theta\!\left(x_k^{(t+1)} \mid x_\tau^{(t+1)}, x^{(\leq t)}, a^{(\leq t)}\right) \right]
+\end{equation}
+where the $1/\tau$ weighting normalizes by the expected fraction of masked tokens, and the indicator restricts the loss to masked positions only. The model predicts masked tokens conditioned on \emph{both sides} of surrounding unmasked context (bidirectional), unlike AR models that attend only leftward.
+
+\paragraph{Anchor-aware denoising and steerability.}
+The key mechanism is bidirectional anchor-aware denoising: when predicting a masked token, the model attends to all unmasked ``anchor'' tokens regardless of position. At inference time, specific fields or tokens can be \textbf{fixed as unmasked} (e.g., a forced error status, a particular API response code), and the MDLM denoises the remaining positions while maintaining consistency with these fixed anchors. Because the MDLM objective learns every conditional direction from the same training signal, no retraining or special decoding is needed for steered generation. Temperature in MDLMs jointly controls both token choice \emph{and} which position to commit to at each denoising step, providing an extra axis of stochasticity unavailable to AR decoders.
+
+\paragraph{Integration with RL via GRPO.}
+The fine-tuned MDLM world model generates synthetic trajectories, which undergo deterministic state validation (well-formed JSON, valid tool calls, consistent state transitions). The agent policy is then trained using Group Relative Policy Optimization (GRPO) on these synthetic rollouts with binary verifiable rewards tied to environment-specific goal states. The full pipeline is: base agent $\to$ SFT on demonstration data $\to$ RL with GRPO on MDLM world model rollouts.
+
+\paragraph{Architecture.}
+The primary MDLM is SDAR-8B, which adapts pretrained Qwen3-8B weights to the masked diffusion objective. A larger variant, SDAR-30B-A3B (30B total, 3B active, MoE), is also evaluated. Using SDAR-8B alongside fine-tuned Qwen3-8B (same base weights, AR objective) enables a clean isolation of the diffusion vs.\ autoregressive contribution.
+
+\subsection{Results}
+
+The system is evaluated on 239,403 training trajectories across 9 environments (SWE-Smith, Coderforge, DeepResearchQA, OpenResearcher, TauBench, BFCLv4, Toolathlon, Pandora, Webshop), with downstream RL evaluation on three held-out environments (ScienceWorld, ALFWorld, AppWorld).
+
+\paragraph{Generation fidelity.}
+Fine-tuned SDAR-8B achieves in-domain MAUVE of \textbf{0.982}, surpassing the best AR baseline (Qwen3.5-35B-A3B at 0.932) despite being $4\times$ smaller. SDAR-30B-A3B reaches 0.992. On out-of-domain transfer, SDAR-30B-A3B achieves 0.697 MAUVE on API-Bank (vs.\ 0.532 for GLM-4.7-Flash). SDAR-8B also produces substantially more diverse rollouts: Self-BLEU of 0.601 vs.\ 0.690 for the best AR model, and Distinct-N of 0.385 vs.\ 0.253.
+
+\paragraph{Downstream RL performance.}
+On ALFWorld, agents trained with SDAR world model rollouts achieve up to \textbf{+47.9~pp} absolute gains (LFM2.5-1.2B: 5.7\% $\to$ 53.6\%). On ScienceWorld, Mistral-7B improves from 3.3\% to 48.4\% (+45.1~pp). On AppWorld, Mistral-7B improves from 51.3\% to 71.2\% (+19.9~pp). Across all 9 model-environment configurations, the MDLM world model provides a \textbf{consistent +5.3~pp average advantage} over the AR world model (fine-tuned on identical data), attributable to higher fidelity and diversity of MDLM rollouts rather than model capacity.
+
+\paragraph{Human evaluation.}
+Four domain experts rated 100 SDAR-generated states on realism (4.75/5), outcome correctness (4.25/5), and training utility (4.50/5), with Krippendorff's $\alpha > 0.89$ across all metrics.
+
+\subsection{Limitations}
+
+The authors acknowledge several failure modes: (1)~MDLMs struggle to produce well-formed API keys, attributed to safety alignment artifacts and repetition from small block sizes during diffusion; (2)~pagination drift in tools requiring enumerated multi-page outputs; (3)~type coercion errors (string vs.\ integer in API calls); (4)~error cascade---a single tool failure can corrupt the entire subsequent trajectory via repeated error states; (5)~block-level repetition at high temperatures. Critically, the paper claims ``comparable inference latency'' to AR models but provides no FLOPs analysis, wall-clock benchmarks, or throughput measurements---a notable gap given that MDLM inference requires multiple denoising steps.
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to our work on \textbf{diffusion LLMs} (Topic~4), while bridging to \textbf{reinforcement learning} (Topic~2) and \textbf{continual agent learning} (Topic~3). Our prior T4 reviews have examined discrete diffusion for generation (Omni-Diffusion, Cubic, LLaDA2.0), decoding efficiency (S2D2, DMax, Orthrus), RL alignment for diffusion models (V-GRPO, Flow-DPPO, NormGuard), and cross-architecture distillation (TIDE, Nemotron-Labs-Diffusion). This paper opens a novel application axis: using diffusion LLMs not as generators but as \emph{world models} for training agents. The finding that bidirectional denoising yields +5.3~pp over AR world models on identical data---through higher fidelity and diversity rather than capacity---validates a structural advantage of diffusion architectures beyond the generation-quality arguments in our prior reviews.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Diffusion World Models with Continual Skill Conditioning}
+
+\paragraph{Gap.}
+The current MDLM world model generates rollouts conditioned on fixed steering directives $\mathcal{D}$ set at inference time. However, as agents acquire new skills through continual learning (as in SEED~\cite{seed2026}, Resource2Skill~\cite{fan2026resource2skill}), the world model cannot adapt to simulate the consequences of these newly acquired skills. The world model's training distribution is frozen, creating a growing mismatch between the agent's evolving capability frontier and the scenarios the world model can generate.
+
+\paragraph{Approach.}
+Design a co-evolving framework where the MDLM world model is periodically updated using the agent's latest skill inventory. Concretely: (1)~when the agent acquires a new skill $s_{\text{new}}$ (via SEED's hindsight mechanism or Resource2Skill's offline distillation), generate demonstration trajectories exercising $s_{\text{new}}$; (2)~fine-tune the MDLM on these new trajectories using elastic weight consolidation (EWC) to prevent catastrophic forgetting of prior environment dynamics; (3)~use the anchor-aware steering mechanism to explicitly condition world model rollouts on ``the agent now has skill $s_{\text{new}}$,'' generating training scenarios that exercise the new capability. This creates a curriculum that automatically adapts as the agent's skill set grows.
+
+\paragraph{Feasibility.}
+High. The MDLM's steering mechanism already supports arbitrary conditioning without retraining---the main research question is whether periodic fine-tuning with EWC preserves world model fidelity while incorporating new skill dynamics. The existing 239K-trajectory training corpus provides a strong foundation. A pilot on ALFWorld (where SEED has shown strong results) would test whether co-evolved world models improve sample efficiency over static world models.
+
+\subsection{Direction 2: Hybrid AR-Diffusion World Models with Speculative Denoising}
+
+\paragraph{Gap.}
+The paper claims MDLM inference has ``comparable latency'' to AR models but provides no evidence. In practice, MDLMs require multiple denoising steps (typically 16--64 for high-quality generation), each involving a full forward pass. For long trajectories (16,384 tokens), this makes MDLM world models significantly slower than AR alternatives, limiting their practical utility for generating the large volumes of rollouts needed for RL training.
+
+\paragraph{Approach.}
+Combine AR and diffusion architectures in a hybrid world model that uses speculative denoising: (1)~an AR draft model (small, fast) generates an initial trajectory estimate in a single pass; (2)~the MDLM verifier treats the AR draft as a partially denoised state (converting AR tokens to ``unmasked anchors'') and refines only low-confidence regions through targeted denoising. This mirrors speculative decoding~\cite{s2d2} but in the world modeling context. The key insight is that most state transitions are straightforward (the AR model gets them right), while the MDLM's bidirectional attention is needed only for globally interdependent or novel state components. A confidence estimator identifies which tokens to re-mask for diffusion refinement, potentially reducing denoising steps by $4$--$8\times$.
+
+\paragraph{Feasibility.}
+Moderate. The speculative denoising concept has been validated for generation (S2D2, Nemotron-Labs-Diffusion's tri-mode decoding), but adapting it to world modeling requires a principled confidence metric for ``which parts of this state transition need bidirectional refinement?'' The structured state decomposition $(e_0, c_t, \mathcal{T}, \mathcal{R}, \mathcal{D})$ provides natural boundaries for selective re-masking. Implementation could reuse the existing SDAR-8B as verifier and a distilled 1B AR model as drafter.
+
+\subsection{Direction 3: Steered Curriculum Learning via Adversarial Anchor Selection}
+
+\paragraph{Gap.}
+The paper demonstrates manual steering by fixing specific tokens as anchors (e.g., forcing a tool failure). However, the choice of \emph{which} anchors to fix and \emph{what values} to assign them is left to the practitioner. There is no principled method for automatically selecting steering configurations that maximally improve the agent's policy, leading to suboptimal curriculum design.
+
+\paragraph{Approach.}
+Formulate adversarial anchor selection as a bilevel optimization problem. The outer loop selects anchor configurations $(k^*, v^*)$ (which positions to fix, what values to assign) that maximize the expected policy improvement of the inner RL loop:
+\begin{equation}
+    (k^*, v^*) = \arg\max_{k, v}\; \mathbb{E}_{\tau \sim p_\theta(\cdot \mid \text{anchors}=(k,v))} \left[ \Delta J(\pi_\phi, \tau) \right]
+\end{equation}
+where $\Delta J(\pi_\phi, \tau)$ measures the policy gradient magnitude on trajectory $\tau$---high-gradient trajectories are those from which the agent learns the most. In practice, maintain a discrete set of anchor templates (tool failure, permission denied, rate limit, malformed response, etc.) and use multi-armed bandit selection (UCB1) to allocate world model rollout budget across templates proportionally to their measured policy improvement. This automates curriculum design while preserving the MDLM's conditioning flexibility.
+
+\paragraph{Feasibility.}
+High. The bandit-based approach requires only tracking per-template policy gradient statistics, adding negligible compute overhead. The anchor templates can be derived from the structured state decomposition's domain rules $\mathcal{R}$. Evaluation on TauBench (customer service with diverse failure modes) would directly test whether adversarial steering outperforms uniform or manual steering.
+
+\section{Conclusion}
+
+This paper establishes masked diffusion language models as structurally superior world models for agentic RL compared to autoregressive alternatives. The bidirectional anchor-aware denoising mechanism addresses three fundamental limitations of AR world models: prefix mode collapse, inability to condition on globally interdependent state components, and limited steerability. Fine-tuned SDAR-8B achieves 0.982 in-domain MAUVE (vs.\ 0.932 for a $4\times$ larger AR model), produces substantially more diverse rollouts (Self-BLEU 0.601 vs.\ 0.690), and delivers a consistent +5.3~pp advantage in downstream RL across nine configurations---all attributable to the diffusion objective rather than model capacity, as demonstrated by the controlled Qwen3-8B comparison. For our research program, this work opens a novel application axis for diffusion LLMs beyond text generation: serving as steerable environment simulators for agent training. The three proposed follow-up directions---continual skill-conditioned world models, hybrid AR-diffusion speculative denoising, and adversarial anchor selection for curriculum learning---each address a specific gap between the current static world model and the dynamic, efficiency-critical demands of scalable agentic RL.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+\bibitem[Deshpande(2026)]{deshpande2026masked}
+D.~Deshpande.
+\newblock Masked Diffusion Language Models are Strong and Steerable Text-Based World Models for Agentic RL.
+\newblock \emph{arXiv preprint arXiv:2607.16204}, 2026.
+
+\bibitem[{SEED Authors}(2026)]{seed2026}
+{SEED Authors}.
+\newblock {SEED}: Self-Evolving On-Policy Distillation for Agentic Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2607.14777}, 2026.
+
+\bibitem[Fan et~al.(2026)]{fan2026resource2skill}
+Y.~Fan, Z.~Di, Z.~Wen, Y.~Yang, M.~Cheng, Q.~Dai, B.~Liu, K.~Qiu, Y.~Dong, J.~Li, C.~Luo.
+\newblock Resource2Skill: Distilling Executable Agent Skills from Human-Created Multimodal Resources.
+\newblock \emph{arXiv preprint arXiv:2606.29538}, 2026.
+
+\bibitem[{S2D2 Authors}(2026)]{s2d2}
+{S2D2 Authors}.
+\newblock {S2D2}: Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation.
+\newblock \emph{arXiv preprint arXiv:2603.25702}, 2026.
+\end{thebibliography}
+
+\end{document}
