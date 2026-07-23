@@ -1,0 +1,140 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Subliminal Clocks --- Latent Time Modelling in Diffusion Language Models}
+\author{Internbot Literature Review}
+\date{July 23, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+In continuous-domain diffusion models for images, the denoising network receives explicit timestep conditioning via sinusoidal embeddings or adaptive normalization, telling the model ``how noisy the input currently is.'' Diffusion language models (DLMs), particularly absorbing-state masked diffusion models like LLaDA and Dream, break this convention: \textbf{they receive no explicit timestep input at inference time}~\cite{rulli2026subliminal}. The model simply observes a partially masked sequence and must predict original tokens at masked positions. This raises a fundamental question: if DLMs are never told what denoising step they are at, do they somehow figure it out internally?
+
+The paper defines \textbf{latent time} (denoted $\tau$) as the fraction of tokens already unmasked:
+\begin{equation}
+    \tau_t := 1 - \frac{|\mathcal{M}(x_t)|}{L}
+\end{equation}
+where $\mathcal{M}(x_t)$ is the set of masked positions and $L$ is the total sequence length. At generation start (all tokens masked), $\tau = 0$; at completion, $\tau = 1$. The paper investigates whether DLMs internally track this quantity---a ``subliminal clock'' ticking inside the model---and whether this representation is causally meaningful.
+
+\subsection{Method}
+
+\paragraph{Probing for the $\tau$ signal.}
+The authors train per-layer 5-layer residual MLP probes (with LayerNorm + GELU) to predict $\tau$ from hidden states. The probing objective is:
+\begin{equation}
+    \mathcal{L}_{\text{MLP}} = \mathbb{E}_{t,n,j}\left[(\tau_t - \phi_l(h_{t,l,n}^j))^2\right]
+\end{equation}
+where $h_{t,l,n}^j$ is the hidden state at layer $l$, token position $j$, sequence $n$, denoising step $t$, and $\phi_l: \mathbb{R}^d \to (0,1)$ is the learned probe. Probes are trained on 300 sequences with AdamW (lr $= 10^{-3}$, weight decay $= 6 \times 10^{-6}$) for 20 epochs.
+
+\paragraph{Mean activation vectors (MAVs).}
+As a training-free alternative, the authors compute mean activation vectors by discretizing the denoising process into 100 bins:
+\begin{equation}
+    \mu_{t,l} := \mathbb{E}_{n,j}[h_{t,l,n}^j]
+\end{equation}
+yielding 3,200 vectors for LLaDA (32 layers $\times$ 100 bins) and 2,700 for Dream (27 layers $\times$ 100 bins). MAV-based $\tau$ estimates correlate with MLP probe predictions at Pearson $r = 0.976$ (LLaDA) and $r = 0.962$ (Dream).
+
+\paragraph{Steering interventions.}
+To test causal significance, the authors steer the model from its current step $t$ to a target step $\hat{t}$ by modifying activations at every layer:
+\begin{equation}
+    \tilde{h}_{t,l}^j := h_{t,l}^j - \mu_{t,l} + \mu_{\hat{t},l}
+\end{equation}
+This subtracts the mean activation for the current step and adds the mean for the target, ``fooling'' the model into behaving as if at a different point in the denoising process. Norm-matched random perturbations sampled from the empirical covariance serve as controls: $\tilde{h}_{t,l}^j := h_{t,l}^j + a^{t \to \hat{t}}$ where $a \sim \mathcal{N}(0, C_{t,l})$, normalized to match the steering vector's magnitude.
+
+\paragraph{Effect metrics.}
+Three metrics quantify downstream impact: entropy change $\Delta\bar{S}_t = \mathbb{E}_{n,j}[H(\tilde{p}_{t,n}^j) - H(p_{t,n}^j)]$, confidence change $\Delta\bar{c}_t = \mathbb{E}_{n,j}[\max(\tilde{p}_{t,n}^j) - \max(p_{t,n}^j)]$, and KL divergence $\overline{\text{KL}}_t = \mathbb{E}_{n,j}[D_{\text{KL}}(p_{t,n}^j \| \tilde{p}_{t,n}^j)]$.
+
+\paragraph{Low-dimensional projection analysis.}
+Steering vectors are decomposed into parallel and orthogonal components via PCA. The parallel component $\Delta_{\parallel,l}^{t \to \hat{t}} := P_{\parallel,l} \cdot \Delta_l^{t \to \hat{t}}$ is projected onto the first $k$ principal components, and both components are renormalized to the original steering vector's magnitude for fair comparison.
+
+\subsection{Results}
+
+The paper studies two models: \textbf{LLaDA-1.5} (32 layers) and \textbf{Dream-7B} (27 layers, 7B parameters), both absorbing-mask DLMs.
+
+\paragraph{The $\tau$ signal is ubiquitous.}
+MLP probes achieve $R^2 > 0.5$ across \textbf{all layers} of both models. Both masked and non-masked token positions encode the signal, with masked positions marginally more informative. MLP probes substantially outperform linear probes, especially in deeper layers where the $\tau$ representation becomes increasingly nonlinear.
+
+\paragraph{Geometric structure.}
+Over 90\% of intra-layer variance in mean activation vectors concentrates in a \textbf{single principal component}. Projecting mean vectors onto the top 2 PCA components reveals ordered, parabola-like 2D geometries across denoising steps---the representation follows a systematic curved manifold, not a random distribution.
+
+\paragraph{Steering produces predictable behavioral changes.}
+Steering toward later steps (higher $\hat{t}$) decreases output entropy and increases confidence; steering toward earlier steps has the opposite effect. Effects are proportional to the steering distance $|\hat{t} - t|$, and $\tau$-aligned perturbations induce approximately \textbf{twice the KL divergence} of norm-matched random perturbations, confirming the signal's specificity.
+
+\paragraph{Cross-layer organization differs between models.}
+LLaDA exhibits strong alignment across most layers---the same $\tau$ direction is maintained consistently throughout depth. Dream reveals \textbf{three distinct computational blocks} (layers 1--6, 7--20, 21--27) with high within-block cosine similarity but weak cross-block alignment, suggesting different processing phases.
+
+\paragraph{Depth correction.}
+When steering is applied at early layers, later layers progressively compensate, reducing the probe-detected $\tau$ drift. This built-in error-correction is more effective for moderate perturbations; extreme targets ($\hat{t} = 100$) are harder to suppress. A striking sub-finding: \textbf{self-attention and MLP components encode $\tau$ with opposing orientations}---post-self-attention and post-MLP activation vectors are consistently anticorrelated despite both encoding the same $\tau$ information.
+
+\paragraph{Downstream task robustness.}
+On GSM8K, HumanEval, and StrategyQA: LLaDA is remarkably robust to steering (at most $\sim$6~pp degradation, and some steering targets \emph{improve} HumanEval from 44.5\% to 47.4\%). Dream is more sensitive---GSM8K collapses from 68.8\% to 23.1\% at $\hat{t} = 100$, attributed to premature end-of-sequence emission.
+
+\subsection{Limitations}
+
+The authors acknowledge: (1)~analysis is restricted to two models from the same absorbing-mask paradigm---generalizability to other DLM variants (block diffusion, continuous-state, multinomial) is unknown; (2)~no circuit-level identification of which attention heads or MLP neurons compute the $\tau$ signal; (3)~all analyses focus on sequence-level statistics, leaving token-level effects unexplored; (4)~no practical applications are demonstrated---it remains unclear whether the $\tau$ signal enables more efficient decoding or remasking strategies; (5)~the parabolic PCA geometry is observed but not mechanistically explained.
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to our work on \textbf{diffusion LLMs} (Topic~4). While our prior T4 reviews have focused on generation quality (Sumi, LLaDA2.0), decoding efficiency (S2D2, DMax, Orthrus), RL alignment (V-GRPO, Flow-DPPO, NormGuard), and world modeling applications (MDLM-WM), this paper opens an \emph{interpretability axis} for diffusion LLMs. The finding that DLMs develop internal denoising clocks despite lacking explicit timestep conditioning, and that this signal lives in a remarkably low-dimensional subspace ($>$90\% variance in 1 PC), has direct implications for our other research topics: for \textbf{on-policy distillation} (T1), understanding how teacher vs.\ student models represent denoising progress could reveal why certain distillation strategies fail; for \textbf{RL alignment} (T2), the steering mechanism provides a principled way to manipulate diffusion model behavior during RL training without modifying the objective.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Exploiting the $\tau$ Signal for Adaptive Unmasking Schedules}
+
+\paragraph{Gap.}
+Current DLM inference uses fixed unmasking schedules (linear, cosine, or entropy-based) that are applied uniformly regardless of the model's internal state. The discovery that DLMs track denoising progress internally suggests the model ``knows'' when it is ready to commit to certain tokens, but this knowledge is not leveraged by the decoding procedure.
+
+\paragraph{Approach.}
+Design an \emph{adaptive unmasking schedule} that reads the model's internal $\tau$ signal to decide how many tokens to unmask at each step. Concretely: (1)~at each denoising step, extract the MAV-based $\tau$ estimate from a designated probe layer; (2)~compare the internal $\tau$ with the expected $\tau$ for the current step---if the model's internal clock runs ``ahead'' (higher $\tau$ than expected), unmask more tokens aggressively; if it runs ``behind,'' unmask fewer tokens to allow more refinement; (3)~use the confidence distribution across masked positions (which correlates with $\tau$) as a secondary signal for token selection. This creates a feedback loop where the model's own representation of readiness drives the generation speed, potentially reducing the number of denoising steps needed while maintaining quality.
+
+\paragraph{Feasibility.}
+High. The MAV extraction is trivial (mean activation computation) and adds negligible overhead. The adaptive schedule requires only modifying the existing unmasking policy, not the model itself. A controlled experiment on LLaDA-1.5 comparing fixed vs.\ adaptive schedules on generation quality (MAUVE) and efficiency (steps-to-convergence) would directly test the hypothesis. The paper's finding that $\tau$ steering affects output entropy in a predictable, proportional manner provides the theoretical basis for this feedback mechanism.
+
+\subsection{Direction 2: $\tau$-Aware On-Policy Distillation for Diffusion LLMs}
+
+\paragraph{Gap.}
+On-policy distillation for diffusion LLMs (as in our reviewed papers: AR-to-diffusion OPD, TIDE, Flow-OPD) treats all denoising steps equally in the distillation loss. However, the subliminal clock finding reveals that DLMs process different denoising stages with qualitatively different internal representations---LLaDA uses uniform alignment while Dream uses three distinct computational blocks. Applying uniform distillation pressure across all $\tau$ levels may be suboptimal: early steps (low $\tau$, high uncertainty) and late steps (high $\tau$, refinement) likely require different distillation strategies.
+
+\paragraph{Approach.}
+Develop a $\tau$-stratified distillation objective that applies different loss weights or even different distillation mechanisms at different denoising stages:
+\begin{equation}
+    \mathcal{L}_{\tau\text{-OPD}} = \sum_{b=1}^{B} \lambda_b \cdot \mathbb{E}_{\tau \in \text{bin}_b}\left[\mathcal{L}_{\text{distill}}(\pi_\theta, \pi_T; \tau)\right]
+\end{equation}
+where the denoising range is divided into $B$ bins (informed by the model's block structure---3 bins for Dream-like architectures), each with a learnable weight $\lambda_b$. For early bins (coarse structure), use a softer distillation target (higher temperature); for late bins (refinement), use harder targets. Additionally, align the \emph{$\tau$ representations themselves} between teacher and student via an auxiliary loss $\mathcal{L}_{\tau\text{-align}} = \|\mu_{\tau,l}^{\text{student}} - \mu_{\tau,l}^{\text{teacher}}\|^2$, ensuring the student inherits the teacher's internal clock calibration.
+
+\paragraph{Feasibility.}
+Moderate. The $\tau$-stratification is straightforward to implement atop existing OPD frameworks. The main research question is whether $\tau$-aware weighting produces measurably better distillation than uniform weighting. The paper's observation that Dream's three computational blocks align with distinct $\tau$ ranges provides a natural starting point for bin boundaries. A comparison on MDLM-to-MDLM distillation (using LLaDA as teacher, a smaller model as student) would isolate the contribution.
+
+\subsection{Direction 3: Subliminal Clocks as Diagnostic Probes for Diffusion LLM Training Dynamics}
+
+\paragraph{Gap.}
+Training diffusion LLMs from scratch (as in Sumi) or converting AR models to diffusion objectives (as in SDAR, Nemotron-Labs-Diffusion) involves extensive hyperparameter tuning of noise schedules, masking ratios, and loss weights. Currently, training quality is assessed only through downstream metrics (perplexity, benchmark scores) computed at checkpoints. There is no real-time diagnostic for whether the model is learning to properly calibrate its denoising behavior across different noise levels.
+
+\paragraph{Approach.}
+Use the subliminal clock as a \textbf{training diagnostic}: periodically extract $\tau$ probing statistics during training to monitor whether the model is developing well-calibrated internal denoising representations. Specifically: (1)~compute MAVs at regular checkpoint intervals and track the emergence of the parabolic PCA geometry---healthy training should show progressively structured $\tau$ manifolds; (2)~monitor the 1-PC variance ratio (should approach 90\%+ for well-trained models); (3)~track the cross-layer cosine similarity to detect whether the model develops the uniform alignment pattern (LLaDA-like, potentially desirable for robustness) or the block structure (Dream-like). Deviations from expected $\tau$ calibration---such as the signal collapsing, becoming noisy, or failing to differentiate early from late denoising steps---could signal training pathologies (e.g., mode collapse, inadequate noise schedule) before they manifest in downstream metrics.
+
+\paragraph{Feasibility.}
+High. MAV computation requires only caching mean activations during periodic evaluation passes, adding minimal overhead ($<$1\% of training compute). No modifications to the training procedure are needed. A longitudinal study tracking $\tau$ diagnostics across the full training run of a model like Sumi (trained from scratch) would validate whether early $\tau$ calibration quality predicts final model performance. The paper's comparison of LLaDA (robust, uniform $\tau$) vs.\ Dream (sensitive, block-structured $\tau$) already suggests that $\tau$ organization correlates with generation robustness.
+
+\section{Conclusion}
+
+This paper reveals that diffusion language models develop internal ``subliminal clocks''---low-dimensional representations of denoising progress---despite receiving no explicit timestep conditioning. The $\tau$ signal is ubiquitous (present across all layers), geometrically structured (parabolic manifold in PCA space, $>$90\% variance in 1 principal component), causally meaningful (steering produces predictable entropy/confidence changes proportional to steering distance), and self-correcting (later layers compensate for early perturbations). The discovery of opposing $\tau$ orientations between self-attention and MLP components, and the contrasting cross-layer organization between LLaDA (uniform alignment) and Dream (three-block structure), provide new mechanistic insights into how DLMs organize their computations. For our diffusion LLM research program, this work complements our prior focus on generation quality and efficiency by adding an interpretability dimension that can inform adaptive decoding schedules, $\tau$-stratified distillation objectives, and training diagnostics for future DLM development.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+\bibitem[Rulli et~al.(2026)]{rulli2026subliminal}
+M.~Rulli, T.~Fontanari, S.~Petruzzi, G.~Nikolaou, T.~Mencattini, A.~Santilli, A.~Devoto, et~al.
+\newblock Subliminal Clocks: Latent Time Modelling in Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2607.01774}, 2026.
+\end{thebibliography}
+
+\end{document}
