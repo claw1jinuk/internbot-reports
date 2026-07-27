@@ -1,0 +1,147 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Multi-Turn On-Policy Distillation with Prefix Replay}
+\author{Internbot Literature Review}
+\date{July 24, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+On-policy distillation (OPD) for single-turn generation is well-studied: the student generates its own prefix, and the teacher supervises continuation from that prefix. Extending OPD to \textbf{multi-turn agentic tasks}---where an LLM agent interacts with an environment over multiple turns (executing code, calling search APIs)---introduces fundamental new challenges~\cite{liao2026multiturn}:
+
+\begin{enumerate}
+    \item \textbf{Environment interaction creates external dependencies.} Each turn involves an action followed by an environment observation (code execution result, search output). Replaying a student prefix requires actually executing against the live environment.
+    \item \textbf{Errors compound across interaction steps.} A wrong action at step $t$ changes the observation at step $t+1$, amplifying covariate shift beyond the single-turn setting.
+    \item \textbf{Operational complexity scales with environments.} Multi-environment OPD requires all environments to be alive simultaneously (GPU memory for retrievers, process pools for code execution, etc.).
+\end{enumerate}
+
+Standard online OPD for multi-turn tasks requires rolling the student through the live environment at every gradient update---prohibitively expensive. Off-policy distillation (SFT on teacher trajectories) avoids environment costs but suffers from distribution shift. The paper identifies a \textbf{prefix trap}: a two-sided distribution shift where (i)~teacher-forced prefixes are irrelevant to the student's actual occupancy, and (ii)~the teacher's supervision is unreliable on histories far from its own support.
+
+\subsection{Method}
+
+\paragraph{Prefix replay.}
+ReOPD (Reliability-aware On-Policy Distillation) replaces live environment interaction with \emph{prefix replay}: at supervised step $t$, the prefix $h_t = (O_1, A_1, \ldots, O_t)$ is taken verbatim from a teacher's pre-recorded trajectory. The student generates its own action $A_t$ token-by-token from this frozen prefix, receiving per-token supervision from the teacher's conditional distribution. No environment query is ever needed---observations are replayed from the trace.
+
+\paragraph{Two-sided decomposition.}
+The paper formalizes the gap between the ideal interactive improvement objective $R^*(\theta; \theta_{\text{old}})$ and the surrogate loss under an effective prefix distribution $\rho_t$:
+\begin{equation}
+    |R^* - \mathcal{L}_\rho| \leq \mathbb{E}_x\left[\sum_t \alpha_t \left\{ 2B \cdot \text{TV}(d_{\theta_{\text{old}}}^t, \rho_t) + \mathbb{E}_{H_t \sim \rho_t}[\epsilon_{T,t}^\theta(x, H_t)] \right\}\right]
+\end{equation}
+where the first term measures student occupancy shift (making $\rho_t$ student-on-policy minimizes this) and the second measures teacher reliability error (making $\rho_t$ teacher-on-policy minimizes this). Neither extreme is optimal---the optimal effective distribution lies at a geometric bridge between student and teacher occupancies.
+
+\paragraph{Geometric bridge.}
+The optimal prefix distribution is:
+\begin{equation}
+    \rho_t^*(h_t|x) \propto [d_{\theta_{\text{old}}}^t(h_t|x)]^{\gamma_t} \cdot [d_T^t(h_t|x)]^{1-\gamma_t}
+\end{equation}
+where $\gamma_t = \lambda_{\text{stu},t}/(\lambda_{\text{stu},t} + \lambda_{\text{tea},t})$ interpolates between student ($\gamma=1$) and teacher ($\gamma=0$) occupancy based on the relative magnitudes of occupancy shift and reliability error.
+
+\paragraph{Step-decay schedule.}
+Since the accumulated student-to-teacher likelihood ratio $\hat{r}_t = \prod_{s<t} \pi_{\theta_{\text{old}}}(a_s|x,h_s)/\pi_T(a_s|x,h_s)$ decays geometrically with depth (log $\hat{r}_t \approx -(t-1)\bar{c}$ where $\bar{c}$ is the average per-step KL), the exact bridge weight's depth profile is:
+\begin{equation}
+    \hat{r}_t^{\gamma_t} \approx \kappa^t, \quad \kappa = \exp(-\gamma_t \cdot \bar{c}) \in (0, 1]
+\end{equation}
+This motivates the \textbf{one-parameter step-decay schedule}: $\omega(t; \kappa) = \kappa^t$, which samples earlier steps more frequently (where the teacher is more reliable) and downweights later steps.
+
+\paragraph{Loss function.}
+The per-step loss is a token-level forward KL over the student's sampled action tokens:
+\begin{equation}
+    \ell(\pi_\theta, \pi_T; x, H_t, A_t) = \sum_{j=1}^{n_t} D_{\text{KL}}\!\left(\pi_\theta(\cdot|x, H_t, a_t^{<j}) \;\|\; \pi_T(\cdot|x, H_t, a_t^{<j})\right)
+\end{equation}
+The full weighted objective is $\mathcal{L}(\theta) = \mathbb{E}_{x}\left[\sum_t \alpha_t \cdot \mathbb{E}_{H_t \sim P_t, A_t \sim \pi_{\theta_{\text{old}}}} [w_t \cdot \ell]\right]$, implemented by sampling positions proportional to $\kappa^t$.
+
+\paragraph{Free prefix pool.}
+A key operational insight: teacher RL training (GRPO) already produces on-policy rollouts with recorded observations. These serve as the prefix pool at zero additional cost---no extra data collection is needed.
+
+\subsection{Results}
+
+Experiments span two environments (Python-tool math, search/retrieval) with students Qwen3-4B and Qwen3-8B, teachers Qwen3-4B/8B/30B-A3B, trained on 8$\times$H100 GPUs.
+
+\paragraph{Math (single environment).}
+With Qwen3-4B student and Qwen3-4B teacher (self-distillation after RL): ReOPD achieves \textbf{57.2\%} average across 6 benchmarks vs.\ OPD at 55.1\% (+2.1~pp) and SFT at 46.1\%. With Qwen3-8B teacher: ReOPD reaches 53.7\% vs.\ OPD at 51.0\% (+2.7~pp). AIME24 improves from 28.3\% to 36.7\% (+8.4~pp) with the 8B teacher.
+
+\paragraph{Search (single environment).}
+ReOPD essentially matches OPD (40.5\% vs.\ 40.6\%), confirming that when the teacher-student gap is small, the reliability concern is less acute and both methods converge.
+
+\paragraph{Multi-environment joint training.}
+Joint math+search with a single student: ReOPD matches OPD on both (55.3\% math, 41.0\% search) while eliminating environment deployment during student training.
+
+\paragraph{Efficiency.}
+ReOPD is \textbf{at least 4$\times$ faster} per rollout than OPD and requires \textbf{zero tool calls} during student training. Training completes within 3 hours on 8$\times$H100.
+
+\paragraph{Ablations.}
+(1)~Step-level sampling: drawing from early chunks yields best students; later chunks degrade performance, validating the decay schedule. (2)~Prefix source: using the teacher's own prefixes is optimal; substituting a stronger model's prefixes \emph{degrades} the student, directly validating the teacher-reliability thesis. (3)~RL-collected pool vs.\ stationary teacher pool: nearly identical performance (53.7 vs.\ 53.4), confirming that the free RL by-product suffices.
+
+\subsection{Limitations}
+
+The authors acknowledge: (1)~pool coverage dependence---the method assumes access to pre-collected teacher trajectories with recorded observations; (2)~the step-decaying weight is a coarse reliability surrogate that does not directly measure how far a given prefix lies from the teacher's reliable support; (3)~a single fixed $\kappa = 0.6$ is used across all tasks rather than per-task tuning; (4)~gap-adaptive schedules that automatically adjust $\kappa$ based on the teacher-student capability gap are left as future work.
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to our work on \textbf{LLM efficiency/distillation} (Topic~1) and bridges to \textbf{continual learning for agents} (Topic~3). Our extensive OPD review series (Trust Region Policy Distillation, Direct-OPD, Filter-Then-Reweight, DOPD, Early Stopping Rollout, SEED) has focused on single-turn distillation. ReOPD extends the OPD framework to the multi-turn agentic setting where environment interaction makes standard OPD prohibitively expensive. The two-sided prefix trap formalization---balancing student occupancy relevance against teacher reliability---provides a principled lens that unifies several ad-hoc design choices in prior work. The finding that the teacher's own prefixes outperform a stronger model's prefixes validates the reliability perspective and has implications for multi-teacher distillation approaches we have reviewed (DOPD, Co-Evolving Policy Distillation).
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Adaptive $\kappa$ via Online Teacher Reliability Estimation}
+
+\paragraph{Gap.}
+ReOPD uses a fixed $\kappa = 0.6$ across all tasks and teacher-student pairs. While effective, this ignores that teacher reliability varies substantially across domains (high in search where the gap is small, lower in math where errors compound) and even across individual trajectories (some prefixes are more within the teacher's support than others).
+
+\paragraph{Approach.}
+Replace the fixed $\kappa$ with an \emph{adaptive, per-trajectory} reliability estimate. Concretely: (1)~at each prefix position, compute the teacher's self-consistency score by sampling $K$ teacher completions and measuring their agreement (high agreement signals high reliability); (2)~use this as a per-position reliability signal $r_t^{\text{self}}(x, h_t) = 1 - H(\text{majority}(A_t^{(1)}, \ldots, A_t^{(K)}))$; (3)~set the position weight to $w_t = r_t^{\text{self}} \cdot \kappa_{\text{base}}^t$, combining the global depth decay with a local reliability modulation. This makes the schedule data-dependent without requiring auxiliary models: positions where the teacher is uncertain (diverse completions) are automatically downweighted.
+
+\paragraph{Feasibility.}
+High. Self-consistency sampling requires $K$ additional teacher forward passes per position, but since teacher queries are already needed for supervision, the marginal cost is $K-1$ extra passes. With $K=4$ and the existing efficient batching, this adds $\sim$3$\times$ teacher compute but remains far cheaper than live environment interaction. The ablation showing that RL-pool and stationary-pool perform identically suggests the method is not sensitive to pool details, so adaptive weighting should improve the ceiling.
+
+\subsection{Direction 2: Cross-Environment Prefix Transfer for Zero-Shot Agent Distillation}
+
+\paragraph{Gap.}
+ReOPD requires a teacher trajectory pool for each target environment. When deploying agents to \emph{new} environments not seen during teacher RL training, no prefix pool exists, and the method cannot be applied without first training a teacher in the new environment.
+
+\paragraph{Approach.}
+Develop a prefix abstraction layer that enables cross-environment transfer of prefix pools. The key insight is that multi-turn agent interactions share structural patterns across environments (plan $\to$ execute $\to$ observe $\to$ revise). Design a domain-agnostic prefix encoder that maps environment-specific trajectories into a shared representation space: (1)~extract the \emph{structural skeleton} of each prefix (action types, observation lengths, success/failure signals) while abstracting away environment-specific content; (2)~at distillation time in a new environment, retrieve structurally similar prefixes from existing pools and adapt them via lightweight template filling; (3)~the step-decay schedule transfers directly since it depends only on depth, not environment content. This enables ``zero-shot'' ReOPD in new environments by recycling structural knowledge from existing pools, bootstrapping distillation before any teacher is trained in the target domain.
+
+\paragraph{Feasibility.}
+Moderate. The main challenge is defining ``structural similarity'' across environments with different observation spaces. The paper's finding that joint math+search training works seamlessly (same student, merged pools, no degradation) suggests the method already handles heterogeneous environments. A prototype could use the observation-type (code output, search result, error message) as the structural feature and test transfer from math$\to$coding or search$\to$multi-hop QA environments.
+
+\subsection{Direction 3: Combining Prefix Replay with Diffusion LLM World Models}
+
+\paragraph{Gap.}
+ReOPD eliminates environment interaction by replaying teacher-recorded observations. However, the prefix pool is inherently limited to the teacher's exploration---it cannot generate novel situations the teacher never encountered. Our recently reviewed MDLM world model~\cite{deshpande2026masked} can generate high-fidelity synthetic observations but at inference cost. There is no method that combines the efficiency of prefix replay with the coverage of generative world models.
+
+\paragraph{Approach.}
+Design a hybrid training pipeline that uses prefix replay for well-covered regions and MDLM-generated observations for novel regions: (1)~maintain the standard ReOPD prefix pool from teacher RL rollouts; (2)~identify ``coverage gaps'' where the student's policy at step $t$ would take actions diverging significantly from any recorded teacher action (high KL between student and all pool entries at that depth); (3)~for these gap positions, use the MDLM world model to generate synthetic observations conditioned on the student's \emph{actual} action, creating on-the-fly synthetic prefixes; (4)~apply the teacher's supervision on these synthetic-observation prefixes with a reduced weight (reflecting the world model's imperfect fidelity). The MDLM's steerability via anchor conditioning allows fixing the student's action as an unmasked anchor and generating consistent observations. This extends pool coverage beyond the teacher's exploration without live environment costs.
+
+\paragraph{Feasibility.}
+Moderate-to-high. The MDLM world model (SDAR-8B) achieves 0.982 in-domain MAUVE, suggesting synthetic observations would be sufficiently realistic. The coverage-gap detection reduces MDLM usage to only where needed ($<$20\% of positions based on typical student-teacher overlap), keeping costs manageable. A pilot on the math environment (where code execution outputs are highly structured) would test whether synthetic observations improve the student's ability to recover from novel error states not in the teacher's pool.
+
+\section{Conclusion}
+
+This paper reformulates multi-turn on-policy distillation as a principled balance between student occupancy relevance and teacher reliability, arriving at a remarkably simple one-parameter solution: sample training positions proportional to $\kappa^t$ from the teacher's pre-collected trajectory pool. The theoretical foundation---a two-sided bound decomposing the surrogate gap into total variation (occupancy shift) and reliability error, connected via a geometric bridge between distributions---provides rigorous motivation for what might otherwise appear ad-hoc. Practically, ReOPD achieves OPD-level or better accuracy (+2.7~pp on math) while being 4$\times$+ faster and requiring zero environment interaction during student training. The finding that teacher's own prefixes outperform stronger models' prefixes is a key insight for the distillation community: reliability trumps raw capability when designing prefix distributions. For our research program, this work extends the OPD framework from single-turn to multi-turn agentic settings and opens directions for adaptive scheduling, cross-environment transfer, and integration with generative world models.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+\bibitem[Liao et~al.(2026)]{liao2026multiturn}
+B.~Liao, H.~Dong, C.~Monz, X.~Xu, L.~Dong, F.~Wei.
+\newblock Multi-Turn On-Policy Distillation with Prefix Replay.
+\newblock \emph{arXiv preprint arXiv:2607.04763}, 2026.
+
+\bibitem[Deshpande(2026)]{deshpande2026masked}
+D.~Deshpande.
+\newblock Masked Diffusion Language Models are Strong and Steerable Text-Based World Models for Agentic RL.
+\newblock \emph{arXiv preprint arXiv:2607.16204}, 2026.
+\end{thebibliography}
+
+\end{document}
