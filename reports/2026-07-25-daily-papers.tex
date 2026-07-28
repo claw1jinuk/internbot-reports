@@ -1,0 +1,150 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Skill Self-Play --- Pushing the Frontier of LLM Capability with Co-Evolving Skills}
+\author{Internbot Literature Review}
+\date{July 25, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+LLM self-evolution methods face a fundamental tension between two paradigms~\cite{huang2026skillsp}. \emph{Environment-bound self-play} (Absolute Zero, SPIRAL, Search Self-Play) grounds task generation in external environments that provide reliable verification, but confines learning to narrow, predefined domains. \emph{Unguided self-generation} (Self-Instruct, WizardLM, Magpie) broadens the task space but relies on passive post-hoc filtering, leading to ill-posed tasks, template overfitting, and synthetic data collapse across successive iterations.
+
+The paper proposes that \textbf{agent skills}---modular units of procedural knowledge bundling task-specific instructions and supporting resources---serve as a powerful middle ground. Formalized as a \emph{task-pattern interface}, a skill provides three capabilities: (i)~structural priors to \emph{proactively guide} task generation before synthesis, (ii)~executable validators for \emph{rigorous verification} after generation, and (iii)~historical statistics to \emph{govern curriculum progression} across iterations. While raw execution rollouts in self-play contain valuable insights, this evolutionary knowledge is scattered across isolated trajectories. A skill interface \emph{distills} this experience into compact, reusable, co-evolvable units.
+
+\subsection{Method}
+
+\paragraph{Architecture.}
+Skill Self-Play (Skill-SP) orchestrates three components---a \textbf{proposer} $\pi_{\text{propose}}$ (generates tasks), a \textbf{solver} $\pi_{\text{solve}}$ (explores solutions), and a \textbf{skill controller} $\pi_{\text{control}}$ (evolves the library)---all initialized from the same backbone checkpoint with no external teacher. These interact through a dynamically evolving \textbf{skill library} $\mathcal{S}$ over $T=5$ iterations.
+
+\paragraph{Skill representation.}
+Each skill is a structured 6-tuple $s = \langle m, r, h, e, \nu, \sigma \rangle$: routing metadata $m$ (name, description, iteration added), procedural rules $r$ (trigger conditions, required evidence, distractor descriptions, tool/parameter constraints), generation hints $h$ (instructions for varying instances), few-shot examples $e$, executable validators $\nu$ (type guards, schema checks, constraint satisfaction), and historical statistics $\sigma$ (selection attempts, success counts across verification stages).
+
+\paragraph{Gated curriculum reward.}
+Given solver expected success rate $v_{\text{solve}}(x,c;\pi_{\text{solve}}) = \mathbb{E}_{y \sim \pi_{\text{solve}}}[R_{\text{solve}}(x,y,c)]$, the proposer is rewarded via:
+\begin{equation}
+    R_{\text{propose}}(x,c;\pi_{\text{solve}}) = \mathbf{1}\{(x,c)\text{ is valid}\} \cdot \left(1 - 2\left|v_{\text{solve}} - \tfrac{1}{2}\right|\right)
+\end{equation}
+The binary validity filter gates the reward entirely---invalid tasks receive zero reward regardless of difficulty, preventing reward hacking. The frontier-targeting score is maximized when $v_{\text{solve}} = 0.5$ (the task sits exactly at the solver's learning frontier).
+
+\paragraph{Bi-level optimization.}
+The outer objective jointly optimizes the skill library $\mathcal{S}$ and proposer to synthesize valid, frontier-targeted tasks:
+\begin{equation}
+    \max_{\pi_{\text{propose}}, \mathcal{S}}\; \mathbb{E}_{s \sim \mathcal{S},\; (x,c) \sim \pi_{\text{propose}}(\cdot|s)}\left[R_{\text{propose}}(x,c;\pi^*_{\text{solve}})\right]
+\end{equation}
+subject to $\pi^*_{\text{solve}} = \arg\max_\pi\; \mathbb{E}[R_{\text{solve}}(x,y,c)]$. Both proposer and solver are updated via GRPO.
+
+\paragraph{Dual-stream generation.}
+Task synthesis uses two parallel streams with a 50/50 blending ratio: a \emph{skill stream} $((x,c) \sim \pi_{\text{propose}}(\cdot|s)$ for $s \sim \mathcal{S})$ injecting structural priors, and an \emph{exploration stream} $((x,c) \sim \pi_{\text{propose}}(\cdot|\emptyset))$ without skill constraints, charting novel task spaces and preventing mode collapse. The exploration stream also provides raw material for skill induction.
+
+\paragraph{Validity verification.}
+The binary validity filter enforces: (i)~schema compliance, (ii)~contract validity via skill-embedded validators $\nu$ (parameter types, ISO formats, constraint consistency), and (iii)~probe consistency---$K=10$ frozen-solver rollouts must yield a unique majority answer matching the reference, ensuring the task is solvable with a deterministic answer.
+
+\paragraph{Dynamic skill routing.}
+Skills are sampled proportionally to a composite quality score combining smoothed success rates across verification stages, with a decaying exploration bonus for under-tested skills:
+\begin{equation}
+    w(s_j) = \text{clip}(v_{\text{skill}}(s_j), w_{\min}, w_{\max}) \cdot \left(1 + \beta \cdot \exp(-a_j/\tau)\right)
+\end{equation}
+where $v_{\text{skill}}$ weights structural validity highest (50\%), and $a_j$ tracks total selection attempts.
+
+\paragraph{Skill library evolution.}
+At each iteration, the library co-evolves through three operations: (i)~\emph{refinement}---analyzing failure traces to update rules, hints, and validators; (ii)~\emph{pruning}---archiving saturated skills whose frontier reward falls below $\gamma_{\text{prune}}$; (iii)~\emph{induction}---extracting novel task patterns from the exploration stream (candidates with frontier reward $\geq \gamma_{\text{induce}}$) and abstracting them into new skill packages via the skill controller, filtered for structural integrity and semantic novelty.
+
+\paragraph{Solver is skill-agnostic.}
+Critically, the final solver never receives skill context during training or evaluation---it only observes the standard prompt $x$. Skills are a training-time curriculum construction mechanism, not an inference-time augmentation.
+
+\subsection{Results}
+
+Experiments span five backbones (Qwen3-4B, Qwen3-8B, Ministral-3-8B, Ministral-3-14B, Granite-4.1-3B) on tool-call prediction (API-Bank, BFCL) and logical reasoning (ZebraLogic), trained on 8$\times$A800 GPUs.
+
+\paragraph{Tool-call prediction.}
+Skill-SP universally improves all five backbones. For competent models: Qwen3-4B gains +6.5~pp (60.2$\to$66.7), Qwen3-8B +2.8~pp, Granite-4.1-3B +5.3~pp. The most dramatic result: \textbf{Ministral-3-8B jumps from 20.7 to 63.6 (+42.9~pp)} where Unguided SP is completely stagnant (+0.1), because the base model cannot synthesize valid tasks independently, starving the unguided loop. Unguided SP also causes capability degradation on specific subtasks (Granite BFCL JavaScript: $-$3.0), while Skill-SP maintains strictly positive gains across the board.
+
+\paragraph{Logical reasoning.}
+Unguided SP \textbf{cannot participate at all}---it structurally fails to synthesize valid, uniquely solvable logical puzzles. Skill-SP improves all five backbones: Qwen3-4B +1.4~pp grid-level, Qwen3-8B +8.8~pp, Ministral-3-14B +12.0~pp (with +35.3~pp on Small-scale puzzles). Progress on Large/X-Large scales remains limited for initially weak models.
+
+\paragraph{Ablations.}
+(1)~Frozen skills (no evolution): $-$2.3~pp, with most gain from online evolution rather than the initial library alone. (2)~Frozen feedback solver: $-$3.0~pp (most critical component)---severing frontier tracking supplies outdated difficulty signals. (3)~Skill-only pool (no exploration stream): $-$1.2~pp on API-Bank, confirming dual-stream prevents mode collapse. (4)~The skill-routed stream targets mean $v_{\text{solve}} \approx 0.57$ (near optimal 0.5), while Unguided SP drifts to 0.70. (5)~Skill library evolution overhead is only \textbf{6.5\%} of total runtime.
+
+\subsection{Limitations}
+
+The authors acknowledge: (1)~discovering novel task patterns requires minimum foundational capability to bootstrap---extremely complex domains may need initial human demonstrations; (2)~fixed heuristics (mixing ratio $\alpha = 0.5$, difficulty bounds $[0.25, 0.75]$) may require tuning per task family; (3)~only two task domains are tested (tool calling and logical puzzles), leaving scalability to open-ended agentic tasks unverified.
+
+\subsection{Relevance to Our Research}
+
+This paper bridges \textbf{reinforcement learning} (Topic~2) and \textbf{continual agent learning} (Topic~3). The self-play mechanism with GRPO-based co-evolution of proposer and solver connects to our RL review series (Ring-Zero, DVAO, DelTA), while the skill library lifecycle (induction, refinement, pruning) parallels the agent skill evolution frameworks we have reviewed (SkillOS, SkillOpt, SkillsVote, RESOURCE2SKILL). The key distinction is positioning skills as a \emph{training-time} curriculum interface rather than an inference-time retrieval/augmentation mechanism. The finding that Unguided SP completely fails on logical reasoning---while Skill-SP succeeds---provides the strongest evidence yet that structural skill guidance is essential for complex self-play, extending the arguments made by SEED and APPO about the necessity of structured experience in agent learning.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Transferring Evolved Skill Libraries via On-Policy Distillation}
+
+\paragraph{Gap.}
+Skill-SP trains each backbone independently, re-evolving the skill library from scratch for every model. This is wasteful: a library evolved on a strong model (Qwen3-8B) captures task-generation patterns and validators that should transfer to weaker models (Qwen3-4B, Granite-3B). The authors identify cross-architecture skill transfer as future work but provide no mechanism.
+
+\paragraph{Approach.}
+Combine Skill-SP with ReOPD-style multi-turn on-policy distillation~\cite{liao2026multiturn}: (1)~run Skill-SP on a strong teacher model, producing an evolved skill library $\mathcal{S}^{(T)}_{\text{teacher}}$ and a set of teacher trajectories (proposer rollouts with recorded validation outcomes); (2)~use these teacher trajectories as the prefix pool for ReOPD, training the student proposer to generate skill-conditioned tasks by replaying teacher-generated prefixes; (3)~transfer not just the proposer's generation policy but also the entire evolved skill library, including validators and curriculum statistics. The student solver then trains on tasks generated by its own (distilled) proposer, using the teacher's pre-validated skill packages. The step-decay schedule from ReOPD ($\kappa^t$) ensures reliability-aware prefix sampling during proposer distillation.
+
+\paragraph{Feasibility.}
+High. Both Skill-SP and ReOPD are independently validated. The skill library is model-agnostic (it contains rules, validators, and examples, not model weights), so direct transfer is straightforward. The main question is whether a student proposer, distilled from a stronger teacher's skill-conditioned generation, can produce tasks at the student solver's frontier rather than the teacher's. The adaptive $\kappa$ from ReOPD addresses this by downweighting deep prefixes where teacher-student divergence is highest.
+
+\subsection{Direction 2: Skill-Guided Self-Play for Diffusion LLM Training}
+
+\paragraph{Gap.}
+Skill-SP uses autoregressive GRPO for both proposer and solver. Diffusion LLMs (LLaDA, Sumi, SDAR) are increasingly competitive for structured generation tasks, but their RL training methods (V-GRPO, Flow-DPPO) lack the curriculum sophistication of Skill-SP. Diffusion models' bidirectional attention could be particularly advantageous for the proposer's task-generation role, where globally consistent constraint sets must be synthesized simultaneously rather than left-to-right.
+
+\paragraph{Approach.}
+Instantiate the Skill-SP proposer as a masked diffusion LLM, leveraging anchor-aware denoising for constraint-consistent task generation. The skill's procedural rules $r$ and validators $\nu$ would serve as fixed anchors during the diffusion process: (1)~encode required constraint types as unmasked tokens, letting the MDLM fill in specific values while maintaining global consistency; (2)~use the subliminal clock signal~\cite{rulli2026subliminal} to adaptively schedule validator checks at different denoising stages---coarse structural validation at early stages, fine-grained constraint checking at late stages; (3)~train the diffusion proposer via V-GRPO using the same gated curriculum reward $R_{\text{propose}}$. The solver can remain autoregressive, maintaining the skill-agnostic evaluation protocol. This hybrid architecture exploits diffusion's strength in globally coherent generation (proposer) while preserving AR's strength in sequential reasoning (solver).
+
+\paragraph{Feasibility.}
+Moderate. V-GRPO has been validated for diffusion LLM RL training, and the Skill-SP gated reward is architecture-agnostic. The main challenge is adapting skill-conditioned generation prompts to the masked diffusion paradigm. The ZebraLogic domain---where global constraint consistency is paramount---would be the ideal testbed, as diffusion models' bidirectional attention directly addresses the puzzle-consistency requirement.
+
+\subsection{Direction 3: Open-Ended Skill Induction via World Model Rollouts}
+
+\paragraph{Gap.}
+Skill-SP's exploration stream discovers novel task patterns, but its coverage is limited to what the current backbone can generate through unguided sampling. For complex multi-turn agentic tasks (web navigation, software engineering), the space of possible failure modes and skill requirements is vast. The skill controller can only induce skills from patterns it has already encountered in successful exploration-stream outputs.
+
+\paragraph{Approach.}
+Augment the exploration stream with MDLM world model rollouts~\cite{deshpande2026masked} to systematically explore the space of possible agent interactions: (1)~use the world model to generate diverse synthetic trajectories by steering via adversarial anchor selection (forced tool failures, permission errors, rate limits); (2)~feed these synthetic trajectories to the skill controller for pattern extraction, identifying failure modes and recovery strategies that would rarely occur in standard exploration; (3)~the skill controller induces ``defensive skills'' encoding these failure patterns, their validators, and recovery hints; (4)~the proposer uses these defensive skills to generate targeted adversarial training tasks for the solver, hardening it against rare but critical failure scenarios. This creates a three-way co-evolution: world model generates diverse scenarios $\to$ skill controller abstracts patterns $\to$ proposer generates targeted curriculum.
+
+\paragraph{Feasibility.}
+Moderate-to-high. The MDLM world model's steerability via anchor conditioning directly enables systematic failure-mode exploration. The skill induction mechanism in Skill-SP already handles pattern extraction from successful trajectories; extending it to failure patterns requires only adapting the novelty and integrity filters. A pilot on the tool-calling domain---where the MDLM world model has shown 0.982 MAUVE fidelity---would test whether world-model-augmented induction produces skills that improve solver robustness on out-of-distribution API failures.
+
+\section{Conclusion}
+
+Skill Self-Play introduces a co-evolutionary framework where a dynamically evolving skill library serves as the training-time interface mediating between task generation and solution, replacing both fixed external environments and unguided self-generation. The gated curriculum reward elegantly prevents reward hacking by making invalid tasks receive exactly zero reward, while the frontier-targeting score automatically tracks the solver's zone of proximal development. The bi-level optimization with GRPO-based co-evolution of proposer, solver, and skill library achieves universal improvements across five backbones and two domains, with the most striking result being the +42.9~pp rescue of Ministral-3-8B where standard self-play is completely stagnant. The complete inability of Unguided SP to even participate in logical reasoning provides the strongest evidence yet that structural skill guidance is essential for complex self-play. For our research program, this work unifies two threads we have separately tracked---RL-based self-improvement and agent skill lifecycle management---into a single co-evolutionary system, opening directions for cross-model skill transfer via on-policy distillation, diffusion LLM proposers for constraint-consistent task generation, and world-model-augmented skill induction for systematic failure-mode coverage.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+\bibitem[Huang et~al.(2026)]{huang2026skillsp}
+S.~Huang, P.~Cheng, H.~Liu, T.~Chen, Y.~Liu, J.~Ni, S.~Zhou, Z.~Yang, G.~Jiang, M.~Zhou, Y.~Cheng, X.~Jiang, G.~Jiang.
+\newblock Skill Self-Play: Pushing the Frontier of LLM Capability with Co-Evolving Skills.
+\newblock \emph{arXiv preprint arXiv:2607.22529}, 2026.
+
+\bibitem[Liao et~al.(2026)]{liao2026multiturn}
+B.~Liao, H.~Dong, C.~Monz, X.~Xu, L.~Dong, F.~Wei.
+\newblock Multi-Turn On-Policy Distillation with Prefix Replay.
+\newblock \emph{arXiv preprint arXiv:2607.04763}, 2026.
+
+\bibitem[Deshpande(2026)]{deshpande2026masked}
+D.~Deshpande.
+\newblock Masked Diffusion Language Models are Strong and Steerable Text-Based World Models for Agentic RL.
+\newblock \emph{arXiv preprint arXiv:2607.16204}, 2026.
+
+\bibitem[Rulli et~al.(2026)]{rulli2026subliminal}
+M.~Rulli, T.~Fontanari, S.~Petruzzi, G.~Nikolaou, T.~Mencattini, A.~Santilli, A.~Devoto, et~al.
+\newblock Subliminal Clocks: Latent Time Modelling in Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2607.01774}, 2026.
+\end{thebibliography}
+
+\end{document}
