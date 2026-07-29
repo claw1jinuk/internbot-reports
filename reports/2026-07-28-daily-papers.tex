@@ -1,0 +1,144 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: The Physics of Multi-Turn Long-Horizon Planning --- From Pre-training to Post-training via Single- and Multi-Teacher On-Policy Agentic Distillation}
+\author{Internbot Literature Review}
+\date{July 28, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+While recent benchmarks demonstrate that foundation model agents struggle with sequential multi-step reasoning, prior work has lacked a systematic, controlled study isolating the factors governing planning ability across the full training pipeline~\cite{men2026physics}. This paper addresses three specific questions: (i)~how do models internalize planning capabilities during pre-training, particularly the roles of world model construction, atomic skill composition, and trajectory quality? (ii)~how do post-training methods (GRPO vs.\ OPD) shape planning, and where are their boundaries of effectiveness? (iii)~how can capabilities from multiple expert teachers be integrated, and when does this cause catastrophic interference?
+
+The ``physics'' framing is a metaphor for seeking governing laws---conservation-like properties (what is preserved during training), phase transitions (how data quality shifts cause catastrophic performance changes), boundary conditions (where different algorithms are effective), and interference patterns (how multi-teacher signals combine constructively or destructively).
+
+\subsection{Method}
+
+\paragraph{Controllable Planning Gym.}
+The paper constructs a synthetic environment with hierarchical skill graphs across three thematic domains (Fantasy Alchemy, Livestock Farming, Electronic Assembly), each with tree height $H=5$, width $W=40$ categories per level, and $N=20$ concrete items per category. Synthesis logic follows disjunctive normal form, and tasks are stratified by horizon: short (1--5 steps), middle (6--8 steps), and long (9+ steps). This enables precise control over variables confounded in real-world benchmarks.
+
+\paragraph{Planning patterns vs.\ planning knowledge.}
+The paper draws a sharp distinction formalized via mutual information. \emph{Planning patterns} are the structural CoT skeleton (depth-first search, goal decomposition)---the \emph{how} of reasoning. \emph{Planning knowledge} is task-specific procedural knowledge (synthesis recipes, state-action transitions)---the \emph{what}. Crucially:
+\begin{equation}
+    I(T; P) < I(T; K)
+\end{equation}
+Planning patterns have low mutual information with specific tasks (reusable, amenable to RL optimization), while planning knowledge has high mutual information (task-specific, better suited for supervised fine-tuning). This inequality predicts when RL vs.\ distillation will be effective.
+
+\paragraph{On-policy agentic distillation.}
+For student $\pi_\theta$ and teacher $\pi_{\text{teacher}}$, with per-turn token distributions $p_{k,t} := \pi_\theta(\cdot|H_k, \hat{Y}_{k,<t})$ and $q_{k,t} := \pi_{\text{teacher}}(\cdot|H_k, \hat{Y}_{k,<t})$, the agent-OPD objective is:
+\begin{equation}
+    \mathcal{L}_{\text{Agent-OPD}}(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\left[\sum_{k=1}^{K}\sum_{t=1}^{T_k} D_{\text{KL}}(p_{k,t} \| q_{k,t})\right]
+\end{equation}
+Three variants are studied: sampled-token OPD, top-$k$ OPD ($K=100$, used as default), and full-vocabulary OPD. The paper also distinguishes PG-style OPD (token-level advantages as rewards) from GKD-style OPD (direct KL minimization), finding GKD-style more effective for long-horizon tasks.
+
+\paragraph{Multi-teacher on-policy agentic distillation (MOPD).}
+For $M$ teachers, MOPD combines signals with equal weights:
+\begin{equation}
+    \mathcal{L}_{\text{MOPD}}(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\left[\sum_{k=1}^{K}\sum_{t=1}^{T_k} \frac{1}{M}\sum_{m=1}^{M} D_{\text{KL}}(p_{k,t} \| q_{k,t}^m)\right]
+\end{equation}
+Three integration modes are studied: shared compatible patterns (constructive), partially compatible patterns (requires more iterations), and fully conflicting patterns (causes catastrophic forgetting).
+
+\paragraph{SVD-based gradient analysis.}
+Weight update matrices $\Delta W_l^{(t)} = W_l^{(t)} - W_l^{(b)}$ are decomposed via SVD, and cosine similarity between intermediate and final singular vectors tracks optimization geometry across training.
+
+\subsection{Results}
+
+Experiments use a Qwen2.5-based transformer (2048 hidden dim, 24 layers, $\sim$1B parameters) pre-trained on 1.2B tokens from the Controllable Planning Gym.
+
+\paragraph{Pre-training: world model construction.}
+Models trained with explicit CoT state transition modeling vs.\ direct answering show gains that grow dramatically with horizon: +9.4\% (short), +39.3\% (middle), \textbf{+45.8\%} (long) on avg@8.
+
+\paragraph{Pre-training: compositional generalization.}
+Training only on short tasks yields \textbf{zero} long-horizon performance. Adding just \textbf{5\% middle-horizon data} activates middle pass@8 from 0.83\% to 51.88\%. Adding just \textbf{5\% long-horizon data} activates long pass@8 from 0.00\% to 11.46\%. Suboptimal trajectories cause catastrophic collapse in middle/long-horizon tasks (near zero performance).
+
+\paragraph{Three-region applicability framework.}
+The paper identifies three post-training regimes:
+\begin{itemize}
+    \item \textbf{Region A (Unnecessary):} High-quality pre-training---GRPO and OPD provide negligible benefit ($\pm$0.1\%).
+    \item \textbf{Region B (Effective):} Mixed-quality pre-training---both methods help, but OPD outperforms GRPO by 4--7~pp (e.g., +16.57\% vs.\ +10.03\% in 4Opt:4Sub setting).
+    \item \textbf{Region C (Unsupported):} Low-quality pre-training---\textbf{OPD maintains +18.4~pp gains while GRPO degrades below baseline} ($-$1.6\% for long GRPO). OPD has a strictly broader effective region.
+\end{itemize}
+
+\paragraph{MOPD integration.}
+Shared compatible patterns enable +4--6\% cross-environment generalization (88--91\% on out-of-domain tasks). Partially compatible patterns require 3000+ steps (vs.\ 2000 for fully shared). \textbf{Conflicting patterns cause catastrophic forgetting}: 28--45~pp degradation on the original domain, with cross-environment performance dropping to 15--22\%. SVD analysis confirms: shared patterns show gradient cosine alignment improving to 0.82, while conflicting patterns oscillate at 0.15--0.35 without convergence.
+
+\paragraph{MOPD mode-seeking behavior.}
+MOPD converges to the \emph{intersection} of teacher distributions rather than their average, explaining both its success with compatible patterns (the intersection is high-quality) and its failure with conflicting ones (the intersection is empty or degenerate).
+
+\subsection{Limitations}
+
+The study uses a synthetic environment, sacrificing ecological validity for experimental control. Results are not validated on real-world agentic benchmarks (OSWorld, WebArena). The model scale is limited ($\sim$1B parameters). Fixed teacher weights ($\alpha_m = 1/M$) may be suboptimal for partially compatible teachers. Binary final-outcome rewards may disadvantage GRPO; denser reward signals could narrow the gap with OPD.
+
+\subsection{Relevance to Our Research}
+
+This paper is directly relevant to \textbf{continual learning for LLM agents} (Topic~3) and bridges to \textbf{LLM distillation} (Topic~1) and \textbf{RL} (Topic~2). The three-region applicability framework provides actionable guidance for our distillation research: OPD is the dominant choice under low-quality or long-horizon conditions where GRPO fails entirely. The planning pattern vs.\ knowledge distinction ($I(T;P) < I(T;K)$) explains why our reviewed OPD methods (ReOPD, Direct-OPD, SEED) succeed at transferring algorithmic strategies but struggle with domain-specific procedural knowledge---a recurring theme across our 100 reviews. The MOPD mode-seeking finding has direct implications for multi-teacher distillation approaches (DOPD, Co-Evolving Policy Distillation): teacher compatibility determines whether consolidation is constructive or catastrophic, and SVD-based gradient alignment provides a diagnostic tool for predicting outcomes before training.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Adaptive Teacher Weighting via Pattern Compatibility Detection}
+
+\paragraph{Gap.}
+MOPD uses fixed equal weights ($\alpha_m = 1/M$) across all teachers, treating shared and conflicting signals identically. The SVD analysis reveals that gradient cosine alignment diverges dramatically between compatible (0.82) and conflicting (0.15--0.35) pattern pairs, but this diagnostic is computed post-hoc rather than used to guide training.
+
+\paragraph{Approach.}
+Design an online adaptive weighting scheme that adjusts $\alpha_m$ during MOPD training based on real-time gradient compatibility. At each training step: (1)~compute per-teacher gradient vectors $g^m = \nabla_\theta \mathcal{L}_m$; (2)~measure pairwise cosine similarity $\cos(g^m, g^n)$; (3)~for teachers with negative cosine similarity (conflicting gradients), reduce $\alpha_m$ via exponential decay; (4)~for teachers with positive alignment, maintain or increase weights. The adaptive rule: $\alpha_m^{(t+1)} = \alpha_m^{(t)} \cdot \exp(\beta \cdot \overline{\cos}(g^m, g^{-m}))$, where $\overline{\cos}(g^m, g^{-m})$ is the average cosine similarity of teacher $m$'s gradient with all other teachers. This automatically handles the three compatibility modes---shared patterns receive equal weights, conflicting patterns are suppressed before catastrophic forgetting occurs.
+
+\paragraph{Feasibility.}
+High. Per-teacher gradient computation is already done during MOPD (one forward-backward pass per teacher). The cosine similarity adds negligible overhead. The paper's SVD analysis shows that compatibility is detectable within the first 500 training steps, so the adaptive scheme can intervene early. A controlled experiment comparing fixed vs.\ adaptive weighting on the paper's three compatibility modes would directly validate the approach.
+
+\subsection{Direction 2: Bridging the Three-Region Framework with Prefix Replay}
+
+\paragraph{Gap.}
+The three-region framework shows that OPD has a broader effective region than GRPO, but OPD still requires live environment interaction for multi-turn trajectories. Our reviewed ReOPD~\cite{liao2026multiturn} eliminates this cost via prefix replay, but uses a fixed $\kappa$ that does not account for the pre-training quality regime. In Region~C (low-quality pre-training), the teacher-student gap is large and the reliability concern is acute---the optimal $\kappa$ should be lower (more aggressive early-step weighting). In Region~A (high-quality), the gap is small and uniform weighting suffices.
+
+\paragraph{Approach.}
+Extend ReOPD's step-decay schedule with a \emph{regime-aware} $\kappa$ that adapts to the pre-training quality region. Concretely: (1)~before distillation, estimate the student's planning quality via a diagnostic probe---run the student on a small validation set and measure its avg@8 across short/middle/long horizons; (2)~map the quality profile to the three-region framework: high overall quality $\to$ Region~A ($\kappa \to 1.0$, uniform), moderate quality with long-horizon weakness $\to$ Region~B ($\kappa \approx 0.6$, standard ReOPD), low overall quality $\to$ Region~C ($\kappa \to 0.3$, aggressive early-step focus). The information-theoretic insight $I(T;P) < I(T;K)$ further suggests applying different $\kappa$ values for pattern-focused vs.\ knowledge-focused distillation steps.
+
+\paragraph{Feasibility.}
+High. The diagnostic probe requires only a few hundred forward passes. ReOPD's $\kappa$ can be made regime-dependent with minimal code changes. The paper's controlled environment provides a perfect testbed: pre-train models with 4Opt, 4Opt:4Sub, and 4Opt:8Sub configurations, then compare fixed vs.\ regime-aware $\kappa$ on distillation quality.
+
+\subsection{Direction 3: Skill Self-Play with Physics-Informed Curriculum Design}
+
+\paragraph{Gap.}
+Skill Self-Play~\cite{huang2026skillsp} uses a single gated frontier reward to target $v_{\text{solve}} \approx 0.5$, treating all difficulty sources equivalently. The physics paper reveals that difficulty has a \emph{structured} origin: short/middle/long horizons require qualitatively different capabilities (atomic skills vs.\ compositional chains vs.\ long-horizon planning), and suboptimal trajectory exposure can be catastrophic for long horizons while harmless for short ones.
+
+\paragraph{Approach.}
+Augment Skill Self-Play's curriculum construction with physics-informed horizon stratification: (1)~classify each skill in the library by its required planning horizon (short/middle/long) using the skill's procedural rules and depth statistics; (2)~apply the paper's compositional generalization finding---ensure at least 5\% of training tasks come from each longer horizon to activate compositional transfer; (3)~modify the gated reward to include a horizon-awareness term: $R_{\text{propose}}^{\text{phys}} = R_{\text{propose}} \cdot (1 + \lambda \cdot \mathbf{1}\{\text{long-horizon}\})$, boosting the reward for long-horizon tasks that are at the solver's frontier; (4)~use the three-region framework to decide whether to apply GRPO or OPD at each Skill-SP iteration: if the solver is in Region~A for short tasks but Region~B for long tasks, apply OPD selectively to long-horizon skill-conditioned tasks while using GRPO for short tasks. This physics-informed curriculum prevents the catastrophic collapse observed when suboptimal patterns dominate long-horizon training.
+
+\paragraph{Feasibility.}
+Moderate-to-high. The horizon classification of skills requires extending the skill metadata $\sigma$ with a planning-depth estimate, which can be computed from the skill's few-shot examples. The selective GRPO/OPD application requires maintaining two optimizers but no architectural changes. A pilot on Skill-SP's logical reasoning domain (which has natural horizon stratification from Small to X-Large puzzles) would directly test whether physics-informed curriculum design improves large-scale puzzle performance.
+
+\section{Conclusion}
+
+This paper establishes ``physics-like'' governing principles for multi-turn long-horizon planning through a carefully controlled experimental framework. The most impactful findings are: (i)~explicit world model construction through CoT state transition modeling yields +45.8\% improvement on long-horizon tasks; (ii)~just 5\% long-horizon data activates compositional generalization from zero; (iii)~OPD has a strictly broader effective region than GRPO, maintaining +18.4~pp gains where GRPO degrades below baseline; (iv)~MOPD exhibits mode-seeking behavior, converging to the intersection of teacher distributions---constructive for compatible patterns (+4--6\% generalization) but catastrophic for conflicting ones ($-$28 to $-$45~pp). The planning pattern vs.\ knowledge distinction ($I(T;P) < I(T;K)$) provides a principled explanation for when RL succeeds (low mutual information, reusable patterns) vs.\ when distillation is necessary (high mutual information, task-specific knowledge). For our research program at 101 reviews, this work provides a unifying theoretical lens connecting our distillation, RL, and agent learning threads: the effectiveness of any post-training method is bounded by the pre-training foundation, and the three-region framework offers actionable guidance for choosing between OPD and GRPO based on pre-training quality.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+\bibitem[Men et~al.(2026)]{men2026physics}
+T.~Men, Z.~Jin, K.~Liu, J.~Zhao.
+\newblock The Physics of Multi-Turn Long-Horizon Planning: From Pre-training to Post-training via Single- and Multi-Teacher On-Policy Agentic Distillation.
+\newblock \emph{arXiv preprint arXiv:2607.24720}, 2026.
+
+\bibitem[Liao et~al.(2026)]{liao2026multiturn}
+B.~Liao, H.~Dong, C.~Monz, X.~Xu, L.~Dong, F.~Wei.
+\newblock Multi-Turn On-Policy Distillation with Prefix Replay.
+\newblock \emph{arXiv preprint arXiv:2607.04763}, 2026.
+
+\bibitem[Huang et~al.(2026)]{huang2026skillsp}
+S.~Huang, P.~Cheng, H.~Liu, T.~Chen, Y.~Liu, J.~Ni, S.~Zhou, Z.~Yang, G.~Jiang, M.~Zhou, Y.~Cheng, X.~Jiang, G.~Jiang.
+\newblock Skill Self-Play: Pushing the Frontier of LLM Capability with Co-Evolving Skills.
+\newblock \emph{arXiv preprint arXiv:2607.22529}, 2026.
+\end{thebibliography}
+
+\end{document}
