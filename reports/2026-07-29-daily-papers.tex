@@ -1,0 +1,141 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Pass the Baton --- Trajectory-Relayed On-Policy Distillation}
+\author{Internbot Literature Review}
+\date{July 29, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Standard on-policy distillation (OPD) trains a student by having it generate complete reasoning trajectories on-policy, then supervising with teacher log-probabilities~\cite{xu2026relay}. The fundamental problem is \textbf{prefix failure}: when a student commits to an incorrect reasoning direction early in generation, all subsequent tokens are conditioned on a flawed premise that the teacher would never have produced. The teacher's supervision signal on these downstream tokens becomes low-quality noise, degrading the training signal.
+
+Prior interventions fall short: FastOPD uses fixed-length truncation regardless of \emph{where} reasoning actually fails; TRD (Trajectory-Refined Distillation) rewrites trajectories offline after rollout, but repairs contain visible artifacts and actually degrade performance to 30.69\% vs.\ OPD's 41.23\%; SKD (Speculative Knowledge Distillation) performs token-level mixing but cannot detect reasoning-level failures or break repetitive loops. Preliminary experiments show that replacing only the \emph{single reflection token} at each failure point lifts accuracy from 27.73\% to 34.96\% (+7.23\%), demonstrating that corrections can be remarkably local and that early intervention is far more valuable than late intervention.
+
+\subsection{Method}
+
+\paragraph{Handoff trigger criterion.}
+Relay-OPD detects reasoning failure points via a \textbf{label-free} trigger based on teacher-student asymmetry on reflection tokens:
+\begin{equation}
+    \phi(h) = \mathbf{1}[a^T(h) \in \mathcal{R}] \cdot \mathbf{1}[\mathcal{K}_S(h) \cap \mathcal{R} = \emptyset]
+\end{equation}
+where $a^T(h) = \arg\max_v \pi_T(v|h)$ is the teacher's top-1 token, $\mathcal{K}_S(h) = \text{TopK}_K(\pi_{\bar{\theta}}(\cdot|h))$ is the student's top-$K$ support ($K=5$), and $\mathcal{R}$ is a curated set of 13 reflection tokens (``Wait,'' ``But,'' ``Hmm,'' ``Actually,'' etc.). The trigger fires when the teacher recognizes the need to redirect reasoning while the student does not---requiring no ground-truth answers, reward models, or external verifiers.
+
+\paragraph{Relay trajectory construction.}
+The trajectory interleaves student-generated segments (``student legs'') with brief teacher-generated corrections (``teacher legs'') via a relay race metaphor. A state machine governs three states $s_t \in \{S, T, \text{term}\}$:
+\begin{itemize}
+    \item \textbf{Student leg} ($s_t = S$): student generates tokens autoregressively; at each position, $\phi(h)$ is evaluated.
+    \item \textbf{Handoff} ($\phi = 1$, budget remaining): teacher ``takes the baton,'' generating $L$ paragraphs of corrective reasoning starting from its reflection token.
+    \item \textbf{Resumption}: after $L$ paragraphs, the student resumes generation from the corrected state.
+    \item \textbf{Budget}: at most $M$ teacher takeovers; after the $M$-th, the trajectory terminates.
+\end{itemize}
+The optimal relay budget is $(M=2, L=3)$---at most 2 teacher interventions of 3 paragraphs each.
+
+\paragraph{Training objective.}
+The student is supervised via a PPO-style clipped objective on the relay trajectory tokens $z_t$ (from both student and teacher legs):
+\begin{equation}
+    \mathcal{L}_{\text{Relay}} = -\mathbb{E}_{x,z}\left[\frac{1}{N}\sum_{t=1}^{N} \min\!\left(\rho_t \cdot A_t^{\text{Relay}},\; \text{clip}(\rho_t, 1{-}\epsilon, 1{+}\epsilon) \cdot A_t^{\text{Relay}}\right)\right]
+\end{equation}
+where $\rho_t = \pi_\theta(z_t|h_t^z)/\pi_{\bar{\theta}}(z_t|h_t^z)$ is the importance ratio and $A_t^{\text{Relay}} = \log \pi_T(z_t|h_t^z) - \log \pi_{\bar{\theta}}(z_t|h_t^z)$ is the advantage. On teacher-leg tokens, the advantage is strongly positive (teacher assigns high probability to its own corrections while student assigns lower), providing a clear learning signal.
+
+\paragraph{Unified speculative decoding engine.}
+Rather than running separate generation pipelines, Relay-OPD implements relay generation as state-switched speculative decoding: the student serves as the draft model, and during teacher legs, drafts are verified against $\pi_T$ with acceptance probability $\min(1, \pi_T/\pi_{\text{student}})$. Teacher logits computed during verification provide the trigger criterion $\phi(h)$ at \emph{zero extra cost}.
+
+\paragraph{Self-diminishing intervention.}
+As the student improves during training, fewer triggers fire, naturally reducing teacher involvement from $\sim$13\% of tokens initially to 2--3\% after 20 steps---an emergent transition toward standard on-policy generation.
+
+\subsection{Results}
+
+Experiments use Qwen3-4B teacher with Qwen3-1.7B and Qwen3-0.6B students on 8 mathematical reasoning benchmarks (AIME 2024/2025/2026, MATH500, AMC23, OlympiadBench, HMMT Feb/Nov), trained on DAPO-Math-17K with 8$\times$H100 GPUs.
+
+\paragraph{Main results.}
+Qwen3-1.7B student: Relay-OPD achieves \textbf{46.96\%} average vs.\ OPD at 41.23\% (+5.73~pp), FastOPD at 45.47\% (+1.49~pp), SKD at 42.35\% (+4.61~pp), and TRD at 30.69\%. Qwen3-0.6B student: Relay-OPD achieves \textbf{31.04\%} vs.\ OPD at 28.03\% (+3.01~pp) and FastOPD at 30.42\% (+0.62~pp). SKD \emph{degrades} the 0.6B student to 24.38\% (below OPD).
+
+\paragraph{Ablations.}
+(1)~Teacher leg value: adding 3-paragraph teacher corrections atop trigger-based truncation provides +2.77~pp. (2)~Relay-token objective outperforms teacher FKL (+2.88~pp) and student-draft-token (+2.40~pp) variants. (3)~Top-$K$ for trigger: $K=5$ is optimal; $K=|\mathcal{V}|$ recovers standard OPD (41.23\%), confirming the trigger is essential. (4)~Budget: $M=2$ optimal; $M=4$ degrades by $-$2.95~pp (too off-policy). (5)~$L=3{-}4$ optimal; $L=5$ degrades.
+
+\paragraph{Efficiency.}
+Training trajectory length reduced by \textbf{50.7\%} (1.7B) and \textbf{63.9\%} (0.6B) vs.\ OPD. Convergence at step 35 vs.\ step 55 for OPD. Relay-OPD produces both shorter and more accurate responses (e.g., AIME26: $-$14.2\% length, +4.17\% accuracy vs.\ FastOPD).
+
+\subsection{Limitations}
+
+The authors acknowledge: (1)~evaluation limited to mathematical reasoning with Qwen3 models; (2)~the reflection token set $\mathcal{R}$ may require adjustment for different model families or reasoning styles; (3)~effectiveness depends on a sufficient teacher-student capability gap---benefits diminish as the gap narrows; (4)~the relay budget $(M,L)$ was tuned for the 1.7B student and reused for 0.6B without re-tuning.
+
+\subsection{Relevance to Our Research}
+
+This paper directly extends our extensive \textbf{on-policy distillation} (Topic~1) review series. Our prior reviews have covered single-turn OPD variants (Direct-OPD, Filter-Then-Reweight, DOPD, Early Stopping Rollout, ReNIO), multi-turn extensions (ReOPD), and cross-architecture distillation (TIDE, AR-to-Diffusion OPD). Relay-OPD introduces a qualitatively new intervention point: \emph{online, reasoning-state-driven} trajectory construction during generation, rather than post-hoc filtering or fixed truncation. The label-free trigger criterion based on reflection-token asymmetry is a practical contribution that avoids the reward model dependency of many RL-based approaches. The self-diminishing teacher ratio (13\% $\to$ 2--3\%) provides an elegant automatic curriculum, connecting to our review of ReOPD's reliability-aware scheduling and the Physics paper's three-region framework.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Extending Relay-OPD to Multi-Turn Agentic Distillation}
+
+\paragraph{Gap.}
+Relay-OPD is designed for single-turn mathematical reasoning where the entire trajectory is a monolithic chain-of-thought. In multi-turn agentic settings (code execution, search, tool use), the student's failure modes are qualitatively different: wrong tool selection, incorrect parameter binding, or misinterpretation of environment observations. The reflection-token trigger set $\mathcal{R}$ (``Wait,'' ``But,'' etc.) is specific to reasoning redirection and would not detect agentic failures.
+
+\paragraph{Approach.}
+Design domain-adaptive trigger criteria for multi-turn relay distillation: (1)~for tool-use tasks, define $\mathcal{R}_{\text{tool}}$ as the set of tool-call correction patterns (e.g., ``Let me try a different function,'' ``That returned an error'') and trigger when the teacher's top-1 token initiates a tool correction while the student's top-$K$ does not; (2)~for code execution, trigger on teacher-student divergence at the first token \emph{after} receiving an execution result (where the student must decide whether to debug or proceed); (3)~combine with ReOPD's prefix replay~\cite{liao2026multiturn}: use relay trajectories as the prefix pool, where teacher legs serve as pre-recorded corrections that ReOPD can replay without environment interaction. This hybrid eliminates both the environment cost (via prefix replay) and the prefix failure problem (via relay corrections).
+
+\paragraph{Feasibility.}
+High. The trigger mechanism generalizes naturally---only the token set $\mathcal{R}$ and the trigger context change, not the relay construction or training objective. ReOPD's existing framework for pooling teacher trajectories directly accommodates relay trajectories. A pilot on the math+tool environment from ReOPD's experiments would test whether relay prefixes outperform standard teacher prefixes for prefix replay.
+
+\subsection{Direction 2: Learned Trigger via Subliminal Clock Signals in Diffusion LLMs}
+
+\paragraph{Gap.}
+Relay-OPD's trigger relies on a hand-crafted reflection token set $\mathcal{R}$ that is model-family-specific and may not transfer across architectures. For diffusion LLMs (which generate via iterative denoising rather than left-to-right), reflection tokens have no natural analog---there is no sequential generation to ``redirect.'' Yet diffusion LLMs still suffer from quality degradation during denoising, and a relay-like correction mechanism could improve their generation quality.
+
+\paragraph{Approach.}
+Replace the reflection-token trigger with a learned trigger based on the subliminal clock signal~\cite{rulli2026subliminal}: (1)~during MDLM denoising, extract the internal $\tau$ representation (denoising progress) from the model's mean activation vectors; (2)~define a ``denoising failure'' trigger as a mismatch between the model's internal $\tau$ estimate and the expected $\tau$ for the current step---when the model ``thinks'' it is further along than it actually is, it may be overcommitting to low-quality token choices; (3)~at triggered positions, inject teacher corrections by re-masking the affected tokens and letting a stronger teacher MDLM re-denoise them. This creates a ``diffusion relay'' where the student denoises most positions but the teacher corrects critical ones, analogous to Relay-OPD's student/teacher leg alternation.
+
+\paragraph{Feasibility.}
+Moderate. The subliminal clock provides a continuous, model-intrinsic signal that generalizes across diffusion LLMs without domain-specific token sets. The main challenge is defining the mismatch threshold for triggering correction. The paper's finding that $>$90\% of $\tau$ variance concentrates in a single PC provides a clean 1D signal for threshold-based triggering. A prototype using LLaDA as student and SDAR-8B as teacher on text generation benchmarks would test whether diffusion relay improves over standard MDLM generation.
+
+\subsection{Direction 3: Relay-Guided Skill Induction for Self-Play}
+
+\paragraph{Gap.}
+Skill Self-Play~\cite{huang2026skillsp} evolves skills through an exploration stream that discovers novel task patterns, but the skill controller can only induce skills from \emph{successful} exploration outcomes. When the solver fails on a task, the failure is discarded---no skill is induced from the failure mode. Relay-OPD's trigger mechanism identifies exactly \emph{where} and \emph{how} reasoning fails, but this diagnostic information is used only for trajectory correction, not for systematic skill acquisition.
+
+\paragraph{Approach.}
+Feed Relay-OPD's trigger diagnostics into Skill Self-Play's skill induction pipeline: (1)~during solver training on Skill-SP's curriculum, run Relay-OPD to identify trigger points in the solver's trajectories; (2)~cluster trigger points by the teacher's corrective pattern (what type of reasoning redirection was needed---e.g., constraint re-evaluation, alternative decomposition, numerical verification); (3)~for each cluster, the skill controller induces a ``defensive skill'' that encodes the failure pattern, the correction strategy, and validators checking for the specific error type; (4)~the proposer uses these defensive skills to generate targeted training tasks that exercise the solver's weak points. This closes the loop between failure detection (Relay-OPD) and curriculum construction (Skill-SP), making the self-play system actively \emph{learn from its own failures} rather than discarding them.
+
+\paragraph{Feasibility.}
+High. Both systems are independently validated. The trigger clustering requires only collecting (prefix, trigger-point, teacher-correction) triples during relay generation and running the existing skill controller on these triples. The defensive skill format follows Skill-SP's standard 6-tuple structure. A pilot on the mathematical reasoning domain (shared by both papers) would test whether relay-induced defensive skills improve solver performance on problems that previously triggered corrections.
+
+\section{Conclusion}
+
+Relay-OPD introduces a principled mechanism for constructing hybrid training trajectories that interleave student-generated segments with brief, surgically targeted teacher corrections at reasoning failure points. The label-free handoff trigger---based on teacher-student asymmetry on reflection tokens---is simple, requires no external supervision, and adds zero computational overhead through the unified speculative decoding engine. The method achieves +5.73~pp over standard OPD while reducing training trajectory length by 50--64\% and converging 36\% faster. The self-diminishing teacher ratio provides an elegant emergent curriculum, with teacher involvement naturally declining from 13\% to 2--3\% as the student improves. For our distillation research program, Relay-OPD fills a specific gap between fixed truncation (FastOPD) and post-hoc rewriting (TRD): \emph{online, state-driven intervention} during generation. The three proposed follow-up directions---multi-turn agentic relay via ReOPD integration, diffusion relay via subliminal clock triggers, and relay-guided skill induction for self-play---each connect Relay-OPD's failure detection mechanism with complementary systems from our review portfolio.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+\bibitem[Xu et~al.(2026)]{xu2026relay}
+H.~Xu, X.~Xu, H.~Hong, Z.~Ni, H.~Li, Y.~Qiu, W.~Lu, Y.~Shen.
+\newblock Pass the Baton: Trajectory-Relayed On-Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2607.26057}, 2026.
+
+\bibitem[Liao et~al.(2026)]{liao2026multiturn}
+B.~Liao, H.~Dong, C.~Monz, X.~Xu, L.~Dong, F.~Wei.
+\newblock Multi-Turn On-Policy Distillation with Prefix Replay.
+\newblock \emph{arXiv preprint arXiv:2607.04763}, 2026.
+
+\bibitem[Rulli et~al.(2026)]{rulli2026subliminal}
+M.~Rulli, T.~Fontanari, S.~Petruzzi, G.~Nikolaou, T.~Mencattini, A.~Santilli, A.~Devoto, et~al.
+\newblock Subliminal Clocks: Latent Time Modelling in Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2607.01774}, 2026.
+
+\bibitem[Huang et~al.(2026)]{huang2026skillsp}
+S.~Huang, P.~Cheng, H.~Liu, T.~Chen, Y.~Liu, J.~Ni, S.~Zhou, Z.~Yang, G.~Jiang, M.~Zhou, Y.~Cheng, X.~Jiang, G.~Jiang.
+\newblock Skill Self-Play: Pushing the Frontier of LLM Capability with Co-Evolving Skills.
+\newblock \emph{arXiv preprint arXiv:2607.22529}, 2026.
+\end{thebibliography}
+
+\end{document}
