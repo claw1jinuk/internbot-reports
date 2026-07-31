@@ -1,0 +1,104 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: CoRT --- Counterfactual Replay for Token-Level Rubric-Guided Policy Optimization}
+\author{Automated Research Review}
+\date{July 31, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Rubric-based reinforcement learning for language models evaluates responses against multiple structured criteria, but standard methods like GRPO reduce this rich multi-criterion signal to a single scalar advantage that is distributed \emph{uniformly} across all generated tokens. This creates a fundamental \textbf{token-level credit assignment gap}: tokens directly responsible for satisfying specific rubric criteria (e.g., formatting markers, required phrases, structural elements) receive the same gradient signal as generic filler tokens. Prior work RTT~\cite{rtt2025} addressed this via a separately trained Token-Level Relevance Discriminator, but this requires a nontrivial data-generation pipeline for token-level relevance supervision plus training an additional model.
+
+\subsection{Method}
+CoRT~\cite{zhang2026cort} introduces \textbf{counterfactual replay}---a training-free mechanism for token-level credit assignment that requires only a single additional forward pass. The key idea is to measure each token's dependence on the rubric criteria by comparing its log-probability under two contexts:
+\begin{itemize}
+    \item \textbf{Full prompt} $x^+$: the original prompt with the instruction/criteria list appended.
+    \item \textbf{Criteria-free prompt} $x^-$: the same prompt with the criteria removed.
+\end{itemize}
+
+For each sampled response $y_i$, the \textbf{counterfactual contrast} at token $t$ is:
+\begin{equation}
+    \Delta_{i,t} = \ell^+_{i,t} - \ell^-_{i,t}
+\end{equation}
+where $\ell^{\pm}_{i,t}$ are log-probabilities under $x^+$ and $x^-$ respectively. Tokens with large $|\Delta|$ are rubric-dependent; tokens with small $|\Delta|$ are generic.
+
+The contrast is transformed into bounded weights via a sigmoid with temperature $\tau$:
+\begin{equation}
+    s_{i,t} = \sigma(\tau \cdot (\Delta_{i,t} - b)) - \tfrac{1}{2}, \quad
+    \tilde{w}_{i,t} = 1 + \eta \cdot \lambda_k \cdot s_{i,t}
+\end{equation}
+where $\eta = 0.5$ bounds provisional weights to $(0.75, 1.25)$, and $\lambda_k$ is a \textbf{SmoothStep ramp} $\lambda_k = 3u_k^2 - 2u_k^3$ with $u_k = \text{clip}((k - k_0)/K, 0, 1)$ that gradually introduces token weighting over $K = 100$ steps. Response normalization ensures $\frac{1}{T_i}\sum_t w_{i,t} = 1$, preserving the response-level advantage magnitude while redistributing credit.
+
+The final token-shaped advantage is $\hat{A}_{i,t} = \text{sg}(w_{i,t}) \cdot A_i$, where $\text{sg}(\cdot)$ is the stop-gradient operator preventing circular weight updates, and $A_i$ is the standard GRPO group-normalized advantage. This plugs into the standard clipped surrogate objective with asymmetric bounds $(0.2, 0.27)$.
+
+\subsection{Results}
+Across four instruction-following benchmarks (IFEval, IFBench, MultiDimIF, AdvancedIF) on Qwen3-4B, Qwen2.5-7B, and Qwen3-14B:
+\begin{itemize}
+    \item \textbf{+4.4pp average improvement} over GRPO across all settings.
+    \item Largest single gain: \textbf{+11.85pp on MultiDimIF} (Qwen2.5-7B, CSR reward: 66.67\% $\to$ 78.52\%).
+    \item CoRT \textbf{exceeds RTT} on most benchmarks despite requiring no separate discriminator---e.g., +4.15pp on MultiDimIF (Qwen3-4B).
+    \item Compatible as a \textbf{plug-in} with DAPO (+0.85pp IFEval-Prompt) and GSPO (+0.40pp).
+    \item General capabilities preserved: Math500, GPQA, and MMLU-Pro scores remain within $\pm$0.6pp of the instruct baseline.
+\end{itemize}
+
+Ablations confirm both components are essential: removing response normalization causes mean-weight drift ($1.0 \to 1.04$) and late-training instability ($-5.5$pp at step 530); removing the SmoothStep ramp causes early gradient spikes ($-3.0$pp). Matched-context controls (length-matched filler, shuffled criteria) verify the signal genuinely reflects criteria dependence rather than prompt-length artifacts.
+
+\subsection{Limitations}
+The counterfactual contrast weakens when: (1) criteria have minimal effect on token likelihoods (e.g., criteria already implied by the prompt), (2) criteria are global or absence-style (``do not use informal language''), producing diffuse rather than localized traces, and (3) response-level rewards are noisy, since CoRT modulates rather than replaces GRPO's advantage. On certain combinations (Qwen2.5-7B with sparse AON reward on IFBench), CoRT underperforms GRPO by 2.31pp, suggesting sensitivity to reward sparsity.
+
+\subsection{Relevance to Research Topics}
+CoRT directly advances \textbf{T2 (RL/reward modeling)} by providing a principled, training-free solution to the token-level credit assignment problem in policy optimization. The counterfactual replay mechanism generalizes beyond rubric-guided settings---any scenario where a separable conditioning signal influences generation quality could benefit from analogous contrast-based token weighting. The plug-in compatibility with DAPO and GSPO demonstrates CoRT as an orthogonal improvement to objective design. The SmoothStep scheduling and response normalization contribute practical training stability insights applicable to all token-weighted RL objectives.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Counterfactual Replay for On-Policy Distillation}
+
+\textbf{Gap.} In OPD frameworks (Relay-OPD~\cite{relayopd2026}, ReOPD~\cite{reopd2026}), the student learns from teacher-corrected trajectories, but all student-generated tokens receive uniform gradient signal regardless of whether they contributed to or deviated from the teacher's reasoning path. CoRT's counterfactual contrast could be adapted: instead of removing rubric criteria, compare token likelihoods under the student's own prefix versus the teacher's prefix to identify tokens where student-teacher divergence is highest.
+
+\textbf{Approach.} Define the OPD counterfactual contrast as $\Delta^{\text{OPD}}_{t} = \ell^{\text{teacher-prefix}}_{t} - \ell^{\text{student-prefix}}_{t}$, measuring each token's sensitivity to the reasoning context. Tokens with high contrast represent critical reasoning junctures where distillation signal is most valuable. Integrate with Relay-OPD's handoff trigger $\phi(h)$ to create a two-level system: relay triggers identify \emph{where} to intervene, while counterfactual weights determine \emph{how much} to weight each token within relay segments.
+
+\textbf{Feasibility.} Requires only one additional forward pass per response (same as CoRT), making it computationally cheap. The prefix-comparison setup naturally arises in OPD where both student and teacher prefixes are available. Expected to improve distillation efficiency by 15--25\% by concentrating gradient on high-divergence tokens.
+
+\subsection{Direction 2: Per-Criterion Disentangled Credit Assignment}
+
+\textbf{Gap.} CoRT computes a single counterfactual contrast by removing \emph{all} criteria simultaneously, collapsing the multi-dimensional rubric signal into a one-dimensional token weight. When criteria interact (e.g., a formatting criterion and a content criterion both influence the same tokens), the aggregate contrast cannot distinguish which criterion drives a token's rubric-dependence. This limits fine-grained multi-reward optimization of the kind explored in DVAO~\cite{dvao2026} and RubricEM~\cite{rubricem2026}.
+
+\textbf{Approach.} Perform $M$ counterfactual replays, each removing a single criterion $j$ to obtain per-criterion contrasts $\Delta^{(j)}_{i,t} = \ell^{x^+}_{i,t} - \ell^{x^+ \setminus c_j}_{i,t}$. This yields an $M$-dimensional credit vector per token, enabling criterion-specific advantage shaping: $\hat{A}^{(j)}_{i,t} = \text{sg}(w^{(j)}_{i,t}) \cdot A^{(j)}_i$. Combine with DVAO's variance-adaptive weighting to dynamically balance criteria based on per-criterion learning progress.
+
+\textbf{Feasibility.} Computational cost scales linearly with $M$ (number of criteria), typically 3--8 in instruction-following. This is acceptable since each is a single forward pass with no generation. The criterion-specific signals could also serve as interpretability tools for understanding which rubric dimensions the model finds most challenging.
+
+\subsection{Direction 3: Counterfactual Credit in Diffusion LLM Training}
+
+\textbf{Gap.} Diffusion LLMs (LLaDA, Dream, Sumi~\cite{sumi2026}) face an even harder credit assignment problem: the denoising objective distributes loss across all masked positions uniformly, and RL-based fine-tuning (V-GRPO~\cite{vgrpo2026}, Flow-DPPO~\cite{flowdppo2026}) inherits this uniformity. Subliminal clocks~\cite{subliminalclocks2026} showed that dLLMs develop internal representations of denoising progress, but these latent signals have not been leveraged for token-level credit during RL training.
+
+\textbf{Approach.} Adapt counterfactual replay to the denoising setting: for a response scored at noise level $t$, compare token likelihoods under the task prompt versus a neutral prompt at the same noise level. The denoising-specific contrast $\Delta^{\text{diff}}_{i,t,\tau} = \ell^{x^+}_{i,t}(\tau) - \ell^{x^-}_{i,t}(\tau)$ captures task-dependent token importance conditioned on the current denoising step $\tau$. Integrate with subliminal clock signals to modulate contrast strength across the denoising trajectory: early steps (high noise) weight structural tokens; late steps (low noise) weight content tokens.
+
+\textbf{Feasibility.} The bidirectional attention of masked dLLMs makes the forward-pass contrast even more informative than in autoregressive models, since each token's likelihood conditions on all unmasked context. V-GRPO's existing infrastructure handles per-step reward signals, making integration straightforward. Expected to improve reward-weighted denoising by reducing gradient waste on noise-dominated positions.
+
+\section{Conclusion}
+CoRT demonstrates that the token-level credit assignment problem in rubric-guided RL can be solved elegantly without any additional trained models. The counterfactual replay mechanism---comparing token likelihoods with and without rubric criteria---provides a principled, bounded, and computationally cheap ($+1$ forward pass) way to redistribute response-level advantages to the tokens that actually matter. The +4.4pp average gain over GRPO, combined with plug-in compatibility with DAPO/GSPO and preservation of general capabilities, establishes counterfactual contrast as a practical tool for fine-grained credit assignment. The three follow-up directions extend this principle to on-policy distillation (where student-teacher contrast replaces criteria contrast), per-criterion disentanglement (for multi-reward optimization), and diffusion LLM training (where denoising-conditioned contrasts address the masked-position uniformity problem).
+
+\begin{thebibliography}{99}
+\bibitem{zhang2026cort} B.-W.\ Zhang, J.\ He, W.\ Wang, S.-L.\ Lv, W.\ Ma, R.\ Lin, S.\ Zhong, L.-Z.\ Guo, ``CoRT: Counterfactual Replay for Token-Level Rubric-Guided Policy Optimization,'' \emph{arXiv preprint arXiv:2607.25659}, 2026.
+\bibitem{rtt2025} Z.\ Zhang et al., ``RTT: From Rubrics to Tokens --- Rubric-Guided Token-Level Reward Assignment for Language Model RL,'' 2025.
+\bibitem{relayopd2026} Relay-OPD, ``Pass the Baton: Trajectory-Relayed On-Policy Distillation,'' \emph{arXiv preprint arXiv:2607.26057}, 2026.
+\bibitem{reopd2026} ReOPD, ``Multi-Turn On-Policy Distillation with Prefix Replay,'' \emph{arXiv preprint arXiv:2607.04763}, 2026.
+\bibitem{dvao2026} DVAO, ``Dynamic Variance-adaptive Advantage Optimization for Multi-reward RL,'' \emph{arXiv preprint arXiv:2605.25604}, 2026.
+\bibitem{rubricem2026} RubricEM, ``Meta-RL with Rubric-guided Policy Decomposition beyond Verifiable Rewards,'' \emph{arXiv preprint arXiv:2605.10899}, 2026.
+\bibitem{sumi2026} Sumi, ``Open Uniform Diffusion Language Model from Scratch,'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{vgrpo2026} V-GRPO, ``Online RL for Denoising Generative Models Is Easier than You Think,'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{flowdppo2026} Flow-DPPO, ``Divergence Proximal Policy Optimization for Flow Matching Models,'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{subliminalclocks2026} Subliminal Clocks, ``Latent Time Modelling in Diffusion Language Models,'' \emph{arXiv preprint arXiv:2607.01774}, 2026.
+\end{thebibliography}
+
+\end{document}
