@@ -1,0 +1,101 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Flux-OPD --- On-Policy Distillation with Evolving Contexts}
+\author{Automated Research Review}
+\date{August 3, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Standard on-policy distillation (OPD) uses a context-free teacher to supervise student-generated trajectories, but this captures only \emph{teacher preferences} rather than \emph{task preferences}, making the teacher's knowledge a ceiling the student cannot exceed. On-policy context distillation (OPCD) conditions the teacher on privileged contexts (rubrics, experience items) to better express task preferences, yet the authors observe a surprising result: \textbf{directly distilling toward context-conditioned teachers underperforms context-free OPD} in open-ended domains. Moreover, when contexts are periodically updated to track the student's improving capabilities---a natural desideratum---the baseline approach (OEL, Online Experiential Learning) suffers \textbf{abrupt loss surges} at context-update boundaries due to conflicting target distributions, actually \emph{degrading} below the SFT baseline (76.86 vs.\ 79.69 VBench average).
+
+\subsection{Method}
+Flux-OPD~\cite{wang2026fluxopd} stabilizes evolving-context distillation through two mechanisms grounded in a theoretical decomposition.
+
+\textbf{Reverse KL Decomposition.} The expected reverse KL across $M$ context-conditioned teachers decomposes as:
+\begin{equation}
+    \mathbb{E}_{c}[D_{\mathrm{KL}}(p_\theta \| q_c)] = D_{\mathrm{KL}}(p_\theta \| q_{\mathrm{geo}}) + (-\log Z)
+\end{equation}
+where $q_{\mathrm{geo}}(v) = \exp(\frac{1}{|C|}\sum_{c} \log q_c(v)) / Z$ is the normalized geometric mean of context-conditioned teachers, and $-\log Z \geq 0$ is a \textbf{conflict term} measuring inter-context disagreement. The conflict term is independent of student parameters and contributes no gradient; only the geometric-mean distillation term drives optimization. Under reverse KL, the student targets the geometric mean (mode-seeking), assigning high probability only to tokens consistently favored across all contexts.
+
+\textbf{Contextual Correction.} Rather than directly imitating $q_{\mathrm{geo}}$, Flux-OPD anchors to the stable context-free teacher $q_0$ and adds a weighted correction:
+\begin{equation}
+    q^{\mathrm{flux}}_k(v) = \mathrm{softmax}_v\!\big(\log q_0(v) + \lambda_k \cdot \Delta_k(v)\big)
+\end{equation}
+where $\Delta_k(v) = \log q_{\mathrm{geo},k}(v) - \log q_0(v)$ is the contextual difference signal. When $\lambda_k = 0$, this reduces to standard OPD; when $\lambda_k = 1$, it approximates OPCD with geometric-mean targets.
+
+\textbf{Conflict-Aware Adaptive Weighting.} The correction strength adapts to inter-context agreement:
+\begin{equation}
+    \lambda_k = \alpha \cdot \mathrm{clip}\!\left(1 - \frac{\delta_k}{\tau},\; \lambda_{\min},\; \lambda_{\max}\right)
+\end{equation}
+where $\delta_k = -\log Z_k$ is the conflict indicator, $\tau$ is a sensitivity threshold, and $\alpha$ controls global scaling. High conflict (large $\delta_k$) automatically reduces contextual influence; consistent contexts (small $\delta_k$) receive stronger weighting, creating a natural curriculum.
+
+\textbf{Context Evolution.} Every 300 training steps, the frozen teacher re-extracts experience items from the \emph{current} student's rollouts plus environment feedback (e.g., downstream video generation results), using $M = 3$ random seeds for diversity. This ensures contexts track the student's evolving capabilities rather than reflecting initial weaknesses.
+
+\subsection{Results}
+Evaluated on two open-ended tasks---prompt optimization for video generators (VBench, Video-Bench) and medical QA (HealthBench)---with multiple teacher-student configurations:
+\begin{itemize}
+    \item \textbf{Prompt optimization} (8B$\to$4B): Flux-OPD achieves 80.18 VBench average vs.\ 79.69 SFT, 79.28 OPD, 79.02 OPCD, and 76.86 OEL. Only method that consistently improves over baseline.
+    \item \textbf{Medical QA} (8B$\to$1.7B): Flux-OPD achieves \textbf{20.61 HealthBench Total} vs.\ 19.06 SFT (+1.55), 19.63 OPD, 19.53 OPCD, 19.66 OEL. Largest gains in Accuracy (+2.10pp) and Communication Quality (+1.15pp).
+    \item \textbf{Stronger teacher} (32B$\to$7B): Flux-OPD achieves 80.24 VBench average, again best among all methods (OPD: 79.89, OPCD: 79.65, OEL: 79.75).
+    \item \textbf{Training stability}: Flux-OPD loss decreases smoothly, matching OPD's trajectory, while OEL exhibits abrupt loss surges at context-update boundaries.
+    \item \textbf{Cross-domain generalization}: Highest IF-Eval accuracy among all methods on out-of-distribution evaluation.
+\end{itemize}
+
+Ablations confirm all three components are essential: evolving contexts contribute +0.98 over static contexts; contextual correction adds +0.37 over naive evolution (OEL); adaptive weighting provides an additional +0.58 over the best fixed-$\lambda$ setting (0.7). The optimal calibration strategy depends on teacher strength: scaling ($\alpha < 1$) suits weaker 8B teachers with higher conflict, while clipping ($[\lambda_{\min}, \lambda_{\max}]$) suits stronger 32B teachers with more consistent contexts.
+
+\subsection{Limitations}
+The improvements, while consistent, are modest in absolute terms (+0.49 VBench, +1.55 HealthBench over SFT). The method requires multiple context-conditioned teacher forward passes per step plus periodic context re-extraction, adding computational overhead not explicitly quantified. The optimal conflict threshold $\tau$ and calibration strategy vary across tasks and teacher sizes, requiring task-specific tuning. Evaluation is limited to two open-ended domains (prompt optimization and medical QA).
+
+\subsection{Relevance to Research Topics}
+Flux-OPD directly advances \textbf{T1 (LLM distillation/OPD)} by extending on-policy distillation to open-ended domains where verifiable rewards are unavailable. The reverse KL decomposition into a geometric-mean distillation term and a conflict term provides a principled theoretical framework for multi-context OPD. The contextual correction mechanism---anchoring to context-free teachers and injecting adaptive corrections---offers a general stabilization strategy applicable to any evolving-target distillation scenario. The conflict-aware weighting connects to our prior reviews of token-level credit assignment (CoRT~\cite{cort2026}) and trajectory-level relay triggers (Relay-OPD~\cite{relayopd2026}), suggesting a hierarchy of adaptive mechanisms at the context, trajectory, and token levels.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Evolving Contexts with Relay-Based Handoff Triggers}
+
+\textbf{Gap.} Flux-OPD's contexts capture global experience items extracted from complete trajectories, while Relay-OPD's handoff trigger $\phi(h) = \mathbf{1}[a^T \in R] \cdot \mathbf{1}[K_S \cap R = \varnothing]$ operates at local trajectory junctures. Neither system leverages both granularities: Flux-OPD lacks fine-grained trajectory-level adaptation, and Relay-OPD's handoff decisions do not evolve with the student's improving capabilities.
+
+\textbf{Approach.} Construct a two-tier system: at the macro level, Flux-OPD's evolving contexts provide global experience items that characterize the student's current failure modes. At the micro level, condition Relay-OPD's handoff trigger on these evolving contexts---specifically, compute $\phi_k(h) = \mathbf{1}[a^T \in R_k] \cdot \mathbf{1}[K_S \cap R_k = \varnothing]$ where the reflection token set $R_k$ is adapted based on the current context pool $C_k$. This creates a system where the teacher's intervention patterns evolve alongside the student's capabilities: early contexts may trigger more frequent handoffs, while later contexts narrow interventions to the student's remaining weaknesses.
+
+\textbf{Feasibility.} Both components exist independently with demonstrated effectiveness. The integration requires only conditioning the relay trigger on evolved context embeddings, adding minimal overhead to Flux-OPD's existing context-extraction pipeline. Expected to improve multi-turn agentic distillation by 2--4pp by concentrating teacher interventions on evolving weak spots.
+
+\subsection{Direction 2: Conflict-Aware Token-Level Credit Assignment}
+
+\textbf{Gap.} CoRT~\cite{cort2026} computes token-level weights via counterfactual contrast but applies a uniform weighting strength across all tokens. Flux-OPD's conflict indicator $\delta_k = -\log Z_k$ provides a per-step measure of context agreement but operates at the response level. Neither system combines \emph{per-token} credit signals with \emph{per-context} conflict signals to achieve fully adaptive token-level credit assignment.
+
+\textbf{Approach.} Extend Flux-OPD's conflict decomposition to the token level: for each token $t$, compute a local conflict indicator $\delta_{k,t} = -\log Z_{k,t}$ from the per-token geometric mean normalization constants across contexts. Tokens where contexts agree (low $\delta_{k,t}$) receive stronger contextual correction; tokens where contexts disagree (high $\delta_{k,t}$) fall back to context-free teacher supervision. Combine with CoRT's counterfactual contrast to create a two-dimensional token weight: $w_{i,t} = f(\Delta_{i,t}, \delta_{k,t})$ where the first dimension captures rubric-dependence and the second captures context reliability.
+
+\textbf{Feasibility.} The per-token conflict computation adds negligible cost since token-level log-probabilities are already available from Flux-OPD's context-conditioned forward passes. The two-dimensional weighting requires only a simple multiplicative combination. Expected to improve credit assignment in multi-criterion open-ended tasks where different contexts provide varying reliability for different tokens.
+
+\subsection{Direction 3: Evolving Contexts for Diffusion LLM Denoising}
+
+\textbf{Gap.} Diffusion LLMs~\cite{sumi2026} train with a uniform denoising objective that treats all noise levels and all token positions equally. V-GRPO~\cite{vgrpo2026} introduced reward-weighted denoising, and subliminal clocks~\cite{subliminalclocks2026} revealed internal time representations, but neither leverages evolving experience items to guide which denoising trajectories to prioritize. In open-ended generation tasks (creative writing, dialogue), verifiable rewards are unavailable, making the standard dLLM training pipeline unable to capture task-specific preferences.
+
+\textbf{Approach.} Adapt Flux-OPD's framework to the denoising setting: (1) extract experience items from the student dLLM's generated outputs and downstream evaluation, (2) condition the teacher on these contexts to produce noise-level-specific target distributions, (3) apply contextual correction with conflict-aware weighting at each denoising step. The geometric-mean formulation naturally handles the multi-step denoising trajectory: $q^{\mathrm{flux}}_\tau(v) = \mathrm{softmax}(\log q_{0,\tau}(v) + \lambda_\tau \cdot \Delta_\tau(v))$ where $\tau$ indexes the denoising step. Evolving contexts would be re-extracted as the dLLM improves, creating a denoising-aware curriculum.
+
+\textbf{Feasibility.} The bidirectional attention of masked dLLMs makes context-conditioned scoring straightforward---the context can be included as unmasked tokens. The conflict indicator across denoising steps would also reveal which noise levels are most sensitive to contextual guidance, informing noise-schedule optimization. Integration with V-GRPO's existing reward-weighted infrastructure is direct.
+
+\section{Conclusion}
+Flux-OPD provides a principled solution to the instability of evolving-context on-policy distillation in open-ended domains. The reverse KL decomposition reveals that multi-context distillation naturally targets the geometric mean of context-conditioned teachers, with a separate conflict term quantifying inter-context disagreement. By anchoring to the stable context-free teacher and applying conflict-aware adaptive corrections in log-probability space, Flux-OPD achieves consistent improvements while maintaining the smooth training dynamics of standard OPD. The three follow-up directions extend this framework to trajectory-level relay integration (combining macro-level evolving contexts with micro-level handoff triggers), per-token conflict-aware credit assignment (fusing CoRT's counterfactual contrast with Flux-OPD's conflict signals), and diffusion LLM training (adapting evolving contexts to denoising-step-conditioned supervision for open-ended generation).
+
+\begin{thebibliography}{99}
+\bibitem{wang2026fluxopd} Y.\ Wang, Z.\ Wang, B.\ Zeng, R.\ Zhang, W.\ Liu, L.\ Yang, Y.\ Dai, Y.\ Shi, B.\ Li, C.\ Tong, D.\ Hua, Y.\ Zhang, W.\ Zhang, ``Flux-OPD: On-Policy Distillation with Evolving Contexts,'' \emph{arXiv preprint arXiv:2607.28022}, 2026.
+\bibitem{cort2026} B.-W.\ Zhang et al., ``CoRT: Counterfactual Replay for Token-Level Rubric-Guided Policy Optimization,'' \emph{arXiv preprint arXiv:2607.25659}, 2026.
+\bibitem{relayopd2026} Relay-OPD, ``Pass the Baton: Trajectory-Relayed On-Policy Distillation,'' \emph{arXiv preprint arXiv:2607.26057}, 2026.
+\bibitem{sumi2026} Sumi, ``Open Uniform Diffusion Language Model from Scratch,'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{vgrpo2026} V-GRPO, ``Online RL for Denoising Generative Models Is Easier than You Think,'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{subliminalclocks2026} Subliminal Clocks, ``Latent Time Modelling in Diffusion Language Models,'' \emph{arXiv preprint arXiv:2607.01774}, 2026.
+\end{thebibliography}
+
+\end{document}
