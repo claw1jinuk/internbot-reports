@@ -1,0 +1,95 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: From RLVR to RLSVR --- Task Transformation Induces Self-Verifiable Rewards for Open-Ended LLM Self-Improvement}
+\author{Automated Research Review}
+\date{August 4, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Reinforcement learning with verifiable rewards (RLVR) has driven substantial reasoning gains in domains like mathematics and coding where correctness is deterministically checkable. However, RLVR is \textbf{fundamentally inapplicable to open-ended tasks}---creative writing, summarization, general language generation---because these tasks lack deterministic verification criteria. Existing alternatives each have shortcomings: RLHF/DPO suffer from preference data cost and reward model staleness; LLM-as-a-Judge introduces capability bottlenecks and evaluation bias; Rubric-as-Reward (RaR) incurs significant verifier costs (\$200--\$900 per training run). Self-play frameworks like R-Zero and Absolute Zero rely on task verifiability and deteriorate on subjective tasks.
+
+\subsection{Method}
+RLSVR~\cite{wang2026rlsvr} introduces a paradigm shift: rather than building better reward models for unverifiable tasks, it \textbf{transforms the task itself} into a proxy environment where rewards become automatically verifiable through environmental rules.
+
+\textbf{The RLSVR Framework} operates in four steps: (1)~the environment samples input $x$ and records a latent variable $z$ as ground truth, (2)~observations constructed from $(x, z)$ are given to the policy for task execution, (3)~environmental rules pose questions about $z$ answerable only from task outputs, and (4)~rule-based rewards are computed by checking against $z$, requiring no human annotation, learned reward model, or external judge.
+
+\textbf{SpyRL} concretely instantiates RLSVR through an information-asymmetric multi-agent game. Among $n = 5$ players, one is randomly designated as the ``spy'' (index $u$), receiving a \emph{degraded} input $o_u = g(x)$ while civilians receive the full input $o_i = x$. The degradation operator $g(\cdot)$ is task-specific: 20\% continuous span masking for text summarization/creative writing, 40\% partial context removal for mathematical reasoning. All players generate outputs $y_i \sim \pi_\theta^P(\cdot \mid o_i, \tau)$, then each votes $v_i \in \{1, \ldots, n\}$ to identify the spy.
+
+\textbf{Self-Verifiable Rewards.} Since the spy identity $u$ is explicitly assigned by the environment, detection rewards are computed via simple indicator functions: $r_i^D = \mathbf{1}[v_i = u]$. The performing stage uses a \textbf{zero-sum reward}:
+\begin{equation}
+    r_u^P = -\beta \cdot (m_u - \bar{m}_c), \quad
+    r_{c_j}^P = \frac{\beta}{n_c}(m_u - \bar{m}_c) - \lambda(m_{c_j} - \bar{m}_c)
+\end{equation}
+where $m_u$ is the vote count the spy receives, $\bar{m}_c$ is the civilian average, $\beta$ controls competitive signal strength, and $\lambda$ adjusts intra-group consistency pressure. The zero-sum constraint $r_u^P + \sum r_{c_j}^P = 0$ enables continual co-evolution: the spy is pushed to improve (avoid detection), civilians maintain quality advantage, and the $\lambda$ term prevents free-riding.
+
+Both stages are optimized via PPO-style clipped objectives with KL regularization, updated in \textbf{strict alternation}---performing then detection---to reduce credit assignment interference.
+
+\subsection{Results}
+Across summarization, creative writing, and mathematical reasoning on Qwen3-4B and Qwen3-8B:
+\begin{itemize}
+    \item \textbf{Summarization}: +4.56 ROUGE-L average (Qwen3-4B), 73.92\% average win rate over base model across 5 benchmarks. R-Zero shows negligible gains; Absolute Zero reaches 62.8\% average win rate.
+    \item \textbf{Creative writing}: 84.3\% novelty win rate, 81.3\% overall win rate on WritingPrompts (Qwen3-4B). R-Zero and Absolute Zero achieve only 48--58\% range.
+    \item \textbf{Mathematics}: +8.97\% average accuracy across 7 benchmarks (Qwen3-4B). Strongest gains on hardest benchmarks: AIME25 +13.3pp (6.7\% $\to$ 20.0\%).
+    \item \textbf{vs.\ RaR}: SpyRL achieves 59.3\% win rate against Qwen3.5-27B-RaR and 48.9\% against GPT-4o-RaR on creative writing---roughly competitive at \textbf{zero verifier cost}.
+    \item \textbf{Human evaluation}: 10 PhD students confirm 80.0\% overall win rate on WritingPrompts vs.\ base model, consistent with automatic metrics.
+\end{itemize}
+
+Ablations demonstrate all components are critical: ``Only Performing'' (frozen detector) plateaus at 72.3\% Math500 vs.\ 79.5\% for full SpyRL (+7.2pp gap); ``Without spy'' (no information asymmetry) stagnates at 71.6\%; optimal group size is $n = 5$. Reward--quality correlation validated: players receiving more votes consistently produce lower-quality outputs (confirmed by GPT-4o ranking over 100 games).
+
+\subsection{Limitations}
+SpyRL requires $n = 5$ outputs per training step (5$\times$ inference cost vs.\ standard RL). The degradation operator $g(\cdot)$ must be manually designed per domain. Only two model sizes (4B, 8B) and three task domains are evaluated. Against the strongest baseline (GPT-4o-RaR), SpyRL achieves only $\sim$49\% win rate on creative writing, suggesting the quality ceiling may be bounded by the information-asymmetry mechanism.
+
+\subsection{Relevance to Research Topics}
+RLSVR directly advances \textbf{T2 (RL/reward modeling)} by providing a fundamentally new approach to reward design for open-ended domains. The task-transformation paradigm---converting unverifiable tasks into verifiable proxy environments---is conceptually analogous to self-supervised learning's relationship to supervised learning. The zero-sum co-evolutionary dynamics connect to Skill Self-Play's~\cite{skillselfplay2026} bi-level optimization, while the information-asymmetry mechanism provides a novel form of curriculum that could complement CoRT's~\cite{cort2026} counterfactual contrast for token-level credit assignment.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Self-Verifiable Rewards for On-Policy Distillation in Open-Ended Domains}
+
+\textbf{Gap.} Flux-OPD~\cite{fluxopd2026} extended OPD to open-ended domains by conditioning teacher models on evolving contexts, but still relies on teacher supervision quality as the implicit reward signal. RLSVR's spy game provides a teacher-independent, self-verifiable reward that could replace or augment teacher-conditioned targets. Currently, no OPD framework uses self-verifiable environmental rewards to guide distillation.
+
+\textbf{Approach.} Construct a hybrid ``SpyOPD'' pipeline: (1)~the student generates $n$ rollouts per prompt, one with degraded context (playing the ``spy''), (2)~the spy game's detection reward provides a verifiable quality signal that selects which student trajectories to distill from the teacher, and (3)~Flux-OPD's conflict-aware contextual correction is applied only to trajectories where the spy game confirms high quality divergence. The zero-sum performing reward replaces external rubric evaluators, while the teacher provides dense token-level supervision for the selected trajectories.
+
+\textbf{Feasibility.} SpyRL's 5$\times$ generation overhead is already comparable to GRPO's multi-sample rollout (typically 8--16 samples). The spy game can run on the student model alone (no teacher calls for reward), reducing overall cost compared to RaR-based approaches. Expected to enable OPD in creative and subjective domains where Flux-OPD currently depends on teacher-defined contexts.
+
+\subsection{Direction 2: Information-Asymmetric Co-Evolution for Diffusion LLM Quality Signals}
+
+\textbf{Gap.} Diffusion LLMs trained with RL (V-GRPO~\cite{vgrpo2026}, Flow-DPPO~\cite{flowdppo2026}) rely on verifiable rewards limited to math/code domains. For open-ended text generation---where dLLMs' bidirectional generation could excel---no self-verifiable reward mechanism exists. The denoising process itself creates a natural information asymmetry: partially denoised outputs contain degraded information compared to fully denoised ones.
+
+\textbf{Approach.} Exploit the denoising trajectory as a natural spy game: at each noise level $\tau$, the dLLM generates outputs from partially corrupted states (analogous to the spy's degraded input). A detector network evaluates whether outputs at different noise levels are distinguishable from fully denoised outputs. The detection difficulty serves as a self-verifiable proxy for denoising quality. Combine with subliminal clocks'~\cite{subliminalclocks2026} latent time representations to condition the detector on the model's internal denoising progress, creating a noise-level-aware quality signal.
+
+\textbf{Feasibility.} The denoising trajectory already provides multiple ``degradation levels'' for free, eliminating the need for manual $g(\cdot)$ design. The detector can share parameters with the dLLM itself (via a classification head on the final hidden states), adding minimal overhead. V-GRPO's per-step reward infrastructure directly supports step-level quality signals from the detection game.
+
+\subsection{Direction 3: Spy-Game Curriculum for Skill Library Quality Assessment}
+
+\textbf{Gap.} Skill Self-Play~\cite{skillselfplay2026} uses a gated curriculum reward $R_{\text{propose}} = \mathbf{1}\{\text{valid}\} \cdot (1 - 2|v_{\text{solve}} - 0.5|)$ that depends on solve rates from a single solver. This creates a single-point quality estimate vulnerable to solver-specific biases. RLSVR's multi-agent detection provides a more robust quality signal through collective voting, but has not been applied to skill library curation.
+
+\textbf{Approach.} Replace Skill Self-Play's single-solver evaluation with a spy-game assessment: for each proposed skill, $n$ agents attempt the skill's challenge, with one agent receiving a degraded skill description (the ``spy''). The detection difficulty measures whether the skill creates meaningful differentiation---skills where the spy is easily detected are too easy, while skills where detection fails are too hard or poorly specified. This provides a self-verifiable proxy for skill difficulty calibration without external evaluation. The zero-sum dynamics naturally co-evolve the skill library's difficulty alongside agent capabilities.
+
+\textbf{Feasibility.} The spy game assessment adds $n$ forward passes per skill evaluation, comparable to Skill Self-Play's existing dual-stream (skill + exploration) overhead. The information degradation operator for skills can simply mask portions of the skill description, requiring no task-specific design. Expected to improve skill library quality by replacing single-point solve rates with robust multi-agent consensus signals.
+
+\section{Conclusion}
+RLSVR introduces a paradigm shift in reward design for open-ended RL: instead of approximating unverifiable objectives with learned reward models, it transforms the task into a verifiable proxy environment. SpyRL's concrete instantiation---an information-asymmetric multi-agent game where spy identity detection serves as a self-verifiable proxy for output quality---achieves strong gains across summarization (+4.56 ROUGE-L), creative writing (84.3\% novelty win rate), and mathematics (+8.97\% accuracy) at zero verifier cost. The three follow-up directions extend this paradigm to on-policy distillation in open-ended domains (replacing rubric-based rewards with spy-game verification), diffusion LLM training (exploiting denoising trajectories as natural information asymmetry), and skill library quality assessment (multi-agent detection as robust difficulty calibration).
+
+\begin{thebibliography}{99}
+\bibitem{wang2026rlsvr} Q.\ Wang, J.\ Shi, H.\ Wang, K.\ Wan, Y.\ Wu, B.\ Liu, Q.\ Wu, H.\ H.\ Li, Y.\ Chen, H.\ Zhao, W.\ Zhao, ``From RLVR to RLSVR: Task Transformation Induces Self-Verifiable Rewards for Open-Ended LLM Self-Improvement,'' \emph{arXiv preprint arXiv:2607.23802}, 2026.
+\bibitem{fluxopd2026} Y.\ Wang et al., ``Flux-OPD: On-Policy Distillation with Evolving Contexts,'' \emph{arXiv preprint arXiv:2607.28022}, 2026.
+\bibitem{skillselfplay2026} Skill Self-Play, ``Pushing the Frontier of LLM Capability with Co-Evolving Skills,'' \emph{arXiv preprint arXiv:2607.22529}, 2026.
+\bibitem{cort2026} B.-W.\ Zhang et al., ``CoRT: Counterfactual Replay for Token-Level Rubric-Guided Policy Optimization,'' \emph{arXiv preprint arXiv:2607.25659}, 2026.
+\bibitem{vgrpo2026} V-GRPO, ``Online RL for Denoising Generative Models Is Easier than You Think,'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{flowdppo2026} Flow-DPPO, ``Divergence Proximal Policy Optimization for Flow Matching Models,'' \emph{arXiv preprint arXiv:2606.11025}, 2026.
+\bibitem{subliminalclocks2026} Subliminal Clocks, ``Latent Time Modelling in Diffusion Language Models,'' \emph{arXiv preprint arXiv:2607.01774}, 2026.
+\end{thebibliography}
+
+\end{document}
