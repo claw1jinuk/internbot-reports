@@ -1,0 +1,98 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: DiffusionGemma Technical Report}
+\author{Automated Research Review}
+\date{August 5, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Autoregressive (AR) LLMs generate text one token at a time, making single-user inference \textbf{memory-bandwidth bound}---GPU tensor cores sit largely idle because each forward pass produces only a single token. DiffusionGemma~\cite{diffusiongemma2026} shifts this bottleneck from memory-bandwidth to compute by generating up to 256 tokens in parallel per forward pass, unlocking idle GPU capacity for dramatically higher single-user throughput. Prior diffusion LLMs (LLaDA, Dream, MDLM) suffer from three limitations: (1)~masked diffusion's rigidity---once a \texttt{[MASK]} is replaced, the decision is permanent even if surrounding context changes, (2)~expensive training from scratch, and (3)~significant quality degradation relative to AR models.
+
+\subsection{Method}
+DiffusionGemma is a 25.2B-parameter MoE model (3.8B active) built atop Gemma~4 26B~A4B via compute-efficient fine-tuning using $<$10\% of the base AR model's pretraining budget.
+
+\textbf{Uniform State Diffusion.} Unlike masked diffusion (LLaDA) which uses explicit \texttt{[MASK]} tokens, DiffusionGemma corrupts text by replacing tokens with samples drawn \emph{uniformly at random} from the full 262K vocabulary. Crucially, during denoising, tokens whose probability drops below threshold due to new context are \textbf{re-noised with fresh random tokens}---enabling continuous error correction that masked diffusion cannot perform.
+
+\textbf{Dual-Mode Attention.} A single shared backbone dynamically switches between: (1)~\emph{causal encoder mode} for processing the input prompt (standard left-to-right attention, identical to AR prefill), and (2)~\emph{bidirectional denoiser mode} with full bidirectional attention across the 256-token generation canvas. For sliding window attention with window $W$, the denoiser expands to symmetric $2W+1$ boundaries. No separate encoder-decoder architecture is needed.
+
+\textbf{Self-Conditioning.} Between denoising steps, probability-weighted embeddings from step $t-1$ are fed back: $\text{softmax}(\hat{\ell}^t) \cdot W_e$ is routed through a gated MLP with residual connection and added to current canvas embeddings. This ``soft prediction'' memory reduces oscillation and accelerates convergence.
+
+\textbf{Two-Stage Training.} Stage~1 (SFT): teaches bidirectional denoising via cross-entropy loss over uniformly noised positions. Stage~2: jointly applies \textbf{RL and sampler distillation} to align training with the entropy-bounded inference procedure, closing the train-test gap.
+
+\textbf{Entropy-Bounded Sampling.} Positions are sorted by entropy (most confident first) and tokens are accepted greedily until cumulative entropy exceeds budget $\gamma = 0.1$. Unselected positions receive fresh random tokens. Temperature linearly decays from $\tau_{\max} = 0.8$ to $\tau_{\min} = 0.4$ across steps. \textbf{Adaptive early stopping} halts when average canvas entropy $< 0.005$ \emph{and} argmax predictions are stable across consecutive steps, yielding 12--16 steps in practice (vs.\ maximum 48).
+
+\subsection{Results}
+\textbf{Throughput}: 1,288 tok/s on NVIDIA H200 ($\sim$6$\times$ AR, $\sim$3$\times$ multi-token prediction); 700+ tok/s on consumer RTX~5090; $\sim$2,000 tok/s on DGX Station. Average 15--20 tokens committed per forward pass.
+
+\textbf{Quality vs.\ Gemma~4 AR} (same parameter count):
+\begin{itemize}
+    \item Knowledge-heavy: MMLU~Pro 77.6\% vs.\ 82.6\% ($-5.0$pp); MMMLU 81.5\% vs.\ 86.3\% ($-4.8$pp).
+    \item Complex reasoning: AIME~2026 69.1\% vs.\ 88.3\% ($-19.2$pp); BigBench Extra Hard 47.6\% vs.\ 64.8\% ($-17.2$pp).
+    \item Code: LiveCodeBench~v6 69.1\% vs.\ 77.1\% ($-8.0$pp); Codeforces ELO 1,429 vs.\ 1,718 ($-289$).
+    \item Vision: MMMU~Pro 54.3\% vs.\ 73.8\% ($-19.5$pp).
+\end{itemize}
+
+\textbf{Independent studies}: Token commitment order shows moderate left-to-right bias (Kendall $\tau = 0.43$--$0.60$) but not strict sequential ordering, with JSON generation showing near-zero correlation ($\tau = -0.044$), proving structural constraints override positional bias. Entropy predicts correctness on math (AUROC = 0.749) but not factual recall (AUROC = 0.471).
+
+\textbf{Sudoku fine-tuning}: Correctness improves from $\sim$0\% to $>$80\% with task-specific SFT, stabilizing in 12 steps---demonstrating that bidirectional attention excels on non-sequential constraint satisfaction.
+
+\subsection{Limitations}
+The 5--19\% quality penalty is substantial, especially on complex reasoning ($-19.2$pp AIME) and vision tasks ($-19.5$pp MMMU~Pro). Google classifies DiffusionGemma as ``experimental,'' recommending AR Gemma~4 for production. The throughput advantage diminishes at high batch sizes (32+) where AR models regain advantage through KV cache reuse. Entropy does not predict hallucination (AUROC = 0.471 on factual recall). Long-context retrieval is significantly weaker (MRCR~v2 128k: 32.0\% vs.\ 44.1\%).
+
+\subsection{Relevance to Research Topics}
+DiffusionGemma represents a milestone for \textbf{T4 (Diffusion LLM)}: the first industry-scale diffusion LLM (25.2B total parameters) deployed in production with native vLLM support. The uniform state diffusion with re-noising capability addresses the fundamental ``locked-in'' limitation of masked diffusion explored in our prior reviews of LLaDA, Dream, and Sumi~\cite{sumi2026}. The two-stage training pipeline (SFT + RL/sampler distillation) connects to V-GRPO~\cite{vgrpo2026} and our broader OPD research. The entropy-bounded sampling provides a principled information-theoretic alternative to the confidence-threshold approaches in prior dLLM decoders (DMax, S2D2~\cite{s2d2}). The dual-mode attention design demonstrates that pretrained AR models can be efficiently repurposed for diffusion---a finding with direct implications for cross-architecture distillation (TIDE~\cite{tide2026}).
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: On-Policy Distillation to Close the Reasoning Gap}
+
+\textbf{Gap.} DiffusionGemma's largest quality deficit is in complex reasoning ($-19.2$pp AIME, $-17.2$pp BigBench Extra Hard), suggesting the parallel generation paradigm struggles with inherently sequential logical chains. Standard OPD from AR teachers has been explored for smaller dLLMs~\cite{ar2diff2026}, but not at DiffusionGemma's scale or with reasoning-targeted distillation strategies.
+
+\textbf{Approach.} Apply Relay-OPD's~\cite{relayopd2026} handoff mechanism adapted for diffusion: identify reasoning failure points in the dLLM's denoising trajectory by monitoring entropy spikes across consecutive steps (analogous to Relay-OPD's reflection token trigger). At detected failure points, inject AR teacher corrections as ``anchor tokens'' that are fixed during subsequent denoising steps, providing sequential reasoning scaffolding within the parallel generation framework. Combine with Flux-OPD's~\cite{fluxopd2026} conflict-aware weighting to adaptively balance AR teacher guidance against the dLLM's native bidirectional strengths.
+
+\textbf{Feasibility.} DiffusionGemma's entropy-bounded sampling already tracks per-position entropy, providing the failure-point detection signal for free. The anchor token mechanism mirrors MDLM world models'~\cite{mdlmwm2026} steerability via fixed tokens. Expected to narrow the reasoning gap by 5--10pp while preserving the throughput advantage on non-reasoning tasks.
+
+\subsection{Direction 2: Subliminal Clock-Guided Entropy Budget Allocation}
+
+\textbf{Gap.} DiffusionGemma's entropy-bounded sampling uses a \emph{global} budget $\gamma = 0.1$ that treats all denoising steps equally. However, subliminal clocks~\cite{subliminalclocks2026} showed that dLLMs develop internal representations of denoising progress ($>$90\% variance in 1 PC) with distinct phases---early steps handle structure, late steps handle content. A uniform entropy budget across steps is suboptimal: early steps should commit structural tokens aggressively (low entropy threshold), while late steps should be more selective for content refinement.
+
+\textbf{Approach.} Train a lightweight probe on DiffusionGemma's hidden states to extract the subliminal clock signal $\tau_t = 1 - |M(x_t)|/L$. Use this to modulate the entropy budget per step: $\gamma_t = \gamma_0 \cdot f(\tau_t)$ where $f$ is a learned or heuristic function that allocates more budget to structurally important early steps and less to content-critical late steps. The parabolic PCA geometry discovered in subliminal clocks provides a natural basis for the modulation function.
+
+\textbf{Feasibility.} DiffusionGemma already computes per-position entropy at every step. Adding subliminal clock extraction requires only a linear probe on existing hidden states (no architectural changes). The self-conditioning mechanism provides the per-step information channel. Expected to improve token commitment efficiency by 10--20\%, reducing average denoising steps from 12--16 to 8--12 while maintaining or improving quality.
+
+\subsection{Direction 3: Uniform State Diffusion for Steerable World Models}
+
+\textbf{Gap.} MDLM world models~\cite{mdlmwm2026} use masked diffusion for text-based world simulation in agentic RL, achieving steerability via fixed anchor tokens. However, masked diffusion's ``locked-in'' limitation means that anchor-inconsistent tokens cannot be corrected once committed, leading to coherence degradation in long-horizon trajectories. DiffusionGemma's uniform state diffusion with re-noising capability directly addresses this---rejected tokens receive fresh random replacements, enabling iterative refinement even after initial commitment.
+
+\textbf{Approach.} Replace the masked diffusion backbone in MDLM world models with DiffusionGemma's uniform state diffusion architecture. The re-noising mechanism provides a natural ``world model revision'' capability: when new agent actions invalidate previously generated state descriptions, affected tokens can be re-noised and re-denoised conditioned on updated anchors. Integrate with the dual-mode attention design to maintain causal encoding of the action-observation history while using bidirectional denoising for state prediction. The self-conditioning mechanism carries forward world-state memory across denoising steps, improving trajectory coherence.
+
+\textbf{Feasibility.} DiffusionGemma's fine-tuning-from-AR approach means existing AR world models can be converted to uniform-state-diffusion world models using $<$10\% additional training budget. The entropy-bounded sampling naturally identifies which state tokens are confidently determined vs.\ uncertain, providing a built-in uncertainty quantification for downstream RL policies. Expected to improve world model coherence by 3--5pp MAUVE while maintaining the steerability advantages of anchor-based generation.
+
+\section{Conclusion}
+DiffusionGemma marks a significant milestone for diffusion LLMs: the first industry-scale deployment (25.2B parameters, 3.8B active) achieving 6$\times$ AR throughput via 256-token parallel generation. Its key innovations---uniform state diffusion with re-noising error correction, dual-mode attention on a single shared backbone, and entropy-bounded sampling with adaptive stopping---address the fundamental limitations of prior masked diffusion models. While the 5--19\% quality penalty (especially on complex reasoning) remains a challenge, the compute-efficient fine-tuning approach ($<$10\% of AR pretraining budget) and native vLLM support establish a practical foundation for future improvements. The three follow-up directions target the reasoning gap via relay-based OPD from AR teachers, the sampling efficiency via subliminal clock-guided entropy budgets, and world model coherence via uniform state diffusion's re-noising capability.
+
+\begin{thebibliography}{99}
+\bibitem{diffusiongemma2026} A.~A.~Taiga, J.~Assiene, D.~Calandriello, et al., ``DiffusionGemma Technical Report,'' \emph{arXiv preprint arXiv:2608.00146}, 2026.
+\bibitem{sumi2026} Sumi, ``Open Uniform Diffusion Language Model from Scratch,'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{vgrpo2026} V-GRPO, ``Online RL for Denoising Generative Models Is Easier than You Think,'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{s2d2} S2D2, ``Fast Decoding for Diffusion LLMs via Training-Free Self-Speculation,'' \emph{arXiv preprint arXiv:2603.25702}, 2026.
+\bibitem{tide2026} TIDE, ``Cross-Architecture Distillation for Diffusion Large Language Models,'' \emph{arXiv preprint arXiv:2604.26951}, 2026.
+\bibitem{ar2diff2026} AR-to-Diff, ``Data-Efficient AR-to-Diffusion LMs via On-Policy Distillation,'' \emph{arXiv preprint arXiv:2606.06712}, 2026.
+\bibitem{relayopd2026} Relay-OPD, ``Pass the Baton: Trajectory-Relayed On-Policy Distillation,'' \emph{arXiv preprint arXiv:2607.26057}, 2026.
+\bibitem{fluxopd2026} Flux-OPD, ``On-Policy Distillation with Evolving Contexts,'' \emph{arXiv preprint arXiv:2607.28022}, 2026.
+\bibitem{mdlmwm2026} MDLM World Models, ``Masked Diffusion LMs are Strong and Steerable Text-Based World Models,'' \emph{arXiv preprint arXiv:2607.16204}, 2026.
+\bibitem{subliminalclocks2026} Subliminal Clocks, ``Latent Time Modelling in Diffusion Language Models,'' \emph{arXiv preprint arXiv:2607.01774}, 2026.
+\end{thebibliography}
+
+\end{document}
