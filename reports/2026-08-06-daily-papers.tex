@@ -1,0 +1,108 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: AURORA-LM --- Autoencoding Unified Representation for Continuous-Latent Diffusion Language Modeling}
+\author{Automated Research Review}
+\date{August 6, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+While images, video, and audio are increasingly modeled in continuous latent spaces via diffusion, text generation remains dominated by discrete approaches. Discrete/masked diffusion LLMs (LLaDA, Dream, DiffusionGemma) operate directly on token IDs with masking or uniform-noise corruption, achieving moderate quality but with fundamental limitations: MDLM and SEDD produce Gen-PPL $>$119 and MAUVE $\sim$0.67--0.69 on OpenWebText. Prior continuous approaches either reuse pretrained embeddings not designed for reconstruction, or compress latents to simplify diffusion at the cost of token-level fidelity. AURORA-LM~\cite{liang2026aurora} inverts this trade-off: \textbf{preserve a high-capacity, decodable text latent and design the diffusion model to learn its distribution directly}.
+
+\subsection{Method}
+AURORA-LM separates representation from generation in a two-phase architecture.
+
+\textbf{Phase 1: Query-Based Encoder-Decoder.} A learned encoder constructs a \textbf{prefix-aligned latent sequence}: position $i$ encodes tokens $1 \ldots (i \cdot r)$ where $r$ is the compression ratio, using attention masks that enforce progressive prefix visibility. A matched decoder with identical visibility constraints recovers tokens from these latents. The encoder-decoder is trained first, then \emph{frozen} during diffusion training, ensuring the latent space is optimized solely for reconstruction fidelity.
+
+\textbf{Phase 2: Block-Causal Diffusion Transformer.} A Transformer generates latent blocks left-to-right ($Q = 16$ positions per block) with full parallel denoising within each block. A two-stream attention mask allows noisy blocks to attend to themselves and all clean prefix blocks, while clean blocks do not attend to noisy positions. This enables \textbf{parallel teacher-forced training} where all blocks are evaluated simultaneously.
+
+\textbf{Flow Matching with $x_0$-Prediction.} The forward process interpolates $z_t = (1-t) \cdot z_0 + t \cdot \epsilon$ where $z_0$ is the clean latent and $\epsilon \sim \mathcal{N}(0, I)$. The model predicts the clean latent directly:
+\begin{equation}
+    \mathcal{L}_{\text{diff}} = \mathbb{E}_t\!\left[\| f_\theta(z_t, t) - z_0 \|^2\right]
+\end{equation}
+Ablations confirm $x_0$-prediction in $x_0$-space is dramatically superior to velocity-based alternatives: MAUVE 0.815 vs.\ 0.017--0.653 for velocity targets.
+
+\textbf{Noisy-Input Bottleneck.} A central technical contribution addressing the tension between high-capacity latents (needed for faithful token reconstruction) and diffusion tractability (easier with lower-dimensional inputs). A \textbf{low-rank projection is applied only to corrupted/noisy inputs} before they enter the Transformer, while the output head predicts \emph{full-width} clean latents without any bottleneck. This accommodates wide latents without reducing decoder-facing capacity.
+
+\textbf{Self-Trajectory Consistency (SC).} Bridges the train-inference mismatch (independent noise sampling in training vs.\ deterministic iterative denoising at inference). At training time, a detached Euler step simulates moving to a neighboring lower-noise state $t'$, and an EMA model provides the consistency target:
+\begin{equation}
+    \mathcal{L}_{\text{ct}} = \| \hat{z}_{0,\theta}(z_t, t) - \text{sg}(\hat{z}_{0,\text{EMA}}(\tilde{z}_{t'}, t')) \|^2
+\end{equation}
+SC provides the largest gains with few denoising steps, narrowing with more steps.
+
+\textbf{Inference.} Entropy-bounded block generation with SC-CFG (Self-Consistency Classifier-Free Guidance) for unconditional tasks and standard CFG for conditional tasks. Each generated block is decoded to tokens via the frozen decoder, then used as clean prefix for the next block.
+
+\subsection{Results}
+\textbf{OpenWebText unconditional generation} (1,024 tokens):
+\begin{itemize}
+    \item AURORA-LM-S: Gen-PPL \textbf{23.56}, MAUVE \textbf{0.890} --- \emph{surpasses the AR baseline} (Gen-PPL 39.40, MAUVE 0.851).
+    \item Discrete diffusion: MDLM Gen-PPL 121.36 / MAUVE 0.668; SEDD Gen-PPL 119.82 / MAUVE 0.693.
+    \item ELF-B (continuous embedding diffusion): Gen-PPL 24.11 but catastrophically low MAUVE 0.229.
+\end{itemize}
+
+\textbf{XSum conditional summarization}: AURORA-LM-S achieves ROUGE-1/2/L of \textbf{36.6/13.4/28.9}, best among all methods including AR (30.5/10.2/24.4) and ELF-B (36.0/12.2/27.8).
+
+\textbf{Nine-task benchmark} (scaling to 1B): AURORA-LM-L (1B) achieves \textbf{32.6 average} across MMLU, ARC-C, OBQA, HellaSwag, WinoGrande, StoryCloze, SIQA, RACE, SQuAD~EM, surpassing Cola-DLM (1.8B) by \textbf{+7.5 points} despite being smaller.
+
+\textbf{Key ablations}: (1)~$x_0$-prediction in $x_0$-space is critical (MAUVE 0.815 vs.\ 0.017--0.653 for alternatives); (2)~noisy-input bottleneck improves robustness for wide latents; (3)~noise-schedule calibration with high-noise emphasis yields consistent gains; (4)~block size $Q = 16$ balances parallelism and quality; (5)~wider latents improve generation after proper calibration; (6)~SC provides largest gains at few inference steps.
+
+\subsection{Limitations}
+The separate frozen autoencoder adds architectural complexity vs.\ end-to-end discrete approaches. Parallelism advantages diminish for short sequences. SC adds training overhead via EMA model and detached Euler steps. All experiments are English-only. The 1B-parameter scaling demonstration, while competitive with Cola-DLM 1.8B, does not yet match multi-billion-parameter AR models on the nine-task benchmark (32.6 average).
+
+\subsection{Relevance to Research Topics}
+AURORA-LM represents a paradigm-defining contribution to \textbf{T4 (Diffusion LLM)}: the first continuous-latent diffusion LM to \emph{surpass} AR baselines on both perplexity and distributional quality (MAUVE). This positions continuous-latent diffusion as a viable alternative to both autoregressive and discrete diffusion paradigms. The prefix-aligned latent design enables block-causal generation that bridges the fully-parallel (LLaDA/Dream) and fully-sequential (AR) extremes. The noisy-input bottleneck and self-trajectory consistency are general techniques applicable to any continuous diffusion model, including flow-matching LMs (LangFlow~\cite{langflow2026}, Flow-OPD~\cite{flowopd2026}). Combined with our prior reviews of masked diffusion (LLaDA, Sumi~\cite{sumi2026}), uniform state diffusion (DiffusionGemma~\cite{diffusiongemma2026}), and subliminal clocks~\cite{subliminalclocks2026}, this completes coverage of the three major diffusion LLM paradigms.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: On-Policy Distillation in Continuous Latent Space}
+
+\textbf{Gap.} All existing OPD methods (Relay-OPD~\cite{relayopd2026}, Flux-OPD~\cite{fluxopd2026}, ReOPD~\cite{reopd2026}) operate in discrete token space, distilling token-level distributions from teacher to student. AURORA-LM's continuous latent space opens a fundamentally different distillation pathway: rather than matching token probabilities, distill \emph{latent distributions} from an AR teacher's hidden states to the diffusion student's denoising trajectory. This latent-space OPD could be more efficient than token-level matching because continuous representations capture semantic similarity that discrete tokens cannot.
+
+\textbf{Approach.} Define latent-OPD as: (1)~encode AR teacher outputs through AURORA-LM's frozen encoder to obtain target latents $z_0^{\text{teacher}}$, (2)~the student denoiser generates latent predictions $\hat{z}_0^{\text{student}}$ from noisy inputs, (3)~the distillation loss operates in latent space: $\mathcal{L}_{\text{OPD}} = \| \hat{z}_0^{\text{student}} - \text{sg}(z_0^{\text{teacher}}) \|^2$. Combine with Flux-OPD's conflict-aware weighting by computing inter-context agreement in the continuous latent space, where geometric means are natural operations (vs.\ the log-space workaround needed for discrete distributions).
+
+\textbf{Feasibility.} The shared encoder-decoder provides a natural bridge between AR and diffusion representations. Latent-space matching requires only one encoder forward pass per teacher output (cheaper than computing full vocabulary distributions). Expected to close the reasoning gap identified in DiffusionGemma ($-19.2$pp AIME) by transferring sequential reasoning patterns from AR teachers via latent-space guidance.
+
+\subsection{Direction 2: Continuous-Latent Subliminal Clocks and Denoising Dynamics}
+
+\textbf{Gap.} Subliminal clocks~\cite{subliminalclocks2026} revealed that \emph{discrete} masked diffusion LLMs develop internal representations of denoising progress, with $>$90\% variance captured in 1~PC and parabolic PCA geometry. Whether continuous-latent diffusion models develop analogous internal time representations is unknown. The continuous latent space may support richer temporal dynamics than discrete masking, since the signal-to-noise ratio varies smoothly rather than discretely.
+
+\textbf{Approach.} Apply the subliminal clocks probing methodology to AURORA-LM: (1)~extract hidden states at each denoising step, (2)~train MLP probes to predict the noise level $t$ from hidden states, (3)~perform PCA on activations across denoising steps to characterize the geometry. Compare the resulting structures with masked diffusion (LLaDA/Dream) and uniform state diffusion (DiffusionGemma). The noisy-input bottleneck creates an interesting asymmetry: probe whether the internal clock is encoded in the bottlenecked input pathway or the full-width prediction pathway. Use discovered temporal representations to improve SC by conditioning the consistency loss on the model's internal clock signal rather than the externally specified noise level.
+
+\textbf{Feasibility.} The probing methodology is lightweight (linear/MLP probes on frozen model hidden states). AURORA-LM's block-causal generation provides a natural per-block denoising trajectory to analyze. The continuous latent space may reveal smoother temporal dynamics than discrete approaches, potentially enabling finer-grained adaptive sampling schedules.
+
+\subsection{Direction 3: Continuous-Latent World Models for Agentic RL}
+
+\textbf{Gap.} MDLM world models~\cite{mdlmwm2026} demonstrated that discrete masked diffusion can serve as steerable text-based world models for agentic RL, outperforming AR alternatives in downstream policy training (+5.3pp average). However, discrete world models inherit masked diffusion's locked-in limitation, and DiffusionGemma's uniform state diffusion addresses this but at the cost of a 5--19\% quality penalty. AURORA-LM's continuous-latent approach offers a third alternative: world simulation in continuous latent space, where state transitions can be modeled as smooth flows rather than discrete token replacements.
+
+\textbf{Approach.} Construct a continuous-latent world model: (1)~encode (state, action) pairs to continuous latents via the frozen encoder, (2)~predict next-state latents via the block-causal denoiser conditioned on action embeddings, (3)~decode predicted latents to text-based state descriptions for agent consumption. The continuous latent space enables gradient-based planning---agents can backpropagate reward signals through the differentiable world model to optimize action selection, which is impossible with discrete token-based world models. The self-trajectory consistency mechanism ensures coherent multi-step state predictions by aligning the denoising trajectory with the temporal dynamics of the environment.
+
+\textbf{Feasibility.} AURORA-LM already surpasses AR baselines on distributional quality (MAUVE 0.890 vs.\ 0.851), suggesting the continuous-latent world model would generate more diverse and realistic state descriptions than both AR and discrete diffusion alternatives. The block-causal generation naturally maps to the turn-by-turn structure of agentic environments. Integration with V-GRPO~\cite{vgrpo2026} for reward-weighted world model training is direct, as the continuous latent space supports standard gradient-based RL optimization.
+
+\section{Conclusion}
+AURORA-LM establishes continuous-latent diffusion as a viable---and potentially superior---paradigm for language modeling, achieving the first diffusion LM to surpass AR baselines on both perplexity (23.56 vs.\ 39.40) and distributional quality (MAUVE 0.890 vs.\ 0.851). The key innovations---prefix-aligned query-based autoencoding, noisy-input bottleneck for high-capacity latents, and self-trajectory consistency for train-inference alignment---are general techniques applicable across diffusion model variants. Combined with our prior coverage of masked diffusion (LLaDA, Sumi), uniform state diffusion (DiffusionGemma), and continuous embedding diffusion (LangFlow), this completes a comprehensive survey of the four major diffusion LLM paradigms. The three follow-up directions extend the continuous-latent approach to on-policy distillation (latent-space teacher-student matching), temporal dynamics analysis (continuous subliminal clocks), and agentic world modeling (gradient-based planning through differentiable continuous-latent simulations).
+
+\begin{thebibliography}{99}
+\bibitem{liang2026aurora} J.~Liang, Y.~Liao, Y.~Cao, J.~Wei, K.~Li, W.~Tan, J.~Zhang, Z.~Cui, J.~Yang, L.~Guo, S.~Yang, B.~Yang, C.~Shan, Z.~Liu, C.~Si, ``AURORA-LM: Autoencoding Unified Representation for Continuous-Latent Diffusion Language Modeling,'' \emph{arXiv preprint arXiv:2608.02602}, 2026.
+\bibitem{langflow2026} LangFlow, ``Continuous Diffusion Rivals Discrete in Language Modeling,'' \emph{arXiv preprint arXiv:2604.11748}, 2026.
+\bibitem{flowopd2026} Flow-OPD, ``On-Policy Distillation for Flow Matching Models,'' \emph{arXiv preprint arXiv:2605.08063}, 2026.
+\bibitem{sumi2026} Sumi, ``Open Uniform Diffusion Language Model from Scratch,'' \emph{arXiv preprint arXiv:2606.19005}, 2026.
+\bibitem{diffusiongemma2026} DiffusionGemma, ``DiffusionGemma Technical Report,'' \emph{arXiv preprint arXiv:2608.00146}, 2026.
+\bibitem{subliminalclocks2026} Subliminal Clocks, ``Latent Time Modelling in Diffusion Language Models,'' \emph{arXiv preprint arXiv:2607.01774}, 2026.
+\bibitem{relayopd2026} Relay-OPD, ``Pass the Baton: Trajectory-Relayed On-Policy Distillation,'' \emph{arXiv preprint arXiv:2607.26057}, 2026.
+\bibitem{fluxopd2026} Flux-OPD, ``On-Policy Distillation with Evolving Contexts,'' \emph{arXiv preprint arXiv:2607.28022}, 2026.
+\bibitem{reopd2026} ReOPD, ``Multi-Turn On-Policy Distillation with Prefix Replay,'' \emph{arXiv preprint arXiv:2607.04763}, 2026.
+\bibitem{mdlmwm2026} MDLM World Models, ``Masked Diffusion LMs are Strong and Steerable Text-Based World Models,'' \emph{arXiv preprint arXiv:2607.16204}, 2026.
+\bibitem{vgrpo2026} V-GRPO, ``Online RL for Denoising Generative Models Is Easier than You Think,'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\end{thebibliography}
+
+\end{document}
