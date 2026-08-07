@@ -1,0 +1,101 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: ABSeeker --- Training Long-Horizon Search Agents via Answer-Backtracked Credit Assignment}
+\author{Automated Research Review}
+\date{August 7, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Long-horizon search agents execute dozens of retrieve--browse--integrate cycles to answer complex queries, but existing training methods treat \textbf{all steps within a trajectory uniformly}. This creates two failures: (1)~failed trajectories containing useful evidence discovery steps receive zero reward, wasting learning signal, and (2)~successful trajectories with erroneous intermediate steps receive full reward indiscriminately. Prior step-level credit methods are either unstable (IGPO ties credit to the model's changing beliefs), sparse (CSO labels only a few critical steps), or indirect (entity-proximity signals cannot determine decision validity). None provide \textbf{dense, stable, fine-grained supervision} for every action in the trajectory.
+
+\subsection{Method}
+ABSeeker~\cite{lu2026abseeker} introduces \textbf{Answer-Backtracked Credit assignment (ABC)}, a two-stage pipeline that decouples credit signals from the model being trained.
+
+\textbf{Stage 1: Answer-Backtracked Clue Recovery.} Given a question--answer pair $(q, a^*)$, an external LLM (DeepSeek-V4-Flash) runs an active ReAct loop, conducting web searches to trace evidence \emph{from the answer back toward the query}, producing a set of verifiable intermediate clues $C = \{c_1, \ldots, c_K\}$---entities, facts, attributes, and relationships that should have been discovered during the forward search.
+
+\textbf{Stage 2: Clue-Anchored Step Scoring.} Each step $s_t$ is scored against the clue set via a rubric: discovering/verifying a correct clue ($+0.8$), ruling out an incorrect candidate ($+0.4$), incorrectly dismissing a correct clue ($-0.8$), submitting the correct answer ($+1.0$), submitting an incorrect answer ($-1.0$). Scores accumulate from a base of 1.0:
+\begin{equation}
+    r_t = \mathrm{clip}\!\left(1.0 + \sum_{j \in \mathcal{A}_t} \Delta_j,\; 0,\; 2.0\right)
+\end{equation}
+
+\textbf{ABC-SFT.} Standard SFT loss reweighted by step rewards via sigmoid: $w(r_t) = 2\sigma(2(r_t - 1))$, mapping neutral reward (1.0) to weight 1.0, high-scoring steps to stronger gradients, and low-scoring steps to minimal signal.
+
+\textbf{ABC-GRPO.} Step rewards are normalized within rollout groups, then a \textbf{discounted step-level advantage} propagates future step quality to earlier decisions:
+\begin{equation}
+    A_{i,t} = \sum_{k=t}^{T_i} \gamma^{k-t} \hat{R}_{i,k}, \quad \gamma = 0.25
+\end{equation}
+This replaces the standard trajectory-level advantage in the clipped GRPO objective. Environment-provided tool responses are masked from optimization.
+
+\textbf{Key properties}: ABC is \emph{dense} (every step scored), \emph{stable} (clues are fixed ground-truth anchors, independent of the policy), and \emph{fine-grained} (distinguishes evidence discovery from candidate elimination from incorrect dismissal). Empirically, $\sim$10\% of steps in \emph{failed} trajectories receive rewards above 1.0, and $\sim$4\% of steps in \emph{successful} trajectories receive rewards below 1.0---granularity impossible with trajectory-level supervision.
+
+\subsection{Results}
+ABSeeker trains Qwen3.5-4B on only 8,500 trajectories (5,500 correct + 3,000 incorrect) and evaluates on BrowseComp, BrowseComp-ZH, xbench, and GAIA-text with up to 200 interaction turns:
+\begin{itemize}
+    \item \textbf{ABC-GRPO vs.\ standard GRPO}: +3.8pp BrowseComp (37.3\% vs.\ 33.5\%), +2.8pp BrowseComp-ZH, +2.0pp xbench-2505, +5.0pp xbench-2510, +3.9pp GAIA-text. Consistent gains across \emph{all 5 benchmarks}.
+    \item \textbf{vs.\ 30B models}: With context management (256K tokens), ABSeeker-4B achieves \textbf{55.3\% BrowseComp}, surpassing DeepMiner-32B (33.5\%), Tongyi-DeepResearch-30B (43.4\%), and OpenSeeker-30B (29.5\%).
+    \item \textbf{Best 4B agent}: Surpasses QUEST-4B (40.0\%), DR-Venus (37.7\%), and AgentCPM-Explore (29.1\%) on BrowseComp.
+    \item \textbf{Context management}: +48\% relative improvement on BrowseComp (37.3\% $\to$ 55.3\%).
+    \item \textbf{Training dynamics}: ABC-GRPO produces both higher accuracy and longer, more exploratory trajectories than standard GRPO.
+\end{itemize}
+
+Ablations confirm ABC improves both SFT (4/5 benchmarks) and GRPO (5/5 benchmarks), with improvements additive across training stages.
+
+\subsection{Limitations}
+Experiments are restricted to a 4B model only; scaling to larger backbones is untested. The framework is applied only to web search agents, and generalization to other long-horizon domains is undemonstrated. Clue recovery and scoring depend on an external powerful LLM (DeepSeek-V4-Flash), introducing a quality dependency.
+
+\subsection{Relevance to Research Topics}
+ABSeeker directly advances \textbf{T3 (Continual Learning for LLM Agents)} by providing a principled solution to the long-horizon credit assignment problem for agent training. The answer-backtracked clue recovery---tracing evidence from outcomes back to queries---is a novel form of hindsight credit that parallels CoRT's~\cite{cort2026} counterfactual contrast (removing information to measure token dependence) and Relay-OPD's~\cite{relayopd2026} handoff trigger (detecting reasoning failure points). The dramatic sample efficiency (8,500 examples, 4B model surpassing 30B agents) demonstrates that fine-grained credit assignment can substitute for scale, a finding with broad implications for agentic distillation and continual skill learning.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Answer-Backtracked Credit for Multi-Turn On-Policy Distillation}
+
+\textbf{Gap.} Multi-turn OPD methods (ReOPD~\cite{reopd2026}, Physics of Planning~\cite{physicsplanning2026}) distill teacher reasoning into student agents but assign uniform credit across all student turns. Failed student trajectories are discarded entirely, even when early turns contain correct evidence gathering. ABSeeker's backtracked clue recovery could provide turn-level credit for OPD by identifying which student reasoning steps align with the teacher's knowledge path and which deviate.
+
+\textbf{Approach.} For each student trajectory in multi-turn OPD: (1)~extract the teacher's reasoning clues by backtracking from the teacher's final answer, (2)~score each student turn against these clues using ABC's rubric, (3)~weight the distillation loss per turn: $\mathcal{L}_{\text{OPD}}^{\text{ABC}} = \sum_t w(r_t) \cdot D_{\text{KL}}(p_{\text{student},t} \| q_{\text{teacher},t})$. This concentrates distillation on turns where the student deviates from the correct evidence path while preserving gradient for turns where the student independently discovers valid clues. Combine with Relay-OPD's handoff trigger to intervene specifically at low-scoring turns.
+
+\textbf{Feasibility.} The clue recovery uses the teacher model itself (no additional external dependency), and the scoring rubric maps directly to multi-turn agentic interactions. The step-level weighting adds minimal overhead since ABC scores are computed offline before training. Expected to improve multi-turn OPD by 3--5pp by recovering learning signal from partially correct student trajectories.
+
+\subsection{Direction 2: Backtracked Credit for Skill Library Quality Assessment}
+
+\textbf{Gap.} Skill Self-Play~\cite{skillselfplay2026} evaluates skill quality via single-solver solve rates, and RLSVR~\cite{rlsvr2026} uses spy-game detection as a proxy. Neither directly assesses whether a skill's intermediate steps contain correct evidence or reasoning. For complex multi-step skills (e.g., research skills, debugging skills), outcome-level evaluation misses the quality of individual skill execution steps.
+
+\textbf{Approach.} Apply ABC's clue recovery to skill execution traces: (1)~for each skill execution that produces a verifiable outcome, backtrack from the outcome to recover intermediate clues, (2)~score each skill step against recovered clues to produce a skill quality profile, (3)~use the step-level quality distribution (not just the outcome) for skill library curation---skills with consistently high step scores are promoted, while skills with high outcome scores but low step scores (``lucky'' executions) are flagged for refinement. The discount factor $\gamma = 0.25$ naturally captures how early skill steps contribute to downstream outcomes.
+
+\textbf{Feasibility.} The backtracking process requires only an LLM with web/tool access (already available in agentic systems). The step-level quality profiles provide interpretable diagnostics for skill evolution---identifying whether failures stem from evidence gathering, reasoning, or action execution. Expected to improve skill library quality by detecting and filtering ``Potemkin skills'' that succeed by chance.
+
+\subsection{Direction 3: Dense Credit Assignment for Diffusion LLM Agent Training}
+
+\textbf{Gap.} Diffusion LLMs trained for agentic tasks via RL (V-GRPO~\cite{vgrpo2026}, MDLM world models~\cite{mdlmwm2026}) use trajectory-level rewards that distribute uniformly across all denoising positions. This is equivalent to the trajectory-level credit problem ABSeeker identifies for search agents, but in the denoising dimension: some generated positions are critical for task success while others are generic filler, yet all receive identical reward signal.
+
+\textbf{Approach.} Adapt ABC's two-stage pipeline to diffusion LLM agent training: (1)~after the dLLM generates a complete response, backtrack from the outcome to recover position-level clues (which generated tokens correspond to correct evidence, reasoning, or actions), (2)~assign position-level rewards based on clue alignment, (3)~weight the V-GRPO denoising objective per position: $\mathcal{L}_{\text{V-GRPO}}^{\text{ABC}} = \sum_i w(r_i) \cdot \mathcal{L}_{\text{denoise},i}$. This combines CoRT's token-level credit principle with ABSeeker's outcome-backtracked verification, providing both position specificity and factual grounding.
+
+\textbf{Feasibility.} The bidirectional attention of dLLMs makes position-level clue scoring more informative than in AR models (each position's generation is conditioned on full context). The clue recovery process is architecture-agnostic, requiring only the generated text and outcome verification. Expected to improve reward-weighted denoising efficiency by concentrating gradient on factually grounded positions.
+
+\section{Conclusion}
+ABSeeker introduces answer-backtracked credit assignment---a dense, stable, fine-grained supervision mechanism that recovers intermediate evidence clues from known answers and scores every agent step against them. The approach achieves state-of-the-art 4B-class performance (55.3\% BrowseComp with context management), surpassing several 30B agents while training on only 8,500 trajectories. The key insight---that long-horizon tasks are naturally backtrackable once the answer is known---provides a general principle for credit assignment beyond web search. The three follow-up directions extend backtracked credit to multi-turn OPD (turn-level distillation weighting), skill library quality assessment (step-level quality profiling), and diffusion LLM agent training (position-level denoising rewards grounded in outcome verification).
+
+\begin{thebibliography}{99}
+\bibitem{lu2026abseeker} Y.~Lu, R.~Ye, J.~Wang, Y.~Du, T.~Jin, S.~Liu, S.~Chen, ``ABSeeker: Training Long-Horizon Search Agents via Answer-Backtracked Credit Assignment,'' \emph{arXiv preprint arXiv:2608.05102}, 2026.
+\bibitem{cort2026} B.-W.~Zhang et al., ``CoRT: Counterfactual Replay for Token-Level Rubric-Guided Policy Optimization,'' \emph{arXiv preprint arXiv:2607.25659}, 2026.
+\bibitem{relayopd2026} Relay-OPD, ``Pass the Baton: Trajectory-Relayed On-Policy Distillation,'' \emph{arXiv preprint arXiv:2607.26057}, 2026.
+\bibitem{reopd2026} ReOPD, ``Multi-Turn On-Policy Distillation with Prefix Replay,'' \emph{arXiv preprint arXiv:2607.04763}, 2026.
+\bibitem{physicsplanning2026} Physics of Planning, ``From Pre-training to Post-training via Single- and Multi-Teacher OPD,'' \emph{arXiv preprint arXiv:2607.24720}, 2026.
+\bibitem{skillselfplay2026} Skill Self-Play, ``Pushing the Frontier of LLM Capability with Co-Evolving Skills,'' \emph{arXiv preprint arXiv:2607.22529}, 2026.
+\bibitem{rlsvr2026} RLSVR, ``Task Transformation Induces Self-Verifiable Rewards for Open-Ended LLM Self-Improvement,'' \emph{arXiv preprint arXiv:2607.23802}, 2026.
+\bibitem{vgrpo2026} V-GRPO, ``Online RL for Denoising Generative Models Is Easier than You Think,'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{mdlmwm2026} MDLM World Models, ``Masked Diffusion LMs are Strong and Steerable Text-Based World Models,'' \emph{arXiv preprint arXiv:2607.16204}, 2026.
+\end{thebibliography}
+
+\end{document}
