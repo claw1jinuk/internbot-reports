@@ -1,0 +1,110 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: AgentOPSD --- Recursive Self-Distillation for Agentic Reinforcement Learning}
+\author{Automated Research Review}
+\date{August 8, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Multi-turn agentic RL receives only sparse terminal rewards (binary success/failure) after dozens of interaction turns. Standard GRPO broadcasts a \textbf{uniform trajectory-level advantage} to all turns, degrading at $-2.91$ success points per additional turn. Prior self-distillation methods (OPSD) treat token-level teacher-student gaps as local signals without structural aggregation---a local gap alone cannot distinguish whether it is redundant (belief already supports the outcome) or pivotal (shifts belief in a new direction). Value-function methods (PPO/GAE) require training a separate critic with high overhead and instability in agentic settings.
+
+\subsection{Method}
+AgentOPSD~\cite{wang2026agentopsd} reinterprets self-distillation gaps as \textbf{Bayesian evidence} that induces recursive belief updates, then uses the \emph{magnitude and direction of belief revision} as turn-level credit.
+
+\textbf{Turn-Level Evidence.} Token-level log-probability contrasts between skill-conditioned ($c^+$) and unconditioned policy are aggregated at environment turn boundaries:
+\begin{equation}
+    e_k = \sum_t \left[\log \pi_\theta(y_{k,t} \mid s_k, c^+) - \log \pi_\theta(y_{k,t} \mid s_k)\right]
+\end{equation}
+approximating the Bayes factor $\log[p(a_k \mid s_k, \text{success}) / p(a_k \mid s_k, \text{failure})]$ under the assumption that skill-conditioned behavior approximates success-conditional distributions.
+
+\textbf{Recursive Belief State.} Starting from the group success rate as prior $B_0 = \text{clip}(\bar{R}, \epsilon_0, 1-\epsilon_0)$, accumulated log-odds with geometric decay:
+\begin{equation}
+    c_k = \gamma c_{k-1} + e_k, \quad \ell_k = \text{logit}(B_0) + c_k, \quad B_k = \sigma(\ell_k)
+\end{equation}
+with $\gamma = 0.95$. The per-turn belief revision $\Delta B_k = B_k - B_{k-1}$ has a first-order expansion revealing \textbf{uncertainty-dependent gating}: $\Delta B_k \approx B_{k-1}(1-B_{k-1})(e_k - (1-\gamma)c_{k-1})$, so evidence has maximum impact at $B \approx 0.5$ (maximum uncertainty) and is attenuated when belief is saturated.
+
+\textbf{Outcome-Aligned Credit.} Credit incorporates both magnitude and direction:
+\begin{equation}
+    q_k = \text{sign}(A_{\text{seq}}) \cdot \Delta B_k
+\end{equation}
+where $A_{\text{seq}}$ is the standard GRPO trajectory advantage. Upward belief revisions in successful trajectories are amplified; contradictory revisions are attenuated.
+
+\textbf{Bounded Advantage Reshaping.} Within-trajectory standardization and clipping produce reshaped advantages:
+\begin{equation}
+    \tilde{A}_k = A_{\text{seq}} \cdot [(1-\lambda) + \lambda \cdot \text{clip}(1 + b \cdot z_k, 1-b, 1+b)]
+\end{equation}
+with $\lambda = 0.5$ optimally interpolating between uniform GRPO and fully reshaped credit. The standard clipped GRPO objective optimizes using $\tilde{A}_k$ instead of $A_{\text{seq}}$.
+
+\textbf{Overhead}: One additional forward pass per turn (skill-conditioned teacher). No critic network, no extra rollouts. Belief computation is trivial arithmetic in log-odds space.
+
+\subsection{Results}
+On ALFWorld, Search-QA (8 datasets), and WebShop with Qwen2.5-3B/7B:
+\begin{itemize}
+    \item \textbf{ALFWorld}: 89.1\% (7B), best among 10 baselines. GRPO: 81.2\%, SDAR: 85.9\%, StepOPSD: 88.4\%.
+    \item \textbf{Search-QA}: 49.2\% (7B) average across 8 retrieval datasets. GRPO: 42.0\%, RLSD: 49.0\%.
+    \item \textbf{WebShop}: 90.2 score / 79.7\% accuracy (7B). GRPO: 80.9/72.6\%, SDAR: 89.4/82.8\%.
+    \item \textbf{Horizon robustness}: Only $-0.54$ points/turn degradation vs.\ GRPO's $-2.91$ and RLSD's $-3.59$.
+    \item \textbf{3B results}: 84.4\% ALFWorld, 46.7\% Search-QA, 90.4 WebShop score---consistently best at both scales.
+\end{itemize}
+
+Ablations confirm each component is critical (ALFWorld 7B): removing recursive revision $-6.3$pp (82.8\%); removing outcome-aligned signing $-8.6$pp (80.5\%); removing state prior $-10.2$pp (78.9\%). The signed direction alignment is the most impactful single component.
+
+\subsection{Limitations}
+Requires privileged skill information ($c^+$) from a pre-built SkillBank at training time (not needed at inference). The Bayes factor approximation assumes skill-conditioned behavior approximates success-conditional distributions, which may not hold universally. Only tested on two model sizes (3B, 7B).
+
+\subsection{Relevance to Research Topics}
+AgentOPSD advances \textbf{T2 (RL/reward modeling)} by providing a principled, critic-free solution to the credit assignment problem in multi-turn agentic RL. The Bayesian belief revision framework---interpreting self-distillation gaps as evidence rather than direct training signals---connects to CoRT's~\cite{cort2026} counterfactual contrast (both measure information gain from conditioning on privileged information) and ABSeeker's~\cite{abseeker2026} backtracked credit (both provide dense turn-level supervision). The uncertainty-dependent gating ($B(1-B)$ factor) provides a natural ``attention'' mechanism for credit allocation that could inform Flux-OPD's~\cite{fluxopd2026} conflict-aware weighting and Relay-OPD's~\cite{relayopd2026} handoff trigger design.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Bayesian Belief Credit for Multi-Turn On-Policy Distillation}
+
+\textbf{Gap.} Multi-turn OPD methods (ReOPD~\cite{reopd2026}, Physics of Planning~\cite{physicsplanning2026}) assign uniform distillation loss across all turns, ignoring that some turns are pivotal for reasoning success. ABSeeker provides outcome-backtracked credit but requires ground-truth answers for clue recovery. AgentOPSD's belief revision provides credit from the \emph{distillation signal itself} without requiring verified outcomes.
+
+\textbf{Approach.} Replace uniform turn-level OPD weighting with AgentOPSD's belief revision mechanism: (1)~compute turn-level evidence $e_k$ from teacher-conditioned vs.\ student-only log-probabilities (replacing skill-conditioning with teacher-conditioning), (2)~recursively accumulate belief about whether the student trajectory will reach the teacher's reasoning endpoint, (3)~weight distillation loss per turn by belief revision magnitude: $\mathcal{L}_{\text{OPD},k} = |\Delta B_k| \cdot D_{\text{KL}}(p_{\text{student},k} \| q_{\text{teacher},k})$. Turns where teacher-student divergence shifts the success belief receive concentrated distillation signal.
+
+\textbf{Feasibility.} The teacher-conditioned forward pass already exists in standard OPD (it is the teacher scoring). The belief computation adds negligible overhead. Combine with Relay-OPD's handoff by triggering teacher intervention specifically at turns with large negative belief revisions ($\Delta B_k < -\tau$). Expected to improve multi-turn OPD by 3--5pp by concentrating distillation on belief-pivotal turns.
+
+\subsection{Direction 2: Recursive Belief Credit for Diffusion LLM Step-Level Training}
+
+\textbf{Gap.} V-GRPO~\cite{vgrpo2026} applies trajectory-level rewards uniformly across all denoising steps in diffusion LLM RL training. DiffusionGemma's~\cite{diffusiongemma2026} adaptive stopping uses entropy thresholds but does not connect stopping decisions to task-level credit. AgentOPSD's recursive belief framework could assign step-level credit within the denoising trajectory by treating each denoising step as an ``action'' whose contribution to final output quality is measured via belief revision.
+
+\textbf{Approach.} Adapt AgentOPSD to the denoising trajectory: (1)~define evidence per denoising step as the contrast between quality-conditioned and unconditioned token predictions at that noise level, (2)~maintain a running belief about output quality that updates recursively across denoising steps, (3)~weight V-GRPO's per-step reward by belief revision magnitude. The uncertainty gating naturally focuses credit on denoising steps where the model is most uncertain (intermediate noise levels), matching the intuition that early/late steps are relatively deterministic while middle steps are pivotal.
+
+\textbf{Feasibility.} The skill-conditioning can be replaced by quality-conditioning (e.g., prepending a quality tag as privileged context during training). DiffusionGemma's entropy-bounded sampling already tracks per-step confidence, providing the infrastructure for belief state computation. Expected to improve reward-weighted denoising by allocating gradient to the pivotal middle steps of the denoising trajectory.
+
+\subsection{Direction 3: Unifying Backtracked Clues with Bayesian Belief Revision}
+
+\textbf{Gap.} ABSeeker~\cite{abseeker2026} provides ground-truth-anchored step scores but requires explicit clue recovery from known answers, limiting applicability to tasks with verifiable outcomes. AgentOPSD provides credit from self-distillation evidence without ground truth but relies on the skill-conditioning approximation. Neither system combines factual grounding (ABSeeker) with belief dynamics (AgentOPSD).
+
+\textbf{Approach.} Construct a hybrid credit system: (1)~where ground-truth answers are available, use ABSeeker's backtracked clues to calibrate the prior $B_0$ per turn (instead of using only the group success rate), (2)~use AgentOPSD's recursive belief to propagate this calibrated prior forward through the trajectory, (3)~the combined credit $q_k^{\text{hybrid}} = \text{sign}(A_{\text{seq}}) \cdot \Delta B_k^{\text{calibrated}}$ benefits from both factual anchoring (clue-informed priors) and dynamic revision (belief state accounting for context accumulation). For tasks without verifiable answers, fall back to AgentOPSD's self-distillation evidence alone.
+
+\textbf{Feasibility.} ABSeeker's clue scores map directly to prior calibration: high-scoring turns raise the initial belief, low-scoring turns lower it. The recursive update mechanism is unchanged. This creates a graceful degradation path: with full ground truth, credit is clue-anchored; without it, credit relies on self-distillation evidence. Expected to combine ABSeeker's +5pp gains with AgentOPSD's horizon robustness ($-0.54$/turn) for long-horizon agents.
+
+\section{Conclusion}
+AgentOPSD provides a principled Bayesian framework for turn-level credit assignment in multi-turn agentic RL, interpreting self-distillation log-probability gaps as evidence that recursively updates a belief state about trajectory success. The uncertainty-dependent gating ($B(1-B)$ factor) naturally focuses credit on pivotal turns where belief is most uncertain, achieving near-flat horizon degradation ($-0.54$/turn vs.\ GRPO's $-2.91$) and state-of-the-art performance across ALFWorld, Search-QA, and WebShop. The three follow-up directions extend recursive belief credit to multi-turn OPD (belief-weighted distillation loss), diffusion LLM step-level training (denoising-trajectory belief revision), and hybrid systems combining outcome-backtracked clues with self-distillation belief dynamics.
+
+\begin{thebibliography}{99}
+\bibitem{wang2026agentopsd} Z.-H.~Wang, Z.~Lu, Z.~Yao, J.~Wu, J.~Wu, Z.~Cai, Y.~Sun, Z.~Ye, L.~Hao, Q.~Gu, X.~Cai, Y.~Shen, Y.~Yang, ``AgentOPSD: Recursive Self-Distillation for Agentic Reinforcement Learning,'' \emph{arXiv preprint arXiv:2608.05987}, 2026.
+\bibitem{cort2026} CoRT, ``Counterfactual Replay for Token-Level Rubric-Guided Policy Optimization,'' \emph{arXiv preprint arXiv:2607.25659}, 2026.
+\bibitem{abseeker2026} ABSeeker, ``Training Long-Horizon Search Agents via Answer-Backtracked Credit Assignment,'' \emph{arXiv preprint arXiv:2608.05102}, 2026.
+\bibitem{fluxopd2026} Flux-OPD, ``On-Policy Distillation with Evolving Contexts,'' \emph{arXiv preprint arXiv:2607.28022}, 2026.
+\bibitem{relayopd2026} Relay-OPD, ``Pass the Baton: Trajectory-Relayed On-Policy Distillation,'' \emph{arXiv preprint arXiv:2607.26057}, 2026.
+\bibitem{reopd2026} ReOPD, ``Multi-Turn On-Policy Distillation with Prefix Replay,'' \emph{arXiv preprint arXiv:2607.04763}, 2026.
+\bibitem{physicsplanning2026} Physics of Planning, ``From Pre-training to Post-training via Single- and Multi-Teacher OPD,'' \emph{arXiv preprint arXiv:2607.24720}, 2026.
+\bibitem{vgrpo2026} V-GRPO, ``Online RL for Denoising Generative Models Is Easier than You Think,'' \emph{arXiv preprint arXiv:2604.23380}, 2026.
+\bibitem{diffusiongemma2026} DiffusionGemma, ``DiffusionGemma Technical Report,'' \emph{arXiv preprint arXiv:2608.00146}, 2026.
+\end{thebibliography}
+
+\end{document}
