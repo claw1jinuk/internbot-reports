@@ -1,0 +1,135 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Summary: SFT Conflicts, RL Coexists --- A Theoretical and Empirical Analysis of Multi-Task Learning for LLMs}
+\author{Internbot}
+\date{August 11, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+When training large language models on multiple reasoning tasks, supervised fine-tuning (SFT) and reinforcement learning (RL) exhibit fundamentally different behaviors. Multi-stage SFT---sequentially training on different tasks---causes severe performance collapse ($-23.1\%$ average decline versus the base model), while multi-stage RL enables stable cumulative improvement ($+24.9\%$ average gain). Even in single-task settings, SFT training on one task degrades other tasks by $-5.1\%$ on average, whereas RL on one task \emph{improves} other tasks by $+2.3\%$. Despite this well-known empirical phenomenon, there has been no principled theoretical explanation for why RL avoids the catastrophic interference that plagues SFT. Zhu et al.~\cite{zhu2026sft} address this gap with a formal gradient-interference analysis and propose a practical training paradigm that exploits their theoretical findings.
+
+\subsection{Method}
+
+The authors study multi-task training on four reasoning domains---math (MATH500), science (MMLU), logic (Knights \& Knaves), and code (LiveCodeBench)---using DeepSeek-R1-Distill-Qwen at 1.5B and 7B scales. LoRA fine-tuning enables direct parameter-level analysis of update vectors across tasks.
+
+\paragraph{Empirical observations.} Two critical parameter-space properties distinguish RL from SFT: (1)~\textbf{Magnitude}: RL update norms ($\sim\!3 \times 10^{-2}$) are roughly $100\times$ smaller than SFT update norms ($\sim\!7.4$), with only $20\%$ of RL parameters exceeding $10^{-5}$ magnitude versus $93\%$ for SFT; (2)~\textbf{Orthogonality}: pairwise cosine similarity of RL updates across tasks averages $\sim\!10^{-5}$ (effectively orthogonal), while SFT cross-task similarity reaches $10^{-1}$ to $1.0$, with some task pairs exhibiting directly opposing directions.
+
+\paragraph{Theoretical framework.} The analysis centers on the gradient structures of SFT and GRPO. The SFT gradient is off-policy, fitting an external expert distribution:
+\begin{equation}
+g_{\text{SFT}} = \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi_{\text{expert}}} \bigl[\nabla_\theta \log \pi_\theta(y|x)\bigr].
+\end{equation}
+The GRPO gradient is on-policy and advantage-weighted:
+\begin{equation}
+g_{\text{RL}}^{(i)}(x) = \frac{1}{G}\sum_{k=1}^{G} \hat{A}_{i,k}(x)\, \nabla_\theta \log \pi_\theta(y_k|x),
+\end{equation}
+where the group-relative standardized advantage satisfies a zero-sum property: $\sum_{k=1}^{G} \hat{A}_{i,k}(x) = 0$. This algebraic constraint is the cornerstone of the analysis.
+
+\paragraph{Gradient interference decomposition.} Decomposing score functions into mean and residual components $S_{i,k}(x) = \bar{S}_i(x) + \delta S_{i,k}(x)$, the zero-sum property eliminates the mean score contribution from RL interference. The main result (Theorem~4.5) establishes:
+\begin{align}
+|I_{\text{SFT}}(i,j)| &\leq M_i \cdot M_j \quad \text{(norm-limited)}, \\
+|I_{\text{RL}}(i,j)| &\leq V_i \cdot V_j \quad \text{(variance-limited)},
+\end{align}
+where $M_i = \sqrt{\mathbb{E}[\|S_i^*(x)\|_2^2]}$ is the SFT score function norm and $V_i = \sqrt{\mathbb{E}[\frac{1}{G}\sum_k \|\delta S_{i,k}(x)\|_2^2]}$ is the RL residual score variance. Since empirically $V_i \approx 10^{-2}$ while $M_i \approx 7.1$, RL interference is roughly \textbf{two orders of magnitude smaller} than SFT interference.
+
+Two mechanisms drive this separation: (1)~the advantage function's zero-sum property algebraically filters out common-mode gradients, leaving only small residual variations; (2)~on-policy sampling generates statistically independent gradients across tasks that concentrate to orthogonality in high dimensions via $P(|\langle \delta S_i, \delta S_j \rangle| \geq t) \leq 2\exp(-c \cdot t^2 \cdot d)$.
+
+\paragraph{Parallel-RL.} Exploiting the orthogonality finding, the authors propose decoupled parallel training: train each task independently to produce task-specific LoRA updates $\Delta W_1, \ldots, \Delta W_N$, merge them (via summation, TIES, or SVD), and apply light post-merge adaptation using $5\%$ of original training samples.
+
+\subsection{Results}
+
+Multi-stage training comparison on the 1.5B model: SFT multi-stage collapses to $-23.1\%$ average versus base (Logic drops from $31.0$ to $9.0$), while RL multi-stage achieves $+24.9\%$ average (Logic improves from $31.0$ to $43.0$). Mixed-data SFT partially mitigates conflicts ($+2.4\%$), but RL mixed-data ($+12.6\%$) still underperforms RL multi-stage ($+24.9\%$), confirming that multi-stage is the preferred paradigm for RL.
+
+Parallel-RL with adapted merging achieves $+10.7\%$ average improvement at 1.5B with $103.2\%$ retention of single-task RL performance---exceeding the ceiling of independent training. At 7B, the adapted variant reaches Math~$96.2$, Science~$59.0$, Logic~$66.8$, Code~$54.0$, with $+8.0\%$ average improvement and $102.4\%$ retention. Ablation confirms effective task decoupling: removing one task's update degrades that task by $-7.1\%$ on average while leaving other tasks essentially unchanged ($+0.6\%$).
+
+\subsection{Limitations}
+
+The theoretical analysis focuses specifically on GRPO with binary rewards $R: \mathcal{Y} \to \{0,1\}$; extension to PPO (which uses a separate value function rather than group-relative normalization) and continuous reward models is not formally established. All experiments use LoRA fine-tuning on reasoning tasks at $\leq 7$B scale---full fine-tuning and larger models may exhibit different update patterns. The $5\%$ adaptation phase in Parallel-RL still requires access to all task data, partially undermining the modularity claim. Safety-capability interaction and reward hacking in multi-task RL settings are not discussed.
+
+\subsection{Relevance to Research Topics}
+
+This paper provides the first formal theoretical explanation for a phenomenon central to RL-based LLM training: why multi-task RL training accumulates capabilities without catastrophic forgetting. The norm-limited versus variance-limited interference dichotomy (Theorem~4.5) is directly relevant to designing multi-objective RLHF pipelines, where sequential optimization of safety, helpfulness, and capability rewards is standard practice. The finding that on-policy sampling produces approximately orthogonal updates connects to our prior reviews of on-policy distillation methods (Flux-OPD, CoRT, AgentOPSD), suggesting that OPD may similarly benefit from reduced multi-task interference compared to off-policy distillation. The Parallel-RL framework also offers a practical paradigm for scaling multi-reward RL training.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Variance-Aware Advantage Design for Multi-Task OPD}
+
+\paragraph{Gap.} The paper shows that RL's reduced interference stems from the variance-limited bound $V_i \cdot V_j$. Current on-policy distillation methods (Flux-OPD~\cite{flux2026opd}, CoRT~\cite{cort2026}) do not explicitly optimize for low intra-group variance of their distillation gradients. The KL divergence loss in OPD does not possess GRPO's zero-sum advantage property, so multi-task OPD may still suffer from norm-limited interference akin to SFT.
+
+\paragraph{Approach.} Design a ``variance-regularized OPD'' objective that decomposes the distillation gradient into mean and residual components and explicitly penalizes residual variance. Concretely, for each student rollout group, compute the advantage-like weighting $\hat{A}_k = (D_{\text{KL}}(k) - \bar{D}_{\text{KL}}) / \sigma_{D_{\text{KL}}}$ (standardized KL deviation within the group), then weight the distillation loss by $\hat{A}_k$. This imposes the zero-sum property on OPD gradients, converting the interference bound from norm-limited to variance-limited. The approach could be combined with Flux-OPD's contextual correction and CoRT's rubric-guided weighting.
+
+\paragraph{Feasibility.} Straightforward to implement on top of existing OPD frameworks. The main risk is that artificially imposing zero-sum weighting on distillation loss may degrade student-teacher alignment for well-matched rollouts. Ablation on the balance between fidelity and orthogonality is needed.
+
+\subsection{Direction 2: Parallel-RL for Multi-Reward Agentic Training}
+
+\paragraph{Gap.} Agentic RL systems (ABSeeker~\cite{abseeker2026}, AgentOPSD~\cite{agentopsd2026}) typically train with a single composite reward, conflating task-completion, efficiency, and safety objectives. The paper's Parallel-RL framework has only been validated on tasks with disjoint input distributions (math, science, logic, code). Whether orthogonality holds when multiple reward signals operate on the \emph{same} input distribution (e.g., a single agent trajectory evaluated for correctness, efficiency, and safety) is unexplored.
+
+\paragraph{Approach.} Decompose agentic reward into orthogonal reward channels---task completion $R_{\text{task}}$, step efficiency $R_{\text{eff}}$, and safety $R_{\text{safe}}$---and train separate LoRA modules for each reward channel on the same trajectory data. Measure cross-channel gradient interference to test whether the variance-limited bound still holds when input distributions overlap but reward signals differ. If orthogonality is confirmed, apply Parallel-RL merging with per-channel adaptation. ABSeeker's answer-backtracked credit assignment could serve as the task-completion reward channel, while AgentOPSD's belief-based gating could define the efficiency channel.
+
+\paragraph{Feasibility.} Requires multi-reward instrumentation of an existing agentic benchmark (ALFWorld, WebShop). The key theoretical question is whether the zero-sum advantage property produces orthogonal residuals when the underlying trajectories are shared---the concentration-of-measure argument may weaken since the score functions are evaluated on identical sequences. Moderate risk, high impact if validated.
+
+\subsection{Direction 3: Interference-Aware Curriculum for Continual RL}
+
+\paragraph{Gap.} The paper's analysis is static: tasks are presented in a fixed order or in parallel. In continual learning settings, an agent encounters new tasks over time and must integrate new capabilities without forgetting old ones. While the paper shows RL has low interference in aggregate, it does not characterize how interference varies across training stages or whether certain task orderings amplify residual interference.
+
+\paragraph{Approach.} Develop an interference-aware curriculum that dynamically measures the cross-task gradient interference $I_{\text{RL}}(i,j)$ during training and schedules tasks to minimize cumulative interference. Specifically, maintain a running estimate of each task's residual score variance $V_i^{(t)}$ at timestep $t$, and select the next task $j$ that minimizes $V_j^{(t)} \cdot \max_i V_i^{(t)}$. This extends the paper's theoretical framework from a static bound to a dynamic scheduling criterion. The approach could be integrated with continual learning methods like EvoArena's memory evolution~\cite{evoarena2026} or the geometry-conflict framework~\cite{geoconflict2026} to provide both theoretical guarantees and empirical stability.
+
+\paragraph{Feasibility.} Estimating $V_i^{(t)}$ online requires computing intra-group score function variance per training batch, which adds moderate computational overhead (one extra forward pass per group). The curriculum scheduling itself is lightweight. Main challenge is that residual variance may fluctuate significantly during early training, requiring smoothing or confidence-based scheduling. Low risk, directly implementable.
+
+\section{Conclusion}
+
+Zhu et al.\ provide the first formal theoretical explanation for why reinforcement learning avoids the catastrophic multi-task interference that plagues supervised fine-tuning. The core insight is elegant: GRPO's advantage normalization imposes a zero-sum constraint that algebraically eliminates mean gradient contributions, reducing inter-task interference from norm-limited ($M_i \cdot M_j$) to variance-limited ($V_i \cdot V_j$)---a reduction of roughly two orders of magnitude. Combined with the concentration-of-measure effect of on-policy sampling in high dimensions, this produces approximately orthogonal parameter updates across tasks. The practical Parallel-RL framework achieves $103.2\%$ retention of single-task performance through independent training and lightweight adaptation. This work has immediate implications for multi-objective RLHF pipeline design, on-policy distillation, and continual agentic learning, providing both theoretical justification for existing practices and a principled foundation for future multi-task RL training paradigms.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{zhu2026sft}
+Kejian Zhu, Zhuoran Jin, Shangqing Tu, Hongbang Yuan, Yushi Bai, Kang Liu, Juanzi Li, and Jun Zhao.
+\newblock {SFT} Conflicts, {RL} Coexists: A Theoretical and Empirical Analysis of Multi-Task Learning for {LLMs}.
+\newblock \emph{arXiv preprint arXiv:2608.03573}, 2026.
+
+\bibitem{flux2026opd}
+Flux-{OPD} Authors.
+\newblock On-Policy Distillation with Evolving Contexts.
+\newblock \emph{arXiv preprint arXiv:2607.28022}, 2026.
+
+\bibitem{cort2026}
+{CoRT} Authors.
+\newblock Counterfactual Replay for Token-Level Rubric-Guided Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2607.25659}, 2026.
+
+\bibitem{abseeker2026}
+{ABSeeker} Authors.
+\newblock Training Long-Horizon Search Agents via Answer-Backtracked Credit Assignment.
+\newblock \emph{arXiv preprint arXiv:2608.05102}, 2026.
+
+\bibitem{agentopsd2026}
+{AgentOPSD} Authors.
+\newblock Recursive Self-Distillation for Agentic Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2608.05987}, 2026.
+
+\bibitem{evoarena2026}
+{EvoArena} Authors.
+\newblock Tracking Memory Evolution for Robust {LLM} Agents in Dynamic Environments.
+\newblock \emph{arXiv preprint arXiv:2606.13681}, 2026.
+
+\bibitem{geoconflict2026}
+Geometry Conflict Authors.
+\newblock Explaining and Controlling Forgetting in {LLM} Continual Post-Training.
+\newblock \emph{arXiv preprint arXiv:2605.09608}, 2026.
+
+\end{thebibliography}
+
+\end{document}
