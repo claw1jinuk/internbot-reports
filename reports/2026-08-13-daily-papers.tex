@@ -1,0 +1,116 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Summary: Co-Evolution in Agentic Systems ---\\Toward Self-Directed Evolution Beyond Human Design}
+\author{Internbot}
+\date{August 13, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Current agentic AI systems can self-improve after deployment---refining model weights, updating memory, or learning new skills---but this \emph{single-entity self-evolution} is fundamentally bounded. When only one component adapts while the tasks, feedback mechanisms, and interaction partners remain static, the agent inevitably hits a performance plateau. Zong et al.~\cite{coevo2026} frame this through the Red Queen effect: sustained progress requires mutual adaptation rather than unilateral improvement. They present the first focused survey of \emph{co-evolution} in agentic systems, covering 186+ works and proposing a formal framework that distinguishes co-evolution from adjacent concepts (self-play, continual learning, recursive self-improvement) and organizes the field through a progressive three-stage taxonomy.
+
+\subsection{Method}
+
+\paragraph{Formal framework.} An agentic system is defined as $S = (A, E)$ where $A = (\{a_1, \ldots, a_n\}, \Pi)$ comprises agents with organizational structure $\Pi$, and $E$ is the environment. Each agent $a_i = (m_i, h_i)$ consists of a model backbone $m_i$ and a harness $h_i$ (memory, tools, skills, prompts). Co-evolution is precisely defined as coupled adaptation where at least two evolving units jointly reshape each other's further evolution with bidirectional evolutionary pressure---distinguishing it from mere interaction or unilateral self-improvement.
+
+\paragraph{Stage 1: Agent--Agent co-evolution.} The environment $E$ remains fixed; agents adapt through dynamic peer interaction. Three sub-categories emerge: (a)~\textbf{Adversarial}: agents co-evolve through opposing objectives---AdvGRPO stabilizes joint GRPO training with multi-channel rewards; TriPlay-RL introduces three-agent co-evolution (attacker, defender, evaluator) so attack generation, safe response, and safety judgment evolve together; AlphaStar's league training uses exploiters and past versions to prevent forgetting. (b)~\textbf{Collaborative}: agents share goals---CORAL diffuses attempts, notes, and skills through shared memory; WaltzRL jointly trains conversation and critique agents, rewarding only when suggestions improve the partner; CoVerRL bootstraps a verifier from majority-vote answers when labels are unavailable. (c)~\textbf{Organizational}: the structure $\Pi$ itself co-evolves---SkillMAS jointly updates agent skills and team structure; MetaAgent-X trains workflow designer and executor agents together.
+
+\paragraph{Stage 2: Agent--Environment co-evolution.} Both agents \emph{and} environment evolve: $(A^{t+1}, E^{t+1}) = \Omega(A^t, E^t, \tau^t)$. The environment adapts in three dimensions: (a)~\textbf{Task-space}: adaptive task generation near the agent's competence frontier---SENTINEL/CoEvolve converts failed rollouts into new tasks; RLAnything jointly rewrites tasks, policy, and reward; Tool-R0 calibrates difficulty to solver success rates. (b)~\textbf{Feedback-space}: reward and evaluation mechanisms co-evolve---ARCO co-trains a step-scoring rubric evaluator requiring step scores to sum to the task outcome; ECHO updates its critic only when acting on advice actually improves policy; ROSKA/LaRes co-search reward candidates and policy variants. (c)~\textbf{Interaction-space}: the world itself evolves---POET evolves environment-agent pairs; WebEvolver co-trains a web world model with the agent as a virtual server; Agent-World expands tool combinations to expose capability gaps.
+
+\paragraph{Stage 3: Meta co-evolution.} The evolution mechanism $\Omega$ itself becomes adaptive: $\Omega^{t+1} = \Gamma^t(S^t, \Omega^t, \tau^t)$, then $S^{t+1} = \Omega^{t+1}(S^t, \tau^t)$. The mechanism is decomposed into five adaptive decisions: \emph{what} to evolve (targets), \emph{when} (triggers), \emph{how} (variant generation), \emph{where} (domains/settings), and \emph{how to evaluate} (metrics). Mathematical open-endedness requires continuous novelty ($\Omega^{t+1} \neq \Omega^t$) and unbounded divergence ($\lim_{t \to \infty} H(S^t, \Omega^t) = \infty$). Current precursors include PromptBreeder (evolving mutation prompts), Godel Agent (evolving self-modification machinery), and SIA (using trajectory feedback to choose between harness and weight updates). The closest implementation is RQGM (Red Queen Godel Machine), which couples meta-level mechanism adaptation with lower-level co-evolving agents and evaluators.
+
+\subsection{Results}
+
+As a survey, this paper does not present new experimental results. Its contributions are conceptual: the formal definition distinguishing co-evolution from adjacent concepts, and the three-stage taxonomy tracing progressive expansion of evolutionary freedom. A cross-paper meta-analysis (Figure~4) shows that co-evolutionary methods consistently outperform non-co-evolutionary baselines, with improvements diminishing as evolution approaches a plateau within any fixed scope---motivating progression to the next stage. The survey identifies three critical failure modes: \emph{evaluator exploitation} (task success masking exploitative behavior), \emph{partner overfitting} (gains limited to specific counterparts), and \emph{diversity collapse} (convergence to narrow behavioral solutions).
+
+\subsection{Limitations}
+
+Stage~3 (meta co-evolution) is largely aspirational---only RQGM approaches true coupled meta-evolution, while most cited work represents single-entity precursors. The paper identifies safety and governance as first-order concerns but treats them as desiderata without concrete safeguards. The open-endedness criterion ($\lim H = \infty$) may be too strong to be practically attainable. Critical engagement with cited methods is limited: failure cases, conditions for productive versus degenerate co-evolution, and connections to catastrophic forgetting mitigation (EWC, progressive nets, replay) are insufficiently explored. No new benchmarks or evaluation protocols are proposed for measuring co-evolutionary dynamics.
+
+\subsection{Relevance to Research Topics}
+
+This survey provides the conceptual framework for understanding the trajectory of our reviewed self-evolving agent systems. SkillOS and SkillOpt represent single-entity skill evolution (pre-Stage~1); EvoArena maps to Stage~1 adversarial co-evolution; Macaron-V1's MindForge is a single-entity recursive self-improvement precursor to Stage~3. The paper's central insight---that single-entity self-improvement is inherently bounded and must be coupled with co-evolving tasks, rewards, and mechanisms---directly informs the design of next-generation continual learning systems. The formal distinction between co-evolution and continual learning (the latter involves a single agent adapting to changing distributions, the former involves coupled mutual adaptation) clarifies a conceptual ambiguity in our research area.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Co-Evolutionary On-Policy Distillation with Adaptive Task Generation}
+
+\paragraph{Gap.} Current on-policy distillation (OPD) methods use fixed teacher-student configurations on static task distributions. The survey's Stage~2a (task-space co-evolution) demonstrates that adaptive task generation dramatically outperforms static curricula, but no existing OPD method couples student evolution with task co-evolution. The student improves on whatever tasks the teacher demonstrates, without the task distribution adapting to target the student's specific weaknesses.
+
+\paragraph{Approach.} Build a co-evolutionary OPD system with three coupled components: (1)~a \textbf{task generator} that identifies student failure modes and constructs problems near the student's competence frontier (following SENTINEL/CoEvolve's failed-rollout-to-task conversion); (2)~a \textbf{teacher} that generates rollouts specifically targeting these failure clusters using Flux-OPD's contextual correction~\cite{flux2026opd}; (3)~a \textbf{student} that learns from these targeted rollouts via standard OPD. The task generator evolves based on student progress (reducing difficulty on mastered clusters, increasing on persistent failures), creating a Stage~2a co-evolutionary loop. The SFT-RL coexistence theory~\cite{zhu2026sft} provides the interference monitoring criterion: track the variance-limited bound $V_i \cdot V_j$ across task clusters to ensure adaptive targeting does not introduce cross-cluster interference.
+
+\paragraph{Feasibility.} Each component exists independently (failure-driven curriculum from SENTINEL, contextual OPD from Flux-OPD, interference monitoring from SFT-RL theory). The integration requires defining a task representation space that the generator can search, and a failure detection mechanism that maps student errors to task space coordinates. MindForge's Discovery stage~\cite{macaron2026} provides a template for failure identification. Moderate implementation complexity, high potential impact.
+
+\subsection{Direction 2: Feedback-Space Co-Evolution for Credit Assignment in Agentic RL}
+
+\paragraph{Gap.} Our reviewed credit assignment methods---ABSeeker's answer-backtracked clues~\cite{abseeker2026} and AgentOPSD's Bayesian belief revision~\cite{agentopsd2026}---use \emph{fixed} credit assignment mechanisms throughout training. The survey's Stage~2b (feedback-space co-evolution) shows that co-evolving the reward/evaluation mechanism alongside the policy produces stronger outcomes (ARCO, ECHO). No existing agentic RL method co-evolves its credit assignment mechanism with the agent's policy.
+
+\paragraph{Approach.} Design a co-evolutionary credit assignment system where both the agent policy and the credit assignment mechanism adapt together. Concretely, parameterize the credit assignment as a learned scoring function $C_\phi(s_t, a_t, \text{outcome})$ that assigns per-step rewards from trajectory outcomes. Train $C_\phi$ using ARCO's consistency constraint (step credits must sum to the trajectory reward) while simultaneously training the agent via GRPO. The key co-evolutionary coupling: as the agent improves and discovers new strategies, $C_\phi$ must adapt to correctly credit the new action patterns; as $C_\phi$ sharpens credit assignment, the agent receives more informative gradients and changes its strategy. Initialize $C_\phi$ with ABSeeker's backtracking heuristics and allow it to evolve beyond the hand-designed clue-matching rules. Use ECHO's ``advice-improves-policy'' gating to prevent degenerate co-evolution: update $C_\phi$ only when the new credit assignment actually improves agent performance on held-out episodes.
+
+\paragraph{Feasibility.} ARCO demonstrates that consistency-constrained credit learning is trainable. The main risk is the co-evolutionary instability the survey identifies: evaluator exploitation (the agent may learn to game $C_\phi$) and partner overfitting ($C_\phi$ may overfit to the current policy's action distribution). ECHO's gating provides one safeguard, but additional stability mechanisms (e.g., maintaining a diverse evaluation ensemble) may be needed. Moderate risk, high potential for improving long-horizon agentic RL.
+
+\subsection{Direction 3: Forgetting-Aware Co-Evolution for Continual Agent Deployment}
+
+\paragraph{Gap.} The survey identifies diversity collapse as a critical failure mode but does not engage with the catastrophic forgetting literature. Co-evolving systems face a unique forgetting challenge: as each component adapts to its co-evolutionary partner, it may lose capabilities acquired during earlier co-evolutionary stages. This is distinct from standard continual learning because the non-stationarity is \emph{endogenous} (arising from mutual adaptation) rather than exogenous (arising from external distribution shift). No existing co-evolutionary framework includes explicit forgetting mitigation.
+
+\paragraph{Approach.} Integrate Macaron-V1's architectural isolation~\cite{macaron2026} with the survey's Stage~1 co-evolutionary framework. For each co-evolutionary stage, maintain a versioned LoRA adapter snapshot. When the co-evolutionary system advances (e.g., the task generator creates harder problems), the new adapter is trained from the current base plus the previous adapter's initialization, with a Geometry Conflict~\cite{geoconflict2026} regularizer that penalizes gradient directions conflicting with the previous adapter's learned subspace. AlphaStar's league training provides the evaluation protocol: include past adapter versions as ``opponents'' (or evaluation configurations) to detect forgetting. If performance on past configurations drops below a threshold, trigger adapter branching (following the soft-isolation approach from our SFT-RL coexistence direction). The result is a co-evolutionary system with built-in forgetting detection and architectural protection.
+
+\paragraph{Feasibility.} All components are available: LoRA versioning from Macaron-V1's MinT platform, gradient conflict detection from Geometry Conflict, league-style evaluation from AlphaStar. The main challenge is defining ``past configurations'' in a co-evolutionary context where the environment itself has changed---evaluating an agent on a previous environment version may not be meaningful if the environment has evolved significantly. A proxy metric (capability retention on a fixed holdout benchmark, independent of the co-evolutionary dynamics) may be necessary. Low-to-moderate risk, directly addresses a critical gap in the co-evolution literature.
+
+\section{Conclusion}
+
+Zong et al.\ present the first systematic framework for understanding co-evolution in agentic systems, organizing 186+ works into a progressive three-stage taxonomy: agent--agent co-evolution (well-populated with adversarial, collaborative, and organizational methods), agent--environment co-evolution (task, feedback, and interaction spaces), and meta co-evolution (where the evolution mechanism itself adapts). The central thesis---that single-entity self-improvement is inherently bounded by the Red Queen effect and must give way to coupled mutual adaptation---provides a compelling conceptual roadmap for the field. While Stage~3 remains largely aspirational and the survey lacks new empirical contributions, the formal framework clarifies the relationship between our previously reviewed self-evolving agent systems (SkillOS, EvoArena, Macaron-V1) and identifies the critical frontier: building systems where tasks, rewards, and evolution mechanisms co-adapt with agents rather than remaining static human-designed constraints.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{coevo2026}
+Qing Zong, Jiayu Liu, Junhao Shen, Zecong Tang, Linsi Wu, Yuxuan Liu, Rui Wang, Zhaowei Wang, Weiqi Wang, Cheng Qian, Xiusi Chen, and Yangqiu Song.
+\newblock Co-Evolution in Agentic Systems: Toward Self-Directed Evolution Beyond Human Design.
+\newblock \emph{arXiv preprint arXiv:2608.10299}, 2026.
+
+\bibitem{flux2026opd}
+Flux-{OPD} Authors.
+\newblock On-Policy Distillation with Evolving Contexts.
+\newblock \emph{arXiv preprint arXiv:2607.28022}, 2026.
+
+\bibitem{zhu2026sft}
+Kejian Zhu, Zhuoran Jin, Shangqing Tu, Hongbang Yuan, Yushi Bai, Kang Liu, Juanzi Li, and Jun Zhao.
+\newblock {SFT} Conflicts, {RL} Coexists: A Theoretical and Empirical Analysis of Multi-Task Learning for {LLMs}.
+\newblock \emph{arXiv preprint arXiv:2608.03573}, 2026.
+
+\bibitem{macaron2026}
+Mind Lab.
+\newblock Macaron-V1: Towards Open Continual Learning with Self-Improvement and Mixture-of-{LoRA}.
+\newblock \emph{arXiv preprint arXiv:2608.09819}, 2026.
+
+\bibitem{abseeker2026}
+{ABSeeker} Authors.
+\newblock Training Long-Horizon Search Agents via Answer-Backtracked Credit Assignment.
+\newblock \emph{arXiv preprint arXiv:2608.05102}, 2026.
+
+\bibitem{agentopsd2026}
+{AgentOPSD} Authors.
+\newblock Recursive Self-Distillation for Agentic Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2608.05987}, 2026.
+
+\bibitem{geoconflict2026}
+Geometry Conflict Authors.
+\newblock Explaining and Controlling Forgetting in {LLM} Continual Post-Training.
+\newblock \emph{arXiv preprint arXiv:2605.09608}, 2026.
+
+\end{thebibliography}
+
+\end{document}
