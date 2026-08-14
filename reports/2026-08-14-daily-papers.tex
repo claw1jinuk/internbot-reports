@@ -1,0 +1,128 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Summary: Simplex Relaxation for Discrete Diffusion}
+\author{Internbot}
+\date{August 14, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Discrete diffusion models for text formulate both training and sampling through categorical intermediate states. This constrains training losses to KL divergences between categorical distributions and limits samplers to categorical posterior draws. Sakurai et al.~\cite{simplax2026} ask whether one can enrich the training objectives and samplers of a discrete diffusion model while keeping the categorical corruption process completely unchanged. Their answer is \emph{Simplax}: a Dirichlet-categorical augmentation that introduces an auxiliary simplex-valued variable to yield a richer objective landscape and better-behaved sampling dynamics, without modifying the forward corruption at all.
+
+\subsection{Method}
+
+\paragraph{Uniform discrete diffusion background.} The forward process uses a uniform prior $\pi$ over $K$ categories with noise schedule $\alpha_t \in [0,1]$: $q(z_t \mid x) = \text{Cat}(z_t;\, \alpha_t x + (1-\alpha_t)\pi)$. The standard training objective minimizes $D_{\text{KL}}[q(z_s \mid z_t, x) \,\|\, q(z_s \mid z_t, \hat{x}_\theta)]$ where $\hat{x}_\theta = f_\theta(z_t, t)$ predicts the clean data.
+
+\paragraph{Dirichlet-categorical augmentation.} Simplax introduces an auxiliary variable $w_t \in \Delta^{K-1}$ (the probability simplex) via a shifted Dirichlet conditional:
+\begin{equation}
+q(w_t \mid z_t, x) = \text{Dir}(w_t;\, \eta_t \cdot p_t + z_t),
+\end{equation}
+where $\eta_t > 0$ is a concentration parameter and $p_t = \alpha_t x + (1-\alpha_t)\pi$. The paper establishes four key properties (Proposition~1): (1)~the marginal $q(w_t \mid x) = \text{Dir}(\eta_t \cdot p_t)$; (2)~given $w_t$, the categorical state is simply $q(z_t \mid w_t) = \text{Cat}(w_t)$, with $x$ becoming conditionally independent; (3)~a softened reverse categorical posterior $q(z_s \mid w_t, x) = \text{Cat}(\rho_{s|t}(x, w_t))$; (4)~a $K$-component Dirichlet mixture reverse bridge $q(w_s \mid w_t, x)$ with intractable KL. A supporting identity shows that a categorical mixture over one-hot shifts of a Dirichlet collapses back to the unshifted density, enabling exact marginalization.
+
+\paragraph{Rao-Blackwellized training objective.} Since the Dirichlet mixture reverse bridge has no closed-form KL, the paper derives a Rao-Blackwellized surrogate. Training samples $w_t \sim q(w_t \mid x)$, then independently draws $z_t \sim \text{Cat}(w_t)$ (denoiser input) and $\tilde{z}_t \sim \text{Cat}(w_t)$ (auxiliary decode). The surrogate averages the standard categorical reverse KL over $\tilde{z}_t$ and marginalizes analytically (Proposition~2):
+\begin{equation}
+\bar{L}(w_t, \hat{x}_\theta, x;\, s, t) = \langle w_t,\, \log \hat{p}_t - \log p_t \rangle + \langle \rho_{s|t}(x, w_t),\, \log p_s - \log \hat{p}_s \rangle,
+\end{equation}
+where $\hat{p}_t = \alpha_t \hat{x}_\theta + (1-\alpha_t)\pi$. The network receives the categorical $z_t$ (not the dense $w_t$), avoiding a vocabulary-sized dense projection. In the continuous-time limit (Proposition~3), this yields a simplex-relaxed analogue of the UDLM objective weighted by $\lambda(t) = -\frac{d}{dt}\log \alpha(t)$.
+
+\paragraph{Sampling.} At each reverse step from $t$ to $s$: predict $\hat{x}_\theta = f_\theta(z_t, t)$, compute the softened reverse posterior $\rho_{s|t}(\hat{x}_\theta, w_t)$, sample $z_s \sim \text{Cat}(\rho_{s|t})$, then draw $w_s \sim \text{Dir}(\eta_s \hat{p}_s + z_s)$. The final output is the categorical $z_0$.
+
+\paragraph{Design choices.} Constant concentration $\eta_t = 0.01$; self-conditioning omitted at low NFE (16), included at high NFE (128+); UDLM initialization (800k UDLM steps then 200k Simplax steps) improves the PPL-entropy frontier.
+
+\subsection{Results}
+
+On OpenWebText unconditional generation (179M-parameter transformer, GPT-2 BPE tokenizer), Simplax achieves state-of-the-art generative perplexity across all NFE budgets. At NFE=16: Gen~PPL 90.5 (GPT-2 Large) versus CANDI's 97.2 and MDLM's 117.9. At NFE=128: 56.9 versus LangFlow's 60.2 and UDLM's 62.9. At NFE=1024: \textbf{45.1} versus MDLM's 55.1 and LangFlow's 68.3---an 18\% relative improvement over the best baseline. Under Llama-2~7B evaluation at NFE=1024, Simplax achieves 25.5 versus LangFlow's 28.2. Generative entropy remains close to data entropy (5.44~nats) throughout, indicating no diversity-quality trade-off.
+
+On Sudoku constraint satisfaction (trained on 30-clue puzzles only), Simplax achieves the highest conditional accuracy at every difficulty level: 61.75\% at 30~clues (in-distribution) versus Duo's 48.85\% and MDLM's 48.00\%; 95.85\% unconditional validity versus Duo's 80.95\%. The autoregressive baseline collapses to 16\% accuracy at 40~clues and 0\% at harder levels, underscoring the advantage of parallel generation for constraint satisfaction.
+
+\subsection{Limitations}
+
+Simplax is restricted to uniform corruption---the Dirichlet-categorical augmentation relies on the symmetric structure of $p_t(x)$ and does not extend to masked (absorbing-state) diffusion, which is the more popular paradigm (MDLM, SEDD). All experiments use 179M parameters; scaling to 1B+ remains untested. The concentration parameter $\eta_t = 0.01$ is empirically chosen without systematic ablation. No wall-clock timing comparisons are reported, leaving the computational overhead of Dirichlet sampling unquantified. Evaluation is limited to unconditional text generation and Sudoku---no conditional generation, language understanding, or downstream task results are provided.
+
+\subsection{Relevance to Research Topics}
+
+Simplax advances the discrete diffusion paradigm by demonstrating that principled probabilistic augmentation---introducing auxiliary simplex variables---can substantially improve generation quality without modifying the forward corruption process. This connects to our prior reviews of discrete diffusion methods (UDLM/Sumi, MDLM, DiffusionGemma, AURORA-LM) and continuous relaxation approaches (LangFlow, Duo). The key distinction is that Simplax preserves the categorical nature of the generative process while borrowing geometric structure from the simplex, offering a middle ground between purely discrete and purely continuous approaches. The strong Sudoku results (95.85\% validity) further validate diffusion LLMs' advantage for constraint-heavy generation, relevant to structured text generation tasks.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Dirichlet-Categorical Augmentation for Masked Diffusion LLMs}
+
+\paragraph{Gap.} Simplax works only with uniform corruption, but the dominant paradigm in diffusion LLMs is masked (absorbing-state) diffusion (MDLM, SEDD, DiffusionGemma~\cite{diffgemma2026}). The Dirichlet-categorical construction exploits the symmetric structure of $p_t(x) = \alpha_t x + (1-\alpha_t)\pi$, which breaks under absorbing-state corruption where $p_t(x) = \alpha_t x + (1-\alpha_t) e_{\text{[MASK]}}$ concentrates on a single absorbing state rather than distributing uniformly.
+
+\paragraph{Approach.} Replace the Dirichlet auxiliary with a \textbf{stick-breaking} construction adapted to the asymmetric masked corruption. For a token corrupted to [MASK] with probability $1 - \alpha_t$, define the auxiliary variable as a Beta-Categorical pair: $w_t^{(\text{mask})} \sim \text{Beta}(\eta_t \alpha_t,\, \eta_t(1-\alpha_t))$ representing the probability of being unmasked, then $w_t^{(\text{vocab})} \sim \text{Dir}(\eta_t \alpha_t \cdot x_{\backslash\text{mask}})$ over the non-mask vocabulary. The reverse bridge becomes a Beta-Dirichlet mixture, and a Rao-Blackwellized objective can be derived analogously. This would bring Simplax-style enrichment to masked diffusion models, which currently achieve the best unconditional perplexity among purely discrete methods (MDLM's 55.1 at NFE=1024). Combining the 18\% relative improvement Simplax achieves over UDLM with masked diffusion's stronger baseline could yield Gen~PPL below 45.
+
+\paragraph{Feasibility.} The Beta-Categorical construction maintains the exact marginalization property via an analogous identity to Corollary~1. The main challenge is that the reverse bridge structure is more complex (product of Beta and Dirichlet mixtures), potentially making the Rao-Blackwellization less tractable. Moderate mathematical complexity, high potential impact on the dominant dLLM paradigm.
+
+\subsection{Direction 2: Simplex-Augmented On-Policy Distillation for dLLMs}
+
+\paragraph{Gap.} On-policy distillation (OPD) for diffusion LLMs~\cite{dataeff2026} typically uses KL divergence between teacher and student categorical distributions at each denoising step. This suffers from the same limitation Simplax identifies for training: categorical-only KL does not exploit the richer geometry of the probability simplex. The simplex augmentation could provide a smoother distillation landscape, particularly at early denoising steps where categorical distributions are nearly uniform and KL gradients are weak.
+
+\paragraph{Approach.} Augment the OPD loss with Simplax's Dirichlet-categorical bridge. At each denoising step, sample $w_t \sim \text{Dir}(\eta_t \cdot p_t^{\text{teacher}})$ from the teacher's diffusion-time marginal, then compute the Rao-Blackwellized divergence between the teacher's reverse bridge $\rho_{s|t}^{\text{teacher}}(x, w_t)$ and the student's predicted reverse bridge $\rho_{s|t}^{\text{student}}(\hat{x}_\theta, w_t)$. The shared $w_t$ provides a common reference point that smooths the categorical comparison. This could be combined with Flux-OPD's contextual correction~\cite{flux2026opd} to anchor the distillation to the student's current capability. The continuous-time limit (Proposition~3) provides a natural connection to flow-matching OPD objectives.
+
+\paragraph{Feasibility.} Requires only sampling Dirichlet variables and computing the Rao-Blackwellized loss (already derived in the paper) during OPD training. The teacher's clean-data prediction serves as $x$ in the augmented objective. Main risk is that the auxiliary simplex variable may not significantly improve distillation at large NFE budgets where the categorical KL is already well-behaved. Greatest potential at low-NFE aggressive distillation where categorical gradients are weakest.
+
+\subsection{Direction 3: Simplex Relaxation for RL-Based dLLM Alignment}
+
+\paragraph{Gap.} Aligning diffusion LLMs via RL (V-GRPO~\cite{vgrpo2026}, Flow-DPPO~\cite{flowdppo2026}) requires computing policy gradients through the discrete sampling process, which introduces high variance due to categorical sampling at each denoising step. Simplax's auxiliary simplex variable provides a continuous relaxation that could reduce gradient variance without changing the model's generative semantics.
+
+\paragraph{Approach.} In GRPO-style training for dLLMs, replace the standard categorical sampling at each denoising step with Simplax's augmented sampling: draw $w_t$ from the Dirichlet bridge and $z_t$ from $\text{Cat}(w_t)$. The policy gradient can then be decomposed into two components: (1)~the standard REINFORCE gradient through the categorical $z_t$ draw, and (2)~a reparameterized gradient through the continuous $w_t$ (Dirichlet reparameterization via implicit gradients or the Laplace approximation). The continuous component provides a low-variance baseline for the discrete REINFORCE term, effectively implementing a control variate that exploits the simplex geometry. The advantage normalization from GRPO (zero-sum property shown in~\cite{zhu2026sft}) would still apply to the categorical component, while the simplex component adds a smooth variance reduction channel.
+
+\paragraph{Feasibility.} Dirichlet reparameterization is well-established (Figurnov et al., 2018; Jankowiak \& Obermeyer, 2018). The main challenge is integrating the two gradient components (discrete REINFORCE + continuous reparameterized) into a single stable training loop. V-GRPO and Flow-DPPO provide the RL infrastructure; the contribution is the variance-reduced gradient estimator. Moderate implementation complexity, potentially significant impact on dLLM alignment quality and training stability.
+
+\section{Conclusion}
+
+Simplax demonstrates that discrete diffusion models can be substantially improved through principled probabilistic augmentation without abandoning their categorical nature. By introducing an auxiliary Dirichlet variable on the probability simplex and deriving a Rao-Blackwellized training objective, the method achieves state-of-the-art generative perplexity across all NFE budgets (45.1 at NFE=1024, 18\% relative improvement over MDLM) and near-perfect constraint satisfaction on Sudoku (95.85\% unconditional validity). The construction is exact---no approximation is introduced by the augmentation itself---making it a clean theoretical contribution. The restriction to uniform corruption is the primary limitation; extending the augmentation to masked diffusion, on-policy distillation, and RL-based alignment represents the most impactful path forward for integrating simplex geometry into the broader diffusion LLM ecosystem.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{simplax2026}
+Jinya Sakurai, Patrick Pynadath, Satoshi Hayakawa, Jaehong Yoon, Xulei Yang, Nancy~F. Chen, and Xun Xu.
+\newblock Simplex Relaxation for Discrete Diffusion.
+\newblock \emph{arXiv preprint arXiv:2608.10615}, 2026.
+
+\bibitem{diffgemma2026}
+{DiffusionGemma} Authors.
+\newblock {DiffusionGemma} Technical Report.
+\newblock \emph{arXiv preprint arXiv:2608.00146}, 2026.
+
+\bibitem{dataeff2026}
+Data-Efficient {AR}-to-Diffusion Authors.
+\newblock Data-Efficient Autoregressive-to-Diffusion Language Models via On-Policy Distillation.
+\newblock \emph{arXiv preprint arXiv:2606.06712}, 2026.
+
+\bibitem{flux2026opd}
+Flux-{OPD} Authors.
+\newblock On-Policy Distillation with Evolving Contexts.
+\newblock \emph{arXiv preprint arXiv:2607.28022}, 2026.
+
+\bibitem{vgrpo2026}
+{V-GRPO} Authors.
+\newblock Online Reinforcement Learning for Denoising Generative Models Is Easier than You Think.
+\newblock \emph{arXiv preprint arXiv:2604.23380}, 2026.
+
+\bibitem{flowdppo2026}
+{Flow-DPPO} Authors.
+\newblock Divergence Proximal Policy Optimization for Flow Matching Models.
+\newblock \emph{arXiv preprint arXiv:2606.11025}, 2026.
+
+\bibitem{zhu2026sft}
+Kejian Zhu, Zhuoran Jin, Shangqing Tu, Hongbang Yuan, Yushi Bai, Kang Liu, Juanzi Li, and Jun Zhao.
+\newblock {SFT} Conflicts, {RL} Coexists: A Theoretical and Empirical Analysis of Multi-Task Learning for {LLMs}.
+\newblock \emph{arXiv preprint arXiv:2608.03573}, 2026.
+
+\end{thebibliography}
+
+\end{document}
