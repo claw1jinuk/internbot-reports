@@ -1,0 +1,121 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Summary: DarwinX --- Evolving Agent Harnesses\\Through Natural Selection}
+\author{Internbot}
+\date{August 15, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+An LLM agent's capability depends not only on model weights but on its \emph{harness}---the prompts, tools, memory, skills, and control flow that shape its runtime behavior. While enormous resources go into weight training, the harness is typically hand-designed despite having massive impact on agent performance. Zhang et al.~\cite{darwinx2026} (Salesforce) address this gap by treating harness optimization as a population-based evolutionary search problem. Their central thesis: ``harness selection turns evaluation compute into durable capability''---compute spent evaluating the agent on tasks can be repurposed to drive harness refinement, producing lasting improvements without touching model weights. The paper identifies two failure modes of single-lineage self-improvement: \emph{path dependency} (early edits constrain the search trajectory, causing plateaus) and \emph{cross-task interference} (an edit that fixes one task silently regresses another).
+
+\subsection{Method}
+
+\paragraph{Architecture.} DarwinX freezes the base LLM and evolves the harness, which comprises a \emph{skill layer} (prompts, memory, distilled knowledge) and a \emph{code layer} (tools, control flow, agent loop). All capability gains are attributable purely to harness changes.
+
+\paragraph{Evolutionary loop.} Each generation executes three phases:
+
+\textbf{(A) Branch evolution.} A parent is selected from the archive ranked by cumulative lineage gain $G(v)$: with probability $(1-\beta)$ exploit the highest-gain node, otherwise broaden across the population. An LLM-based proposer generates an additive harness edit using one of three learning signal types: \emph{failure-derived} (summarize failed trajectories to localize missing capabilities), \emph{teacher-derived} (distill a reference solver's successful trajectory into a reusable skill---used on ``walls'' where no agent rollout succeeds), or \emph{self-derived} (contrast the agent's own passing and failing rollouts to consolidate flaky behaviors). The child is evaluated and promoted only if it satisfies the \textbf{preserve-and-extend contract}: net gain $g(c) = \sum_t \Delta_t > 0$ and bounded regression $R(c) = \sum_t (-\Delta_t)_+ \leq \delta$. A two-stage verifier then adjudicates: Stage~1 (promote/revert based on trial evidence) and Stage~2 (preservation probe at higher fidelity, avg@5 on the full suite).
+
+\textbf{(B) Population-level recombination.} All scored variants are retained in an archive tree storing harness snapshots, edit deltas, per-task scores, and distilled lessons. Variants are classified as improvers, neutral children, stepping stones (regress but contribute lessons), or archived nodes. A \textbf{merge operator} combines complementary specialists: $H = H_0 + \Delta_{\text{code}} + \Delta_{\text{skill}} + \Delta_{\text{prompt}} + \Delta_{\text{tool}}$, accepted only if the merged child's solved set is a superset of the union of all parents' solved sets.
+
+\textbf{(C) Cross-task theme aggregation.} A failure-mode classifier labels each trial (timeout-setup, wrong-output, tool-error). Dominant themes are aggregated into shared memory $K_g$, updated as $K_{g+1} = \text{Agg}(K_g, \text{worked}, \text{regressed}, \text{themes})$ and injected into future proposals to address systemic bottlenecks.
+
+\paragraph{Evaluation protocol.} Screening (avg@3 on rotating subsets) separates exploration from confirmation (avg@5 on the full suite). This noise-aware two-tier design prevents lucky evaluations from corrupting the archive.
+
+\subsection{Results}
+
+On Terminal-Bench~2.1 (88~tasks), DarwinX evolves Monet from 75.5\% to 83.2\% (+7.7~pp) on GPT-5.5, matching Claude~Code at 83.8\% (Fable~5/xhigh) and exceeding Codex at 83.1\%. Gains concentrate where the base agent has headroom: ML \& scientific computing improves from 60.1\% to 74.9\% (+14.8~pp). Task-level analysis: 36~tasks improved, 43~unchanged, 9~regressed (6 at $\geq$10-point threshold), confirming the preserve-and-extend contract's regression bounding.
+
+On TerminalWorld (41 held-out tasks never seen during evolution), the evolved harness generalizes: 68.3\% versus 61.0\% base and 65.9\% for Claude~Code. The merged harness exceeds every individual specialist, demonstrating archive-based recombination's value against proxy overfitting.
+
+On WebArena-Infinity (1,260 real tasks, evolution on 300 synthetic), the most dramatic result: 43.5\% to 93.0\% (+49.5~pp). Invalid trajectory rate drops from 23.5\% to 1.4\%, demonstrating ``capability-compliance co-improvement''---the evolved harness learns proper interaction rather than exploiting evaluation shortcuts.
+
+Cross-benchmark transfer: the Terminal-Bench-evolved harness transfers unchanged to SWE-bench Verified, reaching 84.2\% versus 80.8\% baseline (+3.4~pp) with no in-domain SWE-bench evolution, demonstrating that verification/contract skills generalize across domains.
+
+\subsection{Limitations}
+
+Selection quality depends on proposer diversity---if the LLM proposer generates insufficiently diverse mutations, the archive has nothing to recombine. Attribution is compositional rather than causal: individual operator contributions (archive, preserve-and-extend, recombination, signal types) are not independently ablated. Statistical power is limited: TerminalWorld has only 41~held-out tasks (one solve moves pass@1 by 2.4~pp; McNemar $p=0.45$). Total compute cost for the evolution loop is never disclosed, making cost-benefit analysis impossible. For WebArena-Infinity, all recombination merges were reverted---gains came entirely from single-lineage mutation, undermining the recombination narrative for that benchmark. The proposer mechanism (prompt templates, constraint language) is underspecified. All benchmarks are coding/browser-focused; generalization to other agent domains is untested.
+
+\subsection{Relevance to Research Topics}
+
+DarwinX validates and operationalizes the harness-as-optimization-target philosophy introduced by Macaron-V1's MindForge~\cite{macaron2026}. While MindForge sketched a three-stage RSI loop (Discovery/Expansion/Update), DarwinX provides a concrete evolutionary algorithm with formal fitness criteria (preserve-and-extend contract), population-based search with recombination, and noise-aware evaluation. In the co-evolution taxonomy~\cite{coevo2026}, DarwinX represents a Stage~1/2 hybrid: the harness evolves (Stage~1 self-evolution) while tasks are adaptively partitioned into walls, variance-band, and reliable solves that co-evolve the learning signal (Stage~2 feedback-space adaptation). The preserve-and-extend contract directly addresses the catastrophic forgetting problem by bounding regression, providing a harness-level analogue to EWC-style regularization in weight space.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Co-Evolving Harness and Model Weights via Alternating DarwinX and RL}
+
+\paragraph{Gap.} DarwinX deliberately freezes the model to enable clean attribution, but this leaves weight-level learning entirely unexploited. Macaron-V1's MindForge proposes distilling successful harness configurations into adapter weights, but does not use population-based search. The co-evolution survey~\cite{coevo2026} identifies model-harness co-evolution as a key Stage~3 frontier. No existing system couples population-based harness evolution with targeted weight updates in a closed loop.
+
+\paragraph{Approach.} Implement an alternating optimization loop: (1)~run DarwinX for $N$ generations with frozen weights, producing an evolved harness $H^*$ and an archive of per-task failure analyses; (2)~extract the failure patterns from stepping stones and walls in the archive to construct a targeted RL curriculum---tasks where harness evolution failed indicate capabilities the model itself lacks; (3)~train a LoRA adapter via GRPO on this targeted curriculum, using the SFT-RL coexistence theory~\cite{zhu2026sft} to ensure multi-task orthogonality; (4)~freeze the updated model and restart DarwinX from the evolved archive. The archive tree persists across weight updates, enabling the harness to leverage new model capabilities while preserving previously successful edits. The preserve-and-extend contract protects against regressions introduced by the weight update.
+
+\paragraph{Feasibility.} DarwinX's archive already stores per-task failure analyses suitable for curriculum construction. The main challenge is defining a clean handoff protocol: after weight updates, some harness edits may become redundant (the model now handles what the harness patched) while others may break (the model's changed behavior invalidates harness assumptions). A post-update preservation probe on the full archive would detect such incompatibilities. Moderate implementation complexity, high impact as the first true model-harness co-evolution system.
+
+\subsection{Direction 2: Preserve-and-Extend Contracts for On-Policy Distillation}
+
+\paragraph{Gap.} On-policy distillation (OPD) methods do not bound per-task regression during multi-task distillation. The SFT-RL coexistence paper shows RL updates are approximately orthogonal across tasks, but this is a statistical property---individual updates can still cause localized regressions. DarwinX's preserve-and-extend contract provides a task-level regression bound, but operates at the harness level rather than the weight level. Transferring this formal guarantee to OPD weight updates would prevent the ``silent regression'' problem identified in the DarwinX motivation.
+
+\paragraph{Approach.} After each OPD training epoch, evaluate the student on a task suite and compute per-task deltas $\Delta_t = p_t^{\text{new}} - p_t^{\text{old}}$. Accept the weight update only if $\sum_t (-\Delta_t)_+ \leq \delta$ (bounded regression) and $\sum_t \Delta_t > 0$ (net gain). If rejected, revert to the previous checkpoint and adjust the distillation loss---increase the weight on regressed tasks or apply Flux-OPD's contextual correction~\cite{flux2026opd} specifically to the regressed cluster. This creates a ``gated OPD'' protocol where each epoch must pass a preserve-and-extend check before being accepted. The two-tier screening/confirmation evaluation from DarwinX (avg@3 screening, avg@5 confirmation) prevents lucky evaluations from corrupting the training trajectory.
+
+\paragraph{Feasibility.} Requires only periodic evaluation during OPD training (already standard practice) plus a checkpoint-revert mechanism. The main overhead is the confirmation evaluation (avg@5), which may be expensive for large task suites. A capability-cluster-based sampling strategy (evaluating only clusters where the current epoch targets) could reduce cost. Low implementation risk, directly applicable to existing OPD pipelines.
+
+\subsection{Direction 3: Archive-Based Recombination for Diffusion LLM Sampling Strategies}
+
+\paragraph{Gap.} Diffusion LLMs use fixed sampling strategies (number of denoising steps, noise schedules, self-conditioning) chosen globally for all inputs. The Simplax paper~\cite{simplax2026} shows that different NFE budgets produce very different quality-diversity trade-offs. DarwinX's archive-based recombination---combining complementary specialists that excel on different task subsets---could be applied to discover input-adaptive sampling strategies for dLLMs, where different denoising configurations are ``specialists'' for different input types.
+
+\paragraph{Approach.} Define a dLLM sampling ``harness'' consisting of: NFE count, noise schedule parameters, self-conditioning toggle, and Simplax concentration $\eta_t$. Use DarwinX's evolutionary loop to evolve a population of sampling configurations, each evaluated on a diverse text generation benchmark. The preserve-and-extend contract ensures no configuration regresses on previously well-served input types. The merge operator combines configurations that excel on complementary input clusters (e.g., one configuration excels on short factual text, another on long creative text) into an input-adaptive routing strategy. The archive retains all evaluated configurations with per-cluster scores, enabling post-hoc selection of the optimal configuration for any input type.
+
+\paragraph{Feasibility.} Sampling configuration is a small search space (4--6 continuous/discrete parameters per configuration), making the evolutionary search tractable with limited compute. The main challenge is defining meaningful input clusters for evaluation---perplexity-based clustering or length/domain-based partitioning are natural candidates. The fitness evaluation requires only forward passes through the dLLM (no training), so iteration is cheap. Low risk, novel application of population-based search to dLLM inference optimization.
+
+\section{Conclusion}
+
+DarwinX demonstrates that population-based evolutionary search over agent harnesses can produce substantial capability gains without modifying model weights---+7.7~pp on Terminal-Bench, +49.5~pp on WebArena-Infinity, and +3.4~pp cross-benchmark transfer to SWE-bench. The preserve-and-extend contract provides a formal mechanism for bounding regression during evolution, directly addressing the catastrophic forgetting problem at the harness level. The archive-based recombination operator enables complementary specialists to be merged, overcoming the path dependency limitation of single-lineage self-improvement. Combined with our recent reviews of Macaron-V1's harness-as-optimization-target philosophy and the co-evolution survey's taxonomy, DarwinX fills a critical gap: it provides the concrete algorithmic machinery for the harness evolution that these frameworks conceptualize. The next frontier is closing the loop between harness evolution and weight updates---co-evolving the agent's scaffolding and its underlying model in a unified optimization framework.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{darwinx2026}
+Yifan Zhang, Yutong Dai, Juntao Tan, Luyu Yang, Rishi Mullur, Thai Hoang, Zhiyuan Hu, James Zhu, Phil Mui, Silvio Savarese, Ran Xu, and Zeyuan Chen.
+\newblock {DarwinX}: Evolving Agent Harnesses Through Natural Selection.
+\newblock \emph{arXiv preprint arXiv:2608.07545}, 2026.
+
+\bibitem{macaron2026}
+Mind Lab.
+\newblock Macaron-V1: Towards Open Continual Learning with Self-Improvement and Mixture-of-{LoRA}.
+\newblock \emph{arXiv preprint arXiv:2608.09819}, 2026.
+
+\bibitem{coevo2026}
+Qing Zong et al.
+\newblock Co-Evolution in Agentic Systems: Toward Self-Directed Evolution Beyond Human Design.
+\newblock \emph{arXiv preprint arXiv:2608.10299}, 2026.
+
+\bibitem{zhu2026sft}
+Kejian Zhu et al.
+\newblock {SFT} Conflicts, {RL} Coexists: A Theoretical and Empirical Analysis of Multi-Task Learning for {LLMs}.
+\newblock \emph{arXiv preprint arXiv:2608.03573}, 2026.
+
+\bibitem{flux2026opd}
+Flux-{OPD} Authors.
+\newblock On-Policy Distillation with Evolving Contexts.
+\newblock \emph{arXiv preprint arXiv:2607.28022}, 2026.
+
+\bibitem{simplax2026}
+Jinya Sakurai et al.
+\newblock Simplex Relaxation for Discrete Diffusion.
+\newblock \emph{arXiv preprint arXiv:2608.10615}, 2026.
+
+\end{thebibliography}
+
+\end{document}
