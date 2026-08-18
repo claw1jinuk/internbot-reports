@@ -1,0 +1,112 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Summary: Forecast Collapse\\in Time-Series Foundation Models}
+\author{Internbot}
+\date{August 18, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+
+Time-series foundation models (TSFMs) and deep learning forecasters, when applied to targets with low predictability (e.g., hourly stock returns), produce predictions that collapse to near-constant outputs---a phenomenon Wan et al.~\cite{forecastcollapse2026} term \emph{forecast collapse}. Collapsed predictions show negligible variance relative to actual targets and yield poor cross-sectional correlation (Information Coefficient, IC), despite appearing ``reasonable'' on standard per-series error metrics like MSE or MAE. This reveals a critical blind spot: per-series metrics can hide failures in cross-series structure needed by downstream decisions such as portfolio construction or stock selection. The phenomenon is not limited to a single architecture---it manifests across TSFMs, 12 deep learning forecasting models, and 97 public benchmark configurations from the GIFT-Eval benchmark, whenever target predictability is low.
+
+\subsection{Method}
+
+\paragraph{Root cause analysis.} The authors identify two mechanisms behind forecast collapse:
+
+\textbf{(1) Low predictability limits prediction amplitude.} Under MSE, the Bayes-optimal point forecast is the conditional mean $f^*(X) = \mathbb{E}[Y \mid X]$. For financial returns (approximately martingale processes), the conditional mean is approximately zero, so a well-calibrated model \emph{should} produce near-flat predictions---this is statistically optimal but practically useless. Companion theoretical work~\cite{andreoletti2026} proves that for martingale targets, the interpolating (highly expressive) predictor has expected error $\geq 2H\sigma^2$, while a simple linear predictor achieves $H\sigma^2 + O(H\sigma^2/n)$---increased model expressivity leads to \emph{strictly larger} prediction error.
+
+\textbf{(2) Per-series objectives miss cross-series structure.} MSE and MAE optimize each series independently, providing no gradient signal for cross-sectional ranking---which series will have relatively higher or lower values compared to peers at the same time step. Even if a model learns weak cross-sectional signal, per-series losses cannot sharpen this ranking ability.
+
+\paragraph{The calibration-ranking tradeoff.} Optimizing MSE (calibration) produces flat but correctly-scaled predictions that destroy ranking ability. Directly optimizing cross-sectional correlation (ranking) improves IC but \textbf{inflates forecast amplitude by more than an order of magnitude}, producing well-ranked but wildly miscalibrated outputs. No single standard objective achieves both simultaneously.
+
+\paragraph{CalibRank.} To resolve this tradeoff, the authors propose CalibRank, a composite loss that balances a calibration term (MSE) with a ranking term (differentiable approximation of cross-sectional correlation). A weighting parameter controls the balance: small weight favors calibration (flat predictions), large weight favors ranking (inflated amplitude). CalibRank finds the middle ground, keeping prediction amplitude close to the target while substantially improving cross-sectional correlation.
+
+\paragraph{Diagnostic evidence.} The returns-vs-volume contrast is the key empirical evidence: returns (low predictability) exhibit severe collapse across all models, while volume (high predictability) shows no collapse under identical experimental setup. This confirms that target predictability---not model architecture---drives collapse.
+
+\subsection{Results}
+
+CalibRank \textbf{nearly triples cross-sectional correlation} on the Finance1K dataset (1,000 US equities at hourly frequency) compared to MSE-trained baselines, while keeping prediction amplitude close to the target. The improvement is universal across all tested architectures. Directly optimizing ranking inflates amplitude by $>$10$\times$, confirming the tradeoff CalibRank resolves.
+
+Across 97 GIFT-Eval benchmark configurations (23~datasets spanning electricity, weather, traffic; 55~short-term, 21~medium-term, 21~long-term), forecast collapse severity correlates closely with target predictability. High-predictability configurations (strong seasonal patterns) show minimal collapse; low-predictability configurations exhibit pronounced collapse. The phenomenon affects channel-independent models (PatchTST), channel-dependent models (iTransformer), and all tested TSFMs---confirming it is a property of the loss function and target signal, not the architecture.
+
+\subsection{Limitations}
+
+The primary dataset (Finance1K) focuses on US equities at hourly frequency; generalization to other asset classes, frequencies, and geographies is not established. CalibRank's weighting parameter likely requires tuning across datasets and market regimes; sensitivity analysis is not reported. The paper focuses on point prediction under MSE---whether probabilistic forecasting approaches (modeling full conditional distributions rather than conditional means) naturally avoid collapse is unexplored. Downstream task evaluation (actual portfolio performance, transaction-cost-adjusted returns) is absent; cross-sectional IC is used as a proxy. The paper's theoretical grounding relies primarily on the companion work by Andreoletti~\cite{andreoletti2026}; the main paper's root cause analysis is empirical rather than formally proven.
+
+\subsection{Relevance to Research Topics}
+
+This paper addresses a fundamental failure mode in time-series foundation models that is invisible to standard evaluation protocols. The finding that MSE-optimal behavior on low-predictability targets is indistinguishable from ``predicting nothing useful'' has direct implications for our previously reviewed TSFMs. Toto~2.0~\cite{toto2026} demonstrated that smaller models (4M, 22M) exhibit horizon-dependent collapse, partially mitigated by scaling to 1B+. However, the forecast collapse identified here is fundamentally different: it is driven by target predictability and loss function choice, not model capacity---suggesting that scaling alone cannot resolve it. The paper also connects to our review of component-level benchmarking~\cite{compbench2026}, which argued for decomposing forecast quality beyond aggregate metrics. CalibRank's composite loss paradigm---explicitly balancing calibration and ranking---opens a new design axis for TSFM training objectives.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Predictability-Aware Loss Routing for Time-Series Foundation Models}
+
+\paragraph{Gap.} Current TSFMs use a single loss function (MSE, NLL, or CRPS) across all series in their pre-training corpus, regardless of the predictability of each target. Forecast collapse demonstrates that MSE-optimal behavior is qualitatively different for high- versus low-predictability series. A one-size-fits-all loss produces excellent calibration on predictable series but collapsed, useless predictions on unpredictable ones.
+
+\paragraph{Approach.} Design a predictability-aware loss router for TSFM pre-training. For each training batch, estimate the per-series predictability using a lightweight signal: the ratio of one-step-ahead prediction variance to target variance, or the autocorrelation coefficient at lag~1. Route high-predictability series to standard MSE (where calibration is the primary concern) and low-predictability series to CalibRank (where cross-sectional ranking matters). This creates a mixture-of-losses objective $\mathcal{L} = \sum_i w_i \mathcal{L}_{\text{MSE}}^{(i)} + (1 - w_i) \mathcal{L}_{\text{CalibRank}}^{(i)}$, where $w_i$ depends on the estimated predictability of series $i$. The approach could be integrated into Toto~2.0's training pipeline, which already uses a composite loss combining NLL and robust loss terms.
+
+\paragraph{Feasibility.} Predictability estimation is cheap (autocorrelation at lag~1 requires a single dot product). CalibRank is already shown to be architecture-agnostic and trainable. The main challenge is that predictability is non-stationary---a series may be predictable during some regimes and unpredictable during others. An online predictability estimator with exponential smoothing could address this. Low risk, directly addresses the core problem.
+
+\subsection{Direction 2: Probabilistic Forecasting as Collapse Mitigation}
+
+\paragraph{Gap.} The paper focuses exclusively on point forecasting under MSE, where the Bayes-optimal solution for martingale targets is trivially flat. However, probabilistic forecasting---estimating the full conditional distribution $p(Y \mid X)$ rather than just $\mathbb{E}[Y \mid X]$---is non-trivial even for martingales, because the conditional \emph{variance} (and higher moments) carry information. Models like Toto~2.0 (which uses NLL) and SAGA~\cite{saga2026} (which produces quantile forecasts) already operate in this space, but whether they avoid forecast collapse in cross-sectional settings has not been studied.
+
+\paragraph{Approach.} Systematically evaluate whether probabilistic TSFMs exhibit forecast collapse by measuring cross-sectional IC using predicted quantiles (e.g., the predicted 75th percentile minus 25th percentile as a volatility proxy, or predicted median as a return proxy). If the predicted distributional shape varies meaningfully across series even when the predicted mean collapses, then distributional features can serve as ranking signals without requiring a ranking-specific loss. If collapse persists in distributional predictions, extend CalibRank to operate on quantile forecasts: replace the MSE calibration term with quantile loss and apply the ranking term to predicted quantiles rather than point forecasts, creating a ``Distributional CalibRank.''
+
+\paragraph{Feasibility.} Requires evaluating existing probabilistic TSFMs on Finance1K with cross-sectional IC metrics---a straightforward evaluation study. The Distributional CalibRank extension requires replacing the loss terms, which is mechanically simple. The main risk is that distributional predictions may collapse for the same fundamental reason (low predictability suppresses all conditional moments, not just the mean). Theoretical analysis of whether conditional variance carries cross-sectional signal in near-martingale settings would inform this risk. Moderate risk, high potential to bridge the point-forecast and probabilistic-forecast literatures.
+
+\subsection{Direction 3: Cross-Series Contrastive Pre-Training for TSFMs}
+
+\paragraph{Gap.} TSFMs are pre-trained on individual time series or channels, never learning cross-series relationships. CalibRank addresses this at fine-tuning time, but the pre-trained representations themselves are ``cross-series blind.'' If the foundation model's representations could capture cross-series structure during pre-training, downstream CalibRank-style fine-tuning would start from a much stronger initial point.
+
+\paragraph{Approach.} Add a contrastive cross-series objective to TSFM pre-training: at each time step, the model produces embeddings for all series in a panel; a contrastive loss pulls embeddings of series that will have similar future returns closer and pushes dissimilar-return series apart. This is a time-series analogue of contrastive learning in vision/NLP, applied at the cross-sectional level. The contrastive objective runs alongside the standard per-series forecasting loss (MSE or NLL), adding cross-series structure to the learned representations. At fine-tuning time, CalibRank can then leverage these structured embeddings for more effective cross-sectional ranking. The approach connects to the component-level benchmarking philosophy~\cite{compbench2026}: rather than treating forecast quality as a monolithic metric, the model explicitly separates temporal prediction (per-series) from cross-sectional discrimination (cross-series) as distinct pre-training objectives.
+
+\paragraph{Feasibility.} Contrastive pre-training is well-established in other domains (SimCLR, CLIP). The main challenge is scale: TSFMs are pre-trained on heterogeneous datasets from many domains, and meaningful cross-series structure exists only within panels of related series (e.g., multiple stocks, multiple weather stations). The contrastive objective would need to be applied selectively to panels, not across unrelated datasets. This requires panel-aware batching during pre-training---feasible but requiring data pipeline modifications. Moderate complexity, potentially transformative for TSFM applicability to financial and multi-entity forecasting.
+
+\section{Conclusion}
+
+Wan et al.\ identify forecast collapse as a fundamental failure mode of time-series foundation models on low-predictability targets: MSE-optimal predictions collapse to near-constant outputs that are statistically correct but practically useless. The two root causes---low predictability limiting prediction amplitude and per-series objectives missing cross-series structure---reveal that the problem lies in the loss function, not the model architecture or scale. CalibRank's composite calibration-ranking loss nearly triples cross-sectional correlation while preserving amplitude calibration, demonstrating that the tradeoff is resolvable. This paper has profound implications for the ``scale is all you need'' narrative in time-series forecasting: more parameters, more data, and better architectures cannot overcome a fundamentally misaligned training objective. The path forward requires predictability-aware training, cross-series-aware objectives, and evaluation protocols that measure what downstream decisions actually need.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{forecastcollapse2026}
+Shu Wan, Miles Ma, Hank Zhu, Guangqi Liu, Stephen Wang, Qingsong Wen, and Huan Liu.
+\newblock Forecast Collapse in Time-Series Foundation Models.
+\newblock \emph{arXiv preprint arXiv:2608.14106}, 2026.
+
+\bibitem{andreoletti2026}
+Diego Andreoletti.
+\newblock Forecast Collapse of Transformer-Based Models under Squared Loss in Financial Time Series.
+\newblock \emph{arXiv preprint arXiv:2604.00064}, 2026.
+
+\bibitem{toto2026}
+Datadog.
+\newblock Toto 2.0: Time Series Forecasting Enters the Scaling Era.
+\newblock \emph{arXiv preprint arXiv:2605.20119}, 2026.
+
+\bibitem{saga2026}
+{SAGA} Authors.
+\newblock A Sequence-Adaptive Generative Architecture for Multi-Horizon Probabilistic Forecasting.
+\newblock \emph{arXiv preprint arXiv:2605.19014}, 2026.
+
+\bibitem{compbench2026}
+Component-Level Benchmarking Authors.
+\newblock Beyond Holistic Models: Systematic Component-Level Benchmarking of Deep Multivariate Time-Series Forecasting.
+\newblock \emph{arXiv preprint arXiv:2605.26562}, 2026.
+
+\end{thebibliography}
+
+\end{document}
