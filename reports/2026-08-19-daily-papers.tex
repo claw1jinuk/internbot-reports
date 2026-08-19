@@ -1,0 +1,112 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Learn What's Left, Not What's Mastered: Saturation Aware Advantage Reweighting for Multi-Reward Policy Optimization}
+\author{Auto-generated Report}
+\date{August 19, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Training large language models with reinforcement learning increasingly involves multiple reward objectives---correctness, format compliance, length constraints, executability---rather than a single scalar signal. The dominant approach, Group Relative Policy Optimization (GRPO), combines these rewards via fixed weighted scalarization \emph{before} group normalization, which introduces two failure modes. First, \textbf{reward resolution loss}: distinct reward profiles can collapse to identical scalar values (e.g., a rollout scoring correctness$=$1, format$=$0 and another scoring correctness$=$0, format$=$1 both yield the same scalar reward under equal weights). Second, \textbf{saturation blindness}: even methods like GDPO that normalize each reward dimension independently still apply fixed objective weights throughout training, so the optimizer continues directing gradient budget toward objectives that are already nearly perfect while starving under-optimized objectives of learning signal.
+
+Wang et al.\ (arXiv:2608.16072) formalize the concept of \emph{saturation}---the condition where an objective's batch-level performance approaches the maximum attainable reward---and demonstrate that fixed-weight multi-reward training becomes increasingly dysfunctional as the number of objectives grows.
+
+\subsection{Method}
+The proposed method, \textbf{SA-MRPO} (Saturation Aware Multi-Reward Policy Optimization), modifies only the advantage construction while leaving the GRPO clipped-surrogate policy update entirely intact.
+
+Given $n$ reward objectives with known bounds $[r_{\min}^{(k)}, r_{\max}^{(k)}]$, the pipeline proceeds as follows. For each query $q_i$ with $G$ rollout responses, per-objective standardized advantages are computed:
+\begin{equation}
+A_k^{(i,j)} = \frac{r_k^{(i,j)} - \mu_k^{(i)}}{\sigma_k^{(i)}}
+\end{equation}
+where $\mu_k^{(i)}$ and $\sigma_k^{(i)}$ are the group mean and standard deviation for objective $k$. The \emph{saturation ratio} captures how much of the attainable reward range has been consumed:
+\begin{equation}
+s^{(k)} = \frac{\bar{r}^{(k)} - r_{\min}^{(k)}}{r_{\max}^{(k)} - r_{\min}^{(k)}} \in [0, 1]
+\end{equation}
+where $\bar{r}^{(k)}$ is the batch mean reward for objective $k$. Objective weights are then dynamically adjusted:
+\begin{equation}
+\tilde{w}_k = w_k \cdot (1 - s^{(k)})^{\gamma}
+\end{equation}
+with $\gamma \geq 0$ controlling reweighting intensity. The aggregate advantage $\tilde{A}^{(i,j)} = \sum_k \tilde{w}_k A_k^{(i,j)}$ is batch-normalized to yield the final advantage $\hat{A}_{\mathrm{SA}}^{(i,j)}$, which enters the standard clipped-surrogate objective.
+
+The method strictly generalizes both GDPO ($\gamma = 0$) and GRPO (single objective). The authors prove that for two objectives $a, b$ with $s^{(a)} > s^{(b)}$, the weight ratio $\tilde{w}_a / \tilde{w}_b < w_a / w_b$, confirming systematic down-weighting of more saturated objectives. They also characterize when the reweighting can cause a previously well-optimized objective to degrade: objective $a$ decreases when conflicting gradient terms $\sum_{k \neq a} \tilde{w}_k \, g_a(\theta)^\top g_k(\theta) < -\tilde{w}_a \|g_a(\theta)\|^2$, an inherent cost of reallocating optimization effort.
+
+\subsection{Results}
+Experiments span mathematical reasoning (Qwen2.5-7B/3B on DeepScaleR), adaptive reasoning (DeepSeek-R1-Distill-Qwen-7B), and code generation (Qwen2.5-7B on Eurus-2-RL).
+
+In the \textbf{2-objective math} setting (correctness + length), SA-MRPO improves over GDPO by +5.0\% on AIME24 (11.5\%$\to$16.5\%) and +3.5\% on MATH500 (64.2\%$\to$67.7\%). The gains become dramatic in the \textbf{3-objective} setting (correctness + length + format): GDPO collapses catastrophically (AIME24 drops to 0.6\%, MATH500 to 26.3\%), while SA-MRPO maintains 5.0\% and 57.1\% respectively---a +30.8\% absolute gap on MATH500. This demonstrates that saturation blindness worsens as objective count increases.
+
+For \textbf{adaptive reasoning}, SA-MRPO improves on all five benchmarks with an average gain of +3.8\% (22.8\%$\to$26.6\%), correctly identifying the length objective as saturated and redirecting effort to correctness. In \textbf{code generation}, SA-MRPO gains on 3 of 4 benchmarks, with the strongest improvement of +2.3\% on Codeforces, as the already-saturated executability objective was appropriately deprioritized.
+
+Ablations on the saturation exponent $\gamma$ show that $\gamma = 0.5$ provides the best overall balance. All nonzero $\gamma$ values outperform $\gamma = 0$ (GDPO), confirming the mechanism is robust, though overly aggressive reweighting ($\gamma = 1.0$) can degrade specific benchmarks.
+
+\subsection{Limitations}
+The authors acknowledge four limitations. (1) \textbf{Nominal vs.\ optimizable headroom}: a large gap between current performance and the prescribed maximum does not guarantee the model can close that gap. (2) \textbf{No monotonicity guarantee}: reallocating effort can actively degrade previously optimized objectives when gradient conflicts exist. (3) \textbf{Requires known reward bounds}: the saturation ratio needs $r_{\min}$ and $r_{\max}$, which is natural for verifiable rewards but may not apply to learned reward models with unbounded outputs. (4) \textbf{Batch-level estimation}: saturation is estimated per-batch, which may be noisy for small batch sizes.
+
+\subsection{Relevance to Research}
+SA-MRPO directly extends the GRPO/GDPO framework central to modern LLM RL training (Topic T2: reinforcement learning, policy optimization). The saturation-aware reweighting connects to our prior reviews of DVAO (dynamic variance-adaptive advantage, Review \#59), which adapts weights via reward variance rather than saturation, and the SFT-vs-RL interference analysis of Review \#110, which showed RL gradients are variance-limited---SA-MRPO operates precisely on this variance structure by modulating which objectives contribute to the advantage. The method also relates to multi-reward balancing in CoRT (Review \#104) and the rubric-guided decomposition of RubricEM (Review \#50).
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Saturation-Aware Reweighting for Continual Multi-Task RL}
+\textbf{Gap:} SA-MRPO addresses within-training saturation dynamics but treats each training run as monolithic. In continual learning settings where new tasks or objectives are introduced over time (e.g., progressively expanding an agent's skill set), saturation patterns shift non-stationarily---an objective may de-saturate when the task distribution changes.
+
+\textbf{Approach:} Extend the saturation ratio with exponential moving average tracking across continual learning stages, allowing $s^{(k)}$ to respond to distributional shifts. Combine with elastic weight consolidation or LoRA-based task isolation to prevent catastrophic forgetting of objectives that were once saturated but become relevant again. This bridges SA-MRPO with the continual learning challenges studied in Macaron-V1 (Review \#111) and Geometry Conflict (Review \#49).
+
+\textbf{Feasibility:} High. The saturation ratio is already batch-computed; extending to EMA requires minimal additional computation. The main challenge is validating that EMA-smoothed saturation correctly tracks distributional shifts.
+
+\subsection{Direction 2: Saturation-Aware Advantage for Diffusion LLM Training}
+\textbf{Gap:} SA-MRPO is designed for autoregressive GRPO. Diffusion LLMs (e.g., LLaDA, Sumi, DiffusionGemma) use fundamentally different training objectives (denoising, flow matching) and the notion of ``rollout'' differs---tokens are generated in parallel rather than sequentially. Multi-reward signals in diffusion LLM training (quality, coherence, format) face the same saturation dynamics but the advantage computation must be reformulated.
+
+\textbf{Approach:} Adapt the saturation ratio to operate on per-sample denoising trajectories rather than sequential rollouts. For flow-matching RL methods like V-GRPO (Review \#42) and Flow-DPPO (Review \#69), define group-relative advantages over diffusion trajectory samples and apply the $(1 - s^{(k)})^\gamma$ reweighting. The key insight is that saturation measurement is reward-side, not architecture-side, so it should transfer directly once advantage aggregation is reformulated.
+
+\textbf{Feasibility:} Medium. The saturation ratio itself is architecture-agnostic, but integrating with diffusion-specific policy gradients (which operate on noise predictions rather than token probabilities) requires careful derivation to ensure the clipped surrogate remains valid.
+
+\subsection{Direction 3: Learned Saturation Estimation for Unbounded Rewards}
+\textbf{Gap:} SA-MRPO requires known reward bounds $[r_{\min}, r_{\max}]$, limiting it to verifiable rewards. Many practical LLM training scenarios use learned reward models (RLHF) or preference-based signals where reward bounds are unknown or effectively unbounded. This excludes a large class of important training regimes.
+
+\textbf{Approach:} Replace the fixed-bound saturation ratio with a learned estimator that tracks the empirical reward CDF across training. Define saturation as the percentile rank of the current batch mean within the running reward distribution: $s^{(k)} = F_k(\bar{r}^{(k)})$ where $F_k$ is estimated via a streaming quantile sketch (e.g., t-digest). This preserves the $[0,1]$ range without requiring known bounds, and naturally adapts as the reward model's output distribution evolves during training.
+
+\textbf{Feasibility:} Medium-high. Streaming quantile estimation is well-studied and computationally cheap. The main risk is that learned reward models may exhibit reward hacking, causing the estimated saturation to be misleading---the model appears saturated on the proxy while the true objective has ample headroom.
+
+\section{Conclusion}
+SA-MRPO provides an elegant, minimally invasive solution to a fundamental problem in multi-reward LLM training: the misallocation of optimization effort toward already-mastered objectives. By introducing a saturation ratio that measures the fraction of attainable reward range consumed and exponentially down-weighting saturated objectives, the method automatically redirects learning signal where it is most needed. The 3-objective results are particularly striking, revealing that saturation blindness causes catastrophic collapse under GDPO while SA-MRPO remains robust. The formal characterization of when objective conflicts arise under saturation-aware reweighting provides principled understanding of the tradeoffs involved. As LLM training increasingly involves complex multi-objective setups (safety + helpfulness + format + efficiency), adaptive allocation mechanisms like SA-MRPO will become essential infrastructure for scalable RL training.
+
+\begin{thebibliography}{9}
+\bibitem{wang2026samrpo}
+Y.~Wang, Y.~Chen, H.~Zhang, H.~Luo, X.~Wu, J.~Ni, Y.~Fu, N.~Vasconcelos, and Y.~Li.
+\newblock Learn What's Left, Not What's Mastered: Saturation Aware Advantage Reweighting for Multi-Reward Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2608.16072}, 2026.
+
+\bibitem{shao2024grpo}
+Z.~Shao et~al.
+\newblock DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.
+\newblock \emph{arXiv preprint arXiv:2402.03300}, 2024.
+
+\bibitem{zhang2025gdpo}
+H.~Zhang et~al.
+\newblock GDPO: Group-Decomposed Policy Optimization for Multi-Reward LLM Training.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem{wang2026dvao}
+Y.~Wang et~al.
+\newblock DVAO: Dynamic Variance-adaptive Advantage Optimization for Multi-reward Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2605.25604}, 2026.
+
+\bibitem{schulman2017ppo}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, and O.~Klimov.
+\newblock Proximal Policy Optimization Algorithms.
+\newblock \emph{arXiv preprint arXiv:1707.06347}, 2017.
+\end{thebibliography}
+
+\end{document}
