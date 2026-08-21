@@ -1,0 +1,114 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Co-RL: Unsupervised Reasoning Emerges from Diverse Cohort in Multi-agent RL}
+\author{Auto-generated Report}
+\date{August 21, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Reinforcement learning with verifiable rewards (RLVR) has become the dominant paradigm for improving LLM reasoning, but it depends on costly ground-truth labels that grow scarce as capabilities advance. Self-rewarding alternatives---where a model derives rewards from its own completions via majority voting, self-consistency, or confidence---suffer from \emph{self-confirming dynamics}: they amplify whichever answer the model currently favors regardless of correctness, leading to bias amplification, diversity collapse, and training instability.
+
+Yang et al.\ (arXiv:2608.17253) ask: can a model obtain sufficiently independent learning signal to improve \emph{without any ground-truth supervision}? Their answer is \textbf{Co-RL}, a label-free multi-agent RL framework where $N$ decoupled agents---drawn from different model families with different architectures, tokenizers, and pretraining data---provide mutual supervision through peer-derived rewards. Because their error patterns are decorrelated, each model supplies corrective feedback that the other cannot derive from its own generations.
+
+\subsection{Method}
+Co-RL pairs $N$ independently parameterized policies $\{\pi_{\theta_n}\}_{n=1}^N$ that share neither parameters nor gradients. For each unlabeled prompt $x$, every agent generates $K$ rollouts and extracts answers $a_n^k = g(y_n^k)$. The \textbf{cyclic pseudo-label} mechanism assigns agent $n$ a supervision target from agent $n{-}1$ (cyclically):
+\begin{equation}
+\hat{a}_{-n}(x) = \arg\max_b \sum_{j=1}^K \mathbf{1}[a_{n-1}^j = b]
+\end{equation}
+Rewards are binary: $r_n^k = \mathbf{1}[a_n^k = \hat{a}_{-n}(x)]$. Each agent is then updated via standard GRPO with group-relative advantages:
+\begin{equation}
+\hat{A}_n^k = \frac{r_n^k - \mu_n}{\sigma_n}, \qquad J_{\text{Co-RL}}(\theta) = \frac{1}{N}\sum_{n=1}^N J_{\text{GRPO}}(\theta_n; \{y_n^k, r_n^k\}_{k=1}^K)
+\end{equation}
+
+The critical property is that each agent does \emph{not} contribute to its own supervision target, breaking the self-reinforcing loop. Diversity is maintained through four mechanisms: (1)~decoupled optimization (no gradient sharing), (2)~model family diversity (different architectures and pretraining), (3)~model size diversity (different capacities), and (4)~input formulation diversity (semantically equivalent prompt rephrasings via DeepSeek-V3).
+
+\paragraph{Theoretical Analysis.} The paper's main theoretical result (Theorem~1) characterizes the convergence basin. For symmetric two-agent dynamics with correctness probabilities $(p_A, p_B) \in (0,1)^2$:
+\begin{itemize}
+\item $(1,1)$ and $(0,0)$ are asymptotically stable fixed points; $(1/2, 1/2)$ is a saddle with separatrix $p_A + p_B = 1$.
+\item \textbf{Co-RL converges to the correct answer when $p_A + p_B > 1$}, versus requiring $p > 1/2$ individually for self-rewarding.
+\end{itemize}
+This means two complementary models---where neither alone exceeds 50\% accuracy but their combined accuracy exceeds 100\%---can jointly converge to perfect accuracy, a regime where self-rewarding necessarily collapses to the wrong answer.
+
+Error decorrelation is quantified via Cohen's $\kappa$: different-family pairs achieve $\kappa \leq 0.42$ versus $\kappa \geq 0.51$ for same-family pairs, with complementarity (fraction of problems where exactly one agent is correct) rising from 23.2\% to 30.8\%.
+
+\subsection{Results}
+Experiments span LLMs (Qwen2.5-3B/7B, Llama-3.2-3B, Llama-3.1-8B, Qwen3-1.7B) and VLMs (Qwen2.5-VL, InternVL3.5, Gemma-3) across 7 text benchmarks (GSM8K, MATH-500, AMC, HumanEval, MBPP, LiveCodeBench, GPQA) and 4 multimodal benchmarks (MathVision, MathVerse, MathVista, We-Math).
+
+At 3B scale, Co-RL with different-family pairing achieves 49.3\% average across text benchmarks---a 8.6\% improvement over the base model and 2.0\% over the best self-rewarding baseline (TTRL at 47.3\%), while \emph{matching} supervised GRPO with ground-truth rewards (47.4\%). In three-agent settings (Qwen2.5-3B + Llama-3.2-3B + Qwen3-1.7B), all three models improve by 6.0--8.2\% over base.
+
+Against multi-agent RL baselines, Co-RL outperforms CoMAS by +4.0\% average (62.97 vs 58.94) using \emph{half the agents} and no external judge. On VLMs, Co-RL achieves 2.3--7.2\% gains across multimodal benchmarks, with Gemma-3-12B surpassing GT-Reward in several settings.
+
+Training dynamics analysis shows Co-RL maintains stable reward variation and completion length, while self-rewarding baselines exhibit reward collapse and length degeneration. Budget-controlled comparisons confirm gains stem from cross-agent supervision rather than additional compute or ensembling.
+
+\subsection{Limitations}
+The authors acknowledge four limitations. (1)~Agent topology---understanding how the number, diversity, and interaction topology shape learning remains open; the cyclic assignment is one simple topology among many. (2)~Adaptive supervision---all peers are weighted equally; developing mechanisms that exploit complementary expertise more effectively is needed. (3)~Binary reward coarseness---the analysis relies on simplified binary outcomes; continuous answer spaces may lose nuance under majority voting. (4)~Scale---behavior at frontier scales (70B+) is unexplored; tested up to 12B parameters.
+
+\subsection{Relevance to Research}
+Co-RL directly extends the GRPO-based RL training paradigm (Topic T2) by eliminating the need for ground-truth rewards through multi-agent cross-supervision. This connects to our prior review of SA-MRPO (Review~\#116), which optimized multi-reward advantage construction within a single agent---Co-RL's cross-agent reward could benefit from saturation-aware reweighting when pairing objectives differ in difficulty. The self-confirming dynamics analysis relates to the SFT-vs-RL interference studied in Review~\#110 (SFT Conflicts, RL Coexists), where RL's variance-limited gradients proved more robust than SFT's mean-limited interference---Co-RL provides an orthogonal mechanism for robustness through error decorrelation. The diversity-driven improvement connects to Co-Evolving Policy Distillation (Review~\#44) and the co-evolution survey (Review~\#112), which formalized bidirectional evolutionary pressure between evolving units.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Cross-Agent Supervision for Diffusion LLM Training}
+\textbf{Gap:} Co-RL's peer supervision mechanism is designed for autoregressive models with extractable discrete answers. Diffusion LLMs generate text through iterative denoising with no natural ``answer extraction'' step---the entire sequence emerges simultaneously, making majority-vote pseudo-labels ill-defined for open-ended generation tasks.
+
+\textbf{Approach:} Replace majority-vote agreement with a distributional consensus measure. For each prompt, have two architecturally distinct diffusion LLMs (e.g., a masked diffusion model and a continuous-latent diffusion model) generate multiple completions. Compute cross-model agreement via n-gram overlap or embedding similarity rather than exact answer matching. The reward becomes a soft consensus score: $r_n^k = \text{sim}(y_n^k, \hat{y}_{-n})$ where $\hat{y}_{-n}$ is a representative completion from the peer. This extends the co-training principle to generative tasks beyond extractive QA, connecting to Sumi (Review~\#75) and AURORA-LM (Review~\#106).
+
+\textbf{Feasibility:} Medium. The main challenge is defining ``agreement'' for open-ended text without collapsing to trivial similarity metrics. Embedding-space consensus may work but requires careful calibration to avoid rewarding generic outputs.
+
+\subsection{Direction 2: Continual Cross-Agent Learning with Evolving Cohorts}
+\textbf{Gap:} Co-RL trains a fixed cohort of agents on a fixed dataset. In continual learning settings, both the task distribution and the agent pool evolve---new models are added, old ones retired, and domain requirements shift. The convergence guarantees (Theorem~1) assume stationary dynamics and may not hold under non-stationary cohort composition.
+
+\textbf{Approach:} Extend Co-RL to a continual setting where the agent cohort is dynamically managed. When a new task domain arrives, recruit a specialist model for that domain and pair it with existing generalists via Co-RL's cyclic supervision. Use the error decorrelation metric (Cohen's $\kappa$) as a recruitment criterion: add agents that maximize complementarity with the existing cohort. Apply elastic weight consolidation or LoRA isolation to prevent catastrophic forgetting of previously learned reasoning skills. This bridges Co-RL with the continual learning challenges in Macaron-V1 (Review~\#111) and the co-evolution framework of Review~\#112.
+
+\textbf{Feasibility:} Medium-high. The cohort management layer is straightforward, but validating convergence guarantees under non-stationary dynamics requires new theoretical analysis. The main risk is that continual domain shifts may cause the separatrix condition $p_A + p_B > 1$ to be violated for new tasks.
+
+\subsection{Direction 3: Saturation-Aware Cross-Agent Reward Weighting}
+\textbf{Gap:} Co-RL uses uniform binary rewards from a single peer. When agents are paired on multiple reasoning domains (math, code, science), some domains may saturate early (both agents already agree on most answers) while others remain challenging. The current framework provides no mechanism to reallocate learning effort across domains based on cross-agent agreement rates.
+
+\textbf{Approach:} Combine Co-RL's cross-agent supervision with SA-MRPO's saturation-aware reweighting (Review~\#116). Define per-domain saturation as the cross-agent agreement rate: $s^{(d)} = \frac{1}{|\mathcal{B}_d|}\sum_{x \in \mathcal{B}_d} \mathbf{1}[\hat{a}_A(x) = \hat{a}_B(x)]$. Apply the $(1 - s^{(d)})^\gamma$ discount to domain-specific advantages, automatically deprioritizing domains where both agents already agree and amplifying domains with complementary disagreement. This directly merges two of our reviewed methods into a unified framework.
+
+\textbf{Feasibility:} High. Both components (cross-agent rewards and saturation-aware weighting) are well-understood individually. The integration requires only computing domain-level agreement statistics and applying the existing reweighting formula. The main question is whether domain-level saturation is a reliable proxy for learning potential in the cross-agent setting.
+
+\section{Conclusion}
+Co-RL demonstrates that model diversity can serve as a free supervision signal for unsupervised reasoning improvement. By pairing architecturally distinct models and using peer majority-vote pseudo-labels as rewards, the method breaks self-confirming dynamics and expands the convergence basin from $\{p > 0.5\}$ (self-rewarding) to $\{p_A + p_B > 1\}$ (cross-agent). The gains are consistent across text and multimodal benchmarks, matching or exceeding supervised GRPO while requiring zero ground-truth labels. The method's elegance lies in its simplicity---standard GRPO optimization with a peer-derived binary reward---making it immediately deployable in existing RL pipelines. As label scarcity becomes the binding constraint on LLM reasoning improvement, cross-agent supervision offers a principled path to continued capability growth without ground-truth annotation.
+
+\begin{thebibliography}{9}
+\bibitem{yang2026corl}
+Y.~Yang, Y.~Bian, Y.~Tian, D.~Fu, T.~Huang, Y.~Shi, Z.~Xiao, N.~Vasconcelos, and Y.~Li.
+\newblock Co-RL: Unsupervised Reasoning Emerges from Diverse Cohort in Multi-agent RL.
+\newblock \emph{arXiv preprint arXiv:2608.17253}, 2026.
+
+\bibitem{shao2024grpo}
+Z.~Shao et~al.
+\newblock DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.
+\newblock \emph{arXiv preprint arXiv:2402.03300}, 2024.
+
+\bibitem{zeng2025ttrl}
+W.~Zeng et~al.
+\newblock TTRL: Test-Time Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2504.16084}, 2025.
+
+\bibitem{blum1998combining}
+A.~Blum and T.~Mitchell.
+\newblock Combining Labeled and Unlabeled Data with Co-Training.
+\newblock In \emph{Proc.\ COLT}, pages 92--100, 1998.
+
+\bibitem{wang2026samrpo}
+Y.~Wang et~al.
+\newblock Learn What's Left, Not What's Mastered: Saturation Aware Advantage Reweighting for Multi-Reward Policy Optimization.
+\newblock \emph{arXiv preprint arXiv:2608.16072}, 2026.
+\end{thebibliography}
+
+\end{document}
