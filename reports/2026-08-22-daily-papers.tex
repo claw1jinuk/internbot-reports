@@ -1,0 +1,114 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: TinyCast: Probabilistic Zero-Shot Forecasting with Computed Periodicity}
+\author{Auto-generated Report}
+\date{August 22, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Time series foundation models (TSFMs) like Chronos, TimesFM, and Toto achieve strong zero-shot forecasting but require millions of parameters, making them unsuitable for embedded or resource-constrained deployment. Steinhauser (arXiv:2608.15767) identifies a fundamental tension: capturing periodicity---the dominant structural pattern in most real-world time series---typically consumes a large share of a model's learned capacity. The core insight is that periodicity does not need to be \emph{learned}; it can be \emph{computed} directly from the input signal via spectral analysis at zero parameter cost.
+
+TinyCast embodies the design principle that ``any structure a fixed computation can supply is capacity returned to the learned parameters, and the smaller the budget, the more that return is worth.'' By offloading periodicity detection to a deterministic FFT-based algorithm, the entire model fits in \textbf{146,505 parameters} (138.1~KiB INT8) and runs on an STM32H753 Cortex-M7 microcontroller, while emitting a full 9-quantile predictive distribution---the only zero-shot model below 1.4M parameters to do so with no declared test-data leakage.
+
+\subsection{Method}
+TinyCast comprises four components.
+
+\paragraph{Zero-Parameter Periodicity Detector.} Given DC-removed context $\tilde{y}$, zero-padded to power-of-two length, the normalized periodogram is computed:
+\begin{equation}
+I[k] = \frac{|X[k]|^2}{\sum_{k' \geq 1}|X[k']|^2}, \qquad X = \text{rFFT}(\tilde{y})
+\end{equation}
+A Bonferroni-corrected significance threshold $t_\alpha = \ln(N_{\text{bins}}/\alpha)/N_{\text{bins}}$ (Fisher's test, $\alpha{=}0.05$) filters the $K{=}4$ largest local maxima, yielding periods $p_k = \text{round}(n_{\text{fft}}/k_{\text{peak}}^{(k)})$. Against white-noise surrogates the test declares periodicity at 4.7\% (nominal 5\%), though the authors acknowledge that high autocorrelation (AR(1) with $\phi{=}0.9$) triggers false period declarations.
+
+\paragraph{Parameterized Positional Encoding.} The encoding combines \emph{phase channels} aligned to detected periods and multi-scale \emph{recency signals}:
+\begin{equation}
+\text{PE}(t) = [\psi_1(t) \| \cdots \| \psi_K(t) \| \rho(\Delta(t))]
+\end{equation}
+where $\psi_k(t) = (\sin(2\pi t/p_k), \cos(2\pi t/p_k))$ if $p_k > 0$ (else zeros), and $\rho(\Delta)$ provides 5 recency dimensions including a geometric ladder of exponential decays ($e^{-|\Delta|/2}$, $e^{-2|\Delta|}$, $e^{-8|\Delta|}$). Unlike Transformer sinusoidal encodings where frequencies are fixed, here phase frequencies are set \emph{per-series} by the detected periods.
+
+\paragraph{Dilated Convolutional Encoder.} A stack of $N{=}10$ residual blocks with dilated depthwise-separable convolutions (width $D{=}64$, kernel size 3, dilations $2^0$ to $2^9$) achieves a receptive field of 2,047 steps. A critical parameter-saving technique---ALBERT tying---shares a single SwiGLU feed-forward network (12,480~params) across all 10 blocks, saving 191,680~parameters. The encoder totals 57,920~parameters.
+
+\paragraph{Multi-Readout Decoder.} Three readout mechanisms assemble each future position's query: (1)~\emph{pooled summary} (mean encoder state concatenated with last position, 0 learned params for pooling), (2)~\emph{phase binning} (16,448 params)---encoder states sharing the same phase-bin position within detected cycles are averaged into cycle templates, and future positions read templates at their phase, contributing the largest single architectural improvement ($-0.098$ nGMASE), and (3)~\emph{future-conv correction} (44,864 params)---a six-block causal depthwise-separable network that starts zero-initialized. Final projection emits 9 quantiles ($\tau \in \{0.1, \ldots, 0.9\}$) via pinball loss.
+
+\paragraph{Block-Autoregressive Inference.} The model produces $p{=}48$ steps per forward pass; the median of each completed block becomes context for the next. For a 720-step horizon: $\lceil 720/48 \rceil = 15$ blocks. Optional inference-time strategies include sign symmetrization ($2\times$ compute, $+0.008$ nGMASE) and canonical-period alignment (affects only 2/97 GIFT-Eval configs).
+
+\subsection{Results}
+On \textbf{GIFT-Eval} (97 configurations, 7 domains, 10 frequencies), TinyCast achieves nGMASE~$=$~0.774, nWQL~$=$~0.545, nMSIS~$=$~0.554. Every model achieving better nWQL carries at least 1.4M parameters (${\sim}10\times$ larger). The nearest probabilistic competitor, TTM-R3 (1.4M params), achieves nWQL~$=$~0.520---modestly better but an order of magnitude larger. Sub-million models like Reverso-Nano (200K, nGMASE~$=$~0.760) score better on point accuracy but emit only point estimates.
+
+On \textbf{fev-bench} (100 tasks), TinyCast achieves skill score 0.304 [95\% CI: 0.247, 0.364]; all released models scoring better carry 28$\times$ to 62$\times$ more parameters. On \textbf{Chronos-ZS}, relative MASE is 0.880---the only benchmark where statistical methods (AutoARIMA, AutoTheta) lead by 1--2\%.
+
+For \textbf{embedded deployment}, INT8 quantization degrades nGMASE by only 2.14\% and nWQL by 1.26\%. The firmware profile on a Cortex-M7 microcontroller (138.1~KiB weights, fixed $O(L)$ working memory) beats seasonal naive on 72 of 97 GIFT-Eval configurations.
+
+Ablations confirm: removing the detector degrades nGMASE by $+0.007$ (${\sim}8\times$ training noise across seeds); phase binning is the single largest architectural contributor ($-0.098$ nGMASE); ALBERT tying saves 191K parameters with negligible accuracy loss.
+
+\subsection{Limitations}
+The authors acknowledge several constraints. (1)~Full context re-encoding per call (no streaming variant without accuracy loss). (2)~Univariate only---no covariates or cross-series structure. (3)~Silent degradation when inputs leave the pretraining regime. (4)~Period resolution degrades as the ratio of window length to period decreases. (5)~Min-max normalization is sensitive to single outliers. (6)~Fisher's test is miscalibrated under high autocorrelation. (7)~GIFT-Eval informed architecture choices, so Chronos-ZS serves as the truly held-out benchmark.
+
+\subsection{Relevance to Research}
+TinyCast directly addresses time series foundation models at the efficiency frontier (Topics T1$+$T5). The ``compute rather than learn'' philosophy for periodic structure connects to our prior review of Forecast Collapse (Review~\#115), which showed that loss function choice---not architecture---drives prediction degeneracy on low-predictability targets. TinyCast's spectral detector could serve as a predictability filter: series where the detector finds no significant periods may be precisely those susceptible to forecast collapse. The extreme compression (146K params, 138~KiB INT8) complements the scaling perspective of Toto~2.0 (Review~\#56) and the component-level analysis in Review~\#63 (Beyond Holistic Models), which decomposed forecasting into trend, seasonality, and residual components---TinyCast's architecture makes this decomposition explicit through computed periodicity plus learned residual correction.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Computed Periodicity for Large-Scale TSFMs}
+\textbf{Gap:} TinyCast demonstrates that computed periodicity helps at 146K parameters, but it is unclear whether the principle scales to large TSFMs. Models like Toto~2.0 (hundreds of millions of parameters) and Chronos-2 may already learn periodicity implicitly---does explicit computation still provide gains at scale, or does it become redundant once the parameter budget is large enough?
+
+\textbf{Approach:} Integrate TinyCast's FFT-based periodicity detector and phase-binned positional encoding into a large TSFM backbone (e.g., a Transformer-based model like TimesFM or Chronos). Compare three configurations at multiple model scales (1M, 10M, 100M params): (a)~baseline with learned positional encoding, (b)~baseline augmented with computed periodicity channels, (c)~baseline with computed periodicity replacing learned positional components. Measure whether the accuracy gain from computed periodicity diminishes, persists, or even increases with model scale.
+
+\textbf{Feasibility:} High. The detector and phase encoding are simple to integrate as additional input channels. The main cost is training multiple large models at different scales to establish the scaling relationship.
+
+\subsection{Direction 2: Cross-Series Computed Structure for Multivariate Forecasting}
+\textbf{Gap:} TinyCast is univariate---it processes each series independently with no cross-series structure. Many practical forecasting scenarios involve correlated multivariate time series (e.g., sensor networks, financial portfolios) where cross-series periodicity alignment, lead-lag relationships, and shared seasonal patterns carry predictive signal that univariate models miss entirely.
+
+\textbf{Approach:} Extend the ``compute rather than learn'' principle to cross-series structure. Apply the FFT detector independently to each series, then compute pairwise spectral coherence and phase offsets between series at their dominant shared frequencies. Encode these computed cross-series relationships as structured attention biases or graph edges in a lightweight multivariate model. This offloads the costly cross-correlation discovery to deterministic spectral analysis, preserving the parameter-efficiency philosophy. Connect to the cross-series correlation challenges identified in Forecast Collapse (Review~\#115), where CalibRank's cross-sectional loss addressed the same gap from a loss-function perspective.
+
+\textbf{Feasibility:} Medium. Spectral coherence computation is straightforward, but designing an efficient multivariate architecture that scales to hundreds of series while maintaining the ``tiny'' parameter budget requires careful engineering. The main risk is that cross-series interactions may require more learned capacity than the univariate residual patterns.
+
+\subsection{Direction 3: Adaptive Periodicity for Non-Stationary Time Series via Continual Updating}
+\textbf{Gap:} TinyCast's detector operates on a fixed context window and assumes periodicity is stationary within that window. Many real-world time series exhibit evolving periodicity---seasonal patterns that shift, emerge, or disappear over time (e.g., climate regime changes, evolving user behavior patterns). The fixed-window FFT cannot capture these dynamics.
+
+\textbf{Approach:} Replace the single-window FFT with a sliding-window spectral tracker that maintains a running estimate of dominant periods across time. Use exponentially weighted periodograms that adapt to regime changes, combined with a simple change-point detector that triggers period re-estimation when spectral energy shifts significantly. Integrate with the continual learning framework---when the period tracker detects a regime change, fine-tune only the phase-binning readout (16K params) on recent data while freezing the convolutional encoder, following the parameter-isolation strategies from Macaron-V1 (Review~\#111) and the forgetting-prevention mechanisms of Geometry Conflict (Review~\#49).
+
+\textbf{Feasibility:} Medium-high. Sliding-window spectral estimation is well-studied in signal processing. The main challenge is determining the right trade-off between adaptation speed and stability---too-fast adaptation produces noisy period estimates, too-slow misses regime changes.
+
+\section{Conclusion}
+TinyCast demonstrates that the design principle of computing rather than learning known structure can dramatically compress time series foundation models. By offloading periodicity detection to a zero-parameter FFT-based algorithm and concentrating 146K learned parameters on residual patterns, the model achieves probabilistic zero-shot forecasting competitive with models 10--62$\times$ larger---and runs on a microcontroller at 138~KiB. The phase-binning mechanism, which folds encoder states onto detected periodic cycles, is the single most impactful component. As the time series forecasting field scales toward billion-parameter foundation models, TinyCast's ``compute what you can, learn what you must'' philosophy offers a compelling counterpoint: the right inductive bias, explicitly engineered, can substitute for orders of magnitude in parameters. This principle extends beyond periodicity to any computable structure---trend decomposition, spectral features, domain-specific transforms---suggesting a broader design space for efficient forecasting architectures.
+
+\begin{thebibliography}{9}
+\bibitem{steinhauser2026tinycast}
+A.~Steinhauser.
+\newblock TinyCast: Probabilistic Zero-Shot Forecasting with Computed Periodicity.
+\newblock \emph{arXiv preprint arXiv:2608.15767}, 2026.
+
+\bibitem{ansari2024chronos}
+A.~F.~Ansari et~al.
+\newblock Chronos: Learning the Language of Time Series.
+\newblock \emph{arXiv preprint arXiv:2403.07815}, 2024.
+
+\bibitem{cohen2025toto}
+B.~Cohen et~al.
+\newblock Toto: Time Series Optimized Transformer for Observability.
+\newblock \emph{arXiv preprint arXiv:2407.07874}, 2024.
+
+\bibitem{woo2024moirai}
+G.~Woo et~al.
+\newblock Unified Training of Universal Time Series Forecasting Transformers.
+\newblock \emph{arXiv preprint arXiv:2402.02592}, 2024.
+
+\bibitem{wan2026collapse}
+X.~Wan et~al.
+\newblock Forecast Collapse in Time-Series Foundation Models.
+\newblock \emph{arXiv preprint arXiv:2608.14106}, 2026.
+\end{thebibliography}
+
+\end{document}
