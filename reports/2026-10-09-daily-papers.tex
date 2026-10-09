@@ -1,0 +1,108 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Recurrent Looped Transformer}
+\author{Auto-generated Report}
+\date{October 9, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Standard transformers apply a fixed number of layers to every token regardless of sequence length. For algorithmic tasks requiring cumulative state tracking---parity accumulation, permutation composition, modular arithmetic---this creates a fundamental computational bottleneck rooted in circuit complexity: unless $\text{TC}^0 = \text{NC}^1$, fixed-depth transformers cannot track compositions of $S_5$ permutations over arbitrarily long sequences. An RNN, by contrast, passes each update's result forward so effective computation depth grows linearly with sequence length.
+
+The Recurrent Looped Transformer (RLT; arXiv:2610.07591) combines the \textbf{parallelism of a causal encoder} (for processing known tokens in bulk) with the \textbf{growing computation depth of a recurrent decoder} (whose output feeds back token-by-token). The result is a model whose effective depth scales as $T \times L_D$ (sequence length times decoder depth) while keeping per-token parameter cost constant at ${\sim}26$M parameters.
+
+\subsection{Method}
+RLT divides a transformer's layer budget $L = L_E + L_D$ into two stacks:
+
+\paragraph{Parallel Causal Encoder ($L_E$ layers).} Standard causal self-attention over all known tokens, producing per-token representations $e_t$ and key-value memory $M_{\leq t}$ for cross-attention.
+
+\paragraph{Recurrent Decoder ($L_D$ layers).} At each position $t$, the decoder performs a gated merge of encoder output $e_t$ with the previous position's final decoder state $s_{t-1}$, then applies $L_D$ transformer blocks (sliding-window self-attention with window $W{=}8$, cross-attention to encoder memory, and FFN). The gated merge is:
+\begin{align}
+r_{t-1} &= \text{RMSNorm}_s(s_{t-1}) \\
+g_t &= \sigma(W_g[e_t; r_{t-1}] + b_g) \\
+u_t &= e_t + \alpha \cdot g_t \odot (W_s \cdot r_{t-1})
+\end{align}
+where $\alpha{=}0.1$ is a feedback scale and $g_t$ is a learned per-dimension sigmoid gate. The encoder output passes through unconditionally as a residual; the gated state is added as a scaled perturbation. Three variants are defined by feedback interval $B$: \textbf{RLT-1} ($B{=}1$, per-token feedback, sequential stages $= T \cdot L_D$), \textbf{RLT-2} ($B{=}k$, chunk-wise feedback, parallelizable within chunks), and \textbf{RLT-0} ($B{=}\infty$, no feedback, ablation control).
+
+An ALBERT-style \emph{tied} variant shares self-attention and FFN weights between encoder and decoder when $L_E = L_D$, keeping only cross-attention projections, norms, and gating modules separate.
+
+\subsection{Results}
+Experiments span six algorithmic benchmarks at ${\sim}26$M parameters (width 512, 8 layers total), trained on CPU in FP32 for 2,000--5,000 steps.
+
+On \textbf{parity} (trained on 3--40 bits, tested at 256 bits---$6.4\times$ training length), RLT-1 achieves \textbf{100.0\%} accuracy across multiple encoder-decoder splits, while the standard transformer achieves 50.1\% (random chance). On \textbf{swap-based $S_5$ permutation tracking} (trained on 32 operations, tested at 256), RLT-1 (4+4 split) achieves \textbf{97.3\%} versus 0.85\% for the transformer---at $8\times$ training length. On \textbf{flat modular arithmetic} (mod-5), RLT-1 achieves 93.4\% at $1.6\times$ training length versus 33.2\%.
+
+The ablation removing all feedback (RLT-0) collapses to random chance on all state-tracking tasks, isolating recurrence as the essential ingredient---not the encoder-decoder structure, cross-attention, or sliding-window attention. Chunk-wise feedback (RLT-2, $B{=}4$) partially preserves parity performance (99.0\%) but severely degrades permutation tracking (19.6\%), demonstrating that feedback granularity requirements are task-dependent.
+
+\textbf{Negative results} are equally important: standard $S_5$ tracking (full 120-element group) fails at ${\sim}0.83\%$ for all variants, and addition generalizes poorly (14--17\% at $4\times$ training width). These bound the architecture's current capabilities.
+
+\subsection{Limitations}
+The authors acknowledge significant limitations. (1)~\textbf{No natural language evaluation}---the entire experimental scope is limited to supervised algorithmic benchmarks; whether RLT benefits language modeling is completely unknown. (2)~\textbf{Small scale only} (${\sim}26$M params, 8 layers); no experiments at scales relevant to practical LLMs. (3)~\textbf{No GPU wall-clock measurements}---the sequential per-token decoder dependency creates latency challenges on parallel hardware; only relative CPU timings are reported (RLT-1 is $4.2\times$ slower than RLT-0). (4)~\textbf{RL training not validated}---policy gradient procedures are formally specified but never experimentally tested. (5)~\textbf{Full $S_5$ and addition fail}, bounding current generalization capacity.
+
+\subsection{Relevance to Research}
+RLT directly addresses parameter-efficient architectures for inference (Topic T1). The encoder-decoder depth allocation connects to our prior review of Iso-Depth Scaling Laws for Looped Language Models (Review~\#41), which established that one recurrence is worth ${\sim}2.5$ additional layers---RLT's empirical results on state-tracking tasks suggest the value of recurrence may be even higher for algorithmic reasoning. The gated merge mechanism relates to the recurrent state management challenges in continual learning (T3), particularly the memory evolution studied in EvoArena (Review~\#71) and EvoEmbedding (Review~\#76). The weight-tied variant connects to ALBERT-style parameter sharing, which we encountered in TinyCast's encoder (Review~\#119) where sharing a single SwiGLU across 10 blocks saved 191K parameters.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Recurrent Looped Decoder for Diffusion LLM Denoising}
+\textbf{Gap:} RLT's recurrent decoder processes tokens sequentially, building cumulative state. Diffusion LLMs process all tokens in parallel through iterative denoising, where each denoising step refines the entire sequence simultaneously. The state-tracking capability that RLT provides (essential for algorithmic reasoning) is lost in parallel diffusion denoising because there is no sequential token-by-token recurrence.
+
+\textbf{Approach:} Introduce a ``denoising recurrence'' where the RLT decoder processes tokens left-to-right within each denoising step, allowing cumulative state to inform later token refinements. This creates a hybrid: the diffusion process iterates over noise levels (global), while within each noise level, an RLT-style recurrent pass builds sequential state. This would give diffusion LLMs access to the TC$^0$-breaking computation depth that enables algorithmic reasoning, while preserving the parallel generation advantage across denoising steps. Connect to the masked diffusion LLMs studied in Review~\#97 (MDLMs as world models) and Sumi (Review~\#75).
+
+\textbf{Feasibility:} Medium. The main challenge is that adding sequential recurrence within each denoising step multiplies the already-iterative diffusion compute by sequence length, potentially making training prohibitively expensive. The RLT-2 chunked variant could mitigate this by processing chunks in parallel with periodic state commits.
+
+\subsection{Direction 2: Adaptive Encoder-Decoder Depth for Continual Multi-Task Learning}
+\textbf{Gap:} RLT's encoder-decoder split is fixed at architecture design time, but the optimal split is fundamentally task-dependent (4+4 for permutation tracking, 6+2 for modular arithmetic, 5+3 for bracketed expressions). In continual learning settings where the task distribution evolves, a fixed split cannot simultaneously serve all tasks optimally.
+
+\textbf{Approach:} Make the encoder-decoder boundary \emph{soft and learnable} via a per-layer routing mechanism that decides whether each layer operates in encoder mode (parallel, no recurrence) or decoder mode (recurrent, with gated merge). During continual training on new tasks, the routing gradually adjusts the effective split without changing architecture size. Use the elastic weight consolidation principles from Geometry Conflict (Review~\#49) to prevent catastrophic forgetting of routing decisions learned for previous tasks. The Macaron-V1 Mixture-of-LoRA approach (Review~\#111) could be adapted to maintain task-specific routing configurations within a shared backbone.
+
+\textbf{Feasibility:} Medium-high. Soft routing between encoder and decoder modes requires careful gradient management to ensure the routing remains stable during training. The main risk is that oscillating routing decisions during continual learning could destabilize the recurrent state dynamics.
+
+\subsection{Direction 3: Scaling RLT to Language Modeling with Curriculum-Based Feedback Annealing}
+\textbf{Gap:} RLT's most critical limitation is the absence of any natural language evaluation. The sequential per-token decoder is $4\times$ slower than the no-feedback variant on CPU, and this gap would widen dramatically on GPUs where parallelism is essential. It is unknown whether the state-tracking benefits translate to improved language modeling perplexity, factual recall, or reasoning benchmarks at practical scales.
+
+\textbf{Approach:} Implement a staged training curriculum: (1)~pretrain with RLT-0 (no feedback) or large-chunk RLT-2 to leverage full GPU parallelism during the compute-intensive pretraining phase, (2)~progressively reduce the chunk size $B$ during mid-training as the model learns token-level representations, (3)~fine-tune with RLT-1 (per-token feedback) during post-training RL, where the sequential nature of generation already prevents parallelism. This amortizes the parallelism cost: pretraining is fast (parallel), while the recurrence is introduced only when sequential generation is already the bottleneck. Evaluate on standard LLM benchmarks (MMLU, GSM8K, HumanEval) at 1B+ scale to determine whether recurrent state improves practical reasoning.
+
+\textbf{Feasibility:} Medium. The curriculum itself is straightforward, but scaling from 26M to 1B+ parameters requires significant engineering (GPU-optimized recurrent kernels, efficient BPTT through long sequences). The main uncertainty is whether language modeling benefits from the same state-tracking capability that helps algorithmic tasks.
+
+\section{Conclusion}
+The Recurrent Looped Transformer provides a clean architectural answer to a well-defined theoretical limitation: fixed-depth transformers provably cannot perform unbounded sequential state tracking, but adding a recurrent decoder whose output feeds back token-by-token breaks this barrier. The empirical results are striking---100\% parity accuracy at $6.4\times$ training length and 97.3\% permutation tracking at $8\times$---and the RLT-0 ablation cleanly isolates recurrence as the essential ingredient. However, the paper's practical significance remains entirely open: no natural language evaluation, no GPU benchmarks, no scaling beyond 26M parameters. The architecture's promise lies in its principled connection between computational depth and sequence length; its value for real-world LLMs will depend on whether the sequential computation bottleneck can be efficiently amortized through curriculum-based training and chunk-wise parallelism.
+
+\begin{thebibliography}{9}
+\bibitem{rlt2026}
+Anonymous.
+\newblock Recurrent Looped Transformer.
+\newblock \emph{arXiv preprint arXiv:2610.07591}, 2026.
+
+\bibitem{dehghani2018universal}
+M.~Dehghani et~al.
+\newblock Universal Transformers.
+\newblock In \emph{Proc.\ ICLR}, 2019.
+
+\bibitem{merrill2024expressive}
+W.~Merrill et~al.
+\newblock The Expressive Power of Transformers with Chain of Thought.
+\newblock In \emph{Proc.\ ICLR}, 2024.
+
+\bibitem{hutchins2022block}
+D.~Hutchins et~al.
+\newblock Block-Recurrent Transformers.
+\newblock In \emph{Proc.\ NeurIPS}, 2022.
+
+\bibitem{iso2026}
+Anonymous.
+\newblock How Much Is One Recurrence Worth? Iso-Depth Scaling Laws for Looped Language Models.
+\newblock \emph{arXiv preprint arXiv:2604.21106}, 2026.
+\end{thebibliography}
+
+\end{document}
