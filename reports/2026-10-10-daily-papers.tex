@@ -1,0 +1,123 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: SpecFold: Folding Multi-Branch Redundancy for Faster Speculative Decoding in Diffusion Language Models}
+\author{Auto-generated Report}
+\date{October 10, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Diffusion Large Language Models (DLLMs) generate text through iterative block denoising: starting from a fully masked block of $N$ tokens, the model repeatedly predicts token distributions, unmasks high-confidence positions, and refines masked positions across denoising timesteps. Multi-branch speculative decoding---where $B$ draft branches propose alternative unmaskings and are verified in a single batched forward pass---reduces the number of denoising steps (NFE), but each verification pass evaluates $B{+}1$ full Transformer forward passes over the same block. Prior work such as Spiffy optimizes the first factor (fewer NFE), but the per-pass cost grows linearly with branch count $B$, limiting practical throughput gains.
+
+Ho et al.\ (arXiv:2610.04875) identify a fundamental \textbf{multi-branch computational redundancy}: each draft branch inherits most tokens from its parent branch, differing only at a small number of newly-unmasked positions ($\leq S_t$ per timestep). Empirically, \textbf{72\% of (branch, layer, position, step) tuples} exhibit relative hidden-state residual $\rho \leq 0.1$ between parent and child, and 88\% have $\rho \leq 0.3$. High divergence concentrates at the newly unmasked positions. The redundant computation at identical positions dominates wall-clock cost as $B$ increases.
+
+SpecFold decomposes total decoding cost as $\text{NFE} \times \text{cost-per-pass}$ and targets the second factor: reducing per-pass cost by \emph{folding} redundant parent-child computation, orthogonal to NFE reduction via speculation.
+
+\subsection{Method}
+SpecFold introduces \textbf{token-level residual gating} at each Transformer layer to classify every position in every draft branch as either \emph{folded} (reuse parent's computation) or \emph{recomputed} (compute from scratch).
+
+\paragraph{Residual Gating.} For branch $i$, layer $l$, head $k$, and position $n$, the relative residual is:
+\begin{equation}
+\rho^l_{i,k,n} = \frac{\|H^l_{i,k}[n] - H^l_{\text{par}(i),k}[n]\|}{\|H^l_{\text{par}(i),k}[n]\|}
+\end{equation}
+where $\text{par}(i)$ denotes the parent branch in the draft graph. Positions are partitioned into folded set $\mathcal{R}^l_i = \{n : \rho^l_{i,k,n} \leq \delta\}$ and recomputed set $\bar{\mathcal{R}}^l_i = [N] \setminus \mathcal{R}^l_i$, with threshold $\delta{=}0.1$.
+
+\paragraph{Folded Attention Correction.} At folded positions, QKV projections are inherited from the parent. However, attention outputs require correction because the key-value entries at recomputed positions have changed. SpecFold applies a \textbf{streaming softmax state correction}:
+\begin{align}
+m' &= \max\Bigl(m_i[n],\; \max_{e \in \bar{\mathcal{R}}^l_i} \frac{Q_i[n] \cdot K_i[e]}{\sqrt{d_h}}\Bigr) \\
+a_{\text{old}}(e) &= \exp\Bigl(\frac{Q_i[n] \cdot K_{\text{par}(i)}[e]}{\sqrt{d_h}} - m'\Bigr) \\
+a_{\text{new}}(e) &= \exp\Bigl(\frac{Q_i[n] \cdot K_i[e]}{\sqrt{d_h}} - m'\Bigr) \\
+f &= \exp(m_i[n] - m') \\
+Z' &= Z_i[n] \cdot f - \textstyle\sum_e a_{\text{old}}(e) + \sum_e a_{\text{new}}(e) \\
+O' &= \frac{O_i[n] \cdot Z_i[n] \cdot f - \sum_e a_{\text{old}}(e) \cdot V_{\text{par}(i)}[e] + \sum_e a_{\text{new}}(e) \cdot V_i[e]}{Z'}
+\end{align}
+This subtracts the parent's stale key-value contributions at recomputed positions and adds the child's updated contributions, maintaining numerical stability through the streaming softmax rescaling factor $f$.
+
+\paragraph{FFN Folding.} Feed-forward outputs are position-wise, so folded positions directly reuse the parent's FFN output: $F_i[n] = F_{\text{par}(i)}[n]$ for $n \in \mathcal{R}^l_i$, while recomputed positions apply the full FFN. Residual connections are maintained per-branch throughout, preserving cross-branch divergence information.
+
+\paragraph{Fold-Chain Resolution.} When a child is folded from a parent that is itself folded from its grandparent, a fold chain forms. A \textbf{pointer-jumping kernel} resolves each chain by walking source indices to the ultimate recomputed ancestor, then applies the attention correction by swapping the ancestor's KV contributions. Branches are processed in topological order (parents before children) within each layer.
+
+\paragraph{Triton Kernel Pipeline.} Six custom Triton kernel families implement the per-layer pipeline: (1)~\texttt{residual\_delta\_gate} classifies positions and compacts recomputed indices, (2)~\texttt{src\_resolve} resolves fold chains via pointer-jumping, (3)~\texttt{ln\_qkv\_rope\_scatter} applies RMSNorm$+$QKV$+$RoPE only at recomputed positions, (4)~\texttt{flash\_attn} computes streaming FlashAttention for recomputed positions, (5)~\texttt{chain\_correction} corrects folded positions' attention state, and (6)~\texttt{ln\_gateup\_silu/down\_residual\_scatter} applies fused FFN$+$residual for recomputed positions.
+
+\subsection{Results}
+Experiments span five DLLM models across two families---Fast-dLLM-v2 (1.5B, 7B) and Nemotron-Labs-Diffusion (NLD; 3B, 8B, 14B)---evaluated on five benchmarks (GSM8K, MATH, HumanEval, MBPP, IFEval) on a single NVIDIA H100 GPU, using $B{=}7$ draft branches with Spiffy calibration.
+
+\textbf{Throughput gains over vanilla (no speculation):} SpecFold achieves up to \textbf{1.99$\times$} on Fast-dLLM-v2-1.5B (121$\to$242 tokens/s on MBPP), 1.48$\times$ on NLD-3B, 1.32$\times$ on NLD-8B, 1.31$\times$ on Fast-dLLM-v2-7B, and 1.24$\times$ on NLD-14B.
+
+\textbf{Throughput gains over Spiffy (speculation-only):} SpecFold provides an additional \textbf{1.64$\times$} on Fast-dLLM-v2-1.5B, 1.34$\times$ on NLD-3B, 1.22$\times$ on Fast-dLLM-v2-7B, and 1.18$\times$ on NLD-8B. This demonstrates that SpecFold and speculation compose: Spiffy reduces NFE while SpecFold reduces per-pass cost.
+
+\textbf{Quality preservation:} Accuracy fluctuations are negligible ($\leq$1.6 points across all model-benchmark pairs), attributed to bfloat16 numerical drift rather than algorithmic error, confirmed via serialized-execution sanity checks.
+
+The \textbf{draft budget sweep} (NLD-3B, $B{=}2$--$8$) reveals the paper's most important finding: without SpecFold, Spiffy's throughput plateaus between 0.99--1.17$\times$ of vanilla as NFE reductions are offset by growing per-pass cost. With SpecFold, the same draft counts yield \textbf{up to 1.73$\times$} throughput because per-pass cost grows much more slowly with branch count. SpecFold thus \emph{unlocks} the practical value of multi-branch speculation.
+
+\subsection{Limitations}
+The paper does not include an explicit limitations section. Implicit limitations include: (1)~\textbf{Speedup diminishes with model scale} (1.99$\times$ at 1.5B vs.\ 1.24$\times$ at 14B), as larger models are more compute-bound, reducing the relative benefit of skipping folded computation. (2)~\textbf{Custom Triton kernels} required for all six kernel families, limiting portability beyond NVIDIA GPUs and requiring maintenance as CUDA/Triton evolves. (3)~\textbf{Memory overhead unquantified}---storing per-branch QKV projections, streaming attention state $(m, Z, O)$, and FFN outputs for $B{=}7$ branches may be non-trivial. (4)~\textbf{Threshold sensitivity}---$\delta > 0.2$ causes accuracy degradation; the optimal $\delta{=}0.1$ is empirically rather than theoretically motivated. (5)~\textbf{DLLM-specific}---the method applies only to diffusion LLMs with multi-branch verification and does not transfer to autoregressive speculative decoding. (6)~\textbf{Single drafting strategy tested}---only Spiffy-constructed drafts are evaluated despite claims of draft-agnosticism.
+
+\subsection{Relevance to Research}
+SpecFold directly addresses inference efficiency for diffusion LLMs (Topics T1$+$T4), bridging our two research threads. The multi-branch redundancy exploitation connects to the KV cache sharing strategies in FreeToken (Review~\#117), which addressed MoE expert memory hierarchy for inference---SpecFold solves the analogous problem for diffusion model branch computation. The streaming softmax correction for folded attention relates to the incremental state update mechanisms in the Recurrent Looped Transformer (Review~\#121), where gated merge allowed per-token state to feed back without full recomputation. The speculative verification framework in DLLMs is structurally analogous to the chunk-wise feedback variant RLT-2 from Review~\#121, where blocks of tokens are processed in parallel with periodic state synchronization. The orthogonal decomposition of decoding cost into NFE$\times$cost-per-pass parallels TinyCast's (Review~\#119) separation of computed structure (zero-parameter FFT periodicity) from learned residual correction---both papers achieve efficiency by identifying and eliminating redundant computation rather than learning smaller models.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Cross-Denoising-Step Folding via Temporal State Caching}
+\textbf{Gap:} SpecFold exploits redundancy \emph{within} a single denoising step (across branches sharing a parent). However, successive denoising steps also exhibit high hidden-state similarity---between step $t$ and step $t{+}1$, only a small number of positions transition from masked to unmasked, leaving most hidden states nearly identical across time. This temporal redundancy across denoising steps is left entirely unexploited.
+
+\textbf{Approach:} Extend folding from the spatial dimension (across branches within a step) to the temporal dimension (across consecutive steps). After completing step $t$, cache the main branch's per-layer hidden states and QKV projections. At step $t{+}1$, apply the same residual gating to classify positions as temporally-folded (reuse step $t$'s cached computation) or temporally-recomputed (positions that changed masking status). The streaming softmax correction applies identically, replacing parent-branch references with previous-step references. This creates a two-dimensional folding grid: each position can be branch-folded, time-folded, both-folded (resolved via chain pointers across both dimensions), or fully recomputed. Connect to the recurrent state management in the Recurrent Looped Transformer (Review~\#121), where per-token state feedback effectively implements temporal folding for autoregressive models.
+
+\textbf{Feasibility:} Medium. The streaming softmax correction generalizes directly to temporal folding. The main challenge is memory: caching full per-layer states across denoising steps requires $O(L \times N \times d)$ additional memory per cached step, potentially doubling memory requirements. Selective layer caching (e.g., every other layer) could mitigate this.
+
+\subsection{Direction 2: Adaptive Threshold Scheduling for Quality-Latency Pareto Optimization}
+\textbf{Gap:} SpecFold uses a fixed recompute threshold $\delta{=}0.1$ across all layers, all denoising steps, and all positions. However, the divergence distribution is highly non-uniform: early denoising steps (high noise) likely tolerate more aggressive folding than late steps (fine refinement), and deep layers may amplify folding errors differently than shallow layers. A fixed threshold leaves quality-latency tradeoffs on the table.
+
+\textbf{Approach:} Learn a per-layer, per-step threshold schedule $\delta^l_t$ that optimizes the quality-latency Pareto frontier. During a calibration phase, sweep threshold values independently for each (layer, step) pair and measure the resulting accuracy-throughput tradeoff on a small held-out set. Fit a lightweight predictor (e.g., a small MLP) that maps (layer index, denoising step, branch depth, mean residual statistics) to an optimal threshold. This extends the single scalar $\delta$ to an adaptive function without modifying the core folding algorithm. The saturation-aware reweighting principle from SA-MRPO (Review~\#116)---down-weighting objectives that are already mastered---could inform the schedule: steps where folding rarely triggers (already ``saturated'' with recomputation) can have their thresholds relaxed.
+
+\textbf{Feasibility:} High. The calibration procedure is straightforward and requires only a small validation set. The main risk is that the optimal threshold schedule may be model-specific and not transfer across DLLM families, requiring per-model recalibration.
+
+\subsection{Direction 3: Folding for Parallel Draft Generation in Diffusion LLM RL Training}
+\textbf{Gap:} SpecFold optimizes inference-time multi-branch verification, but DLLM RL training (e.g., V-GRPO from Review~\#42, Flow-DPPO from Review~\#69) requires generating many rollout completions per prompt during the rollout phase. Each rollout involves independent denoising trajectories that share the same prompt prefix but diverge at stochastic unmasking decisions. Currently, these rollouts are either batched na\"ively (redundant prefix computation) or sequentialized. TRACE (Review~\#120) showed that the rollout phase dominates RL training cost for MoE models; the same holds for DLLMs.
+
+\textbf{Approach:} Apply SpecFold's branch folding to \emph{rollout generation} during DLLM RL training. Treat the $K$ rollout completions per prompt as branches in a draft graph rooted at the shared prompt prefix. At each denoising step, all rollouts share the prefix hidden states; divergence occurs only at positions where different rollouts make different unmasking decisions. Folding exploits this by reusing the first rollout's computation for all subsequent rollouts at positions where they agree. This reduces the rollout phase cost by a factor proportional to the inter-rollout agreement rate. Combining with TRACE's FP4 quantization-aware training would further compress cost: SpecFold reduces per-pass computation while TRACE reduces per-activation precision, yielding multiplicative speedups.
+
+\textbf{Feasibility:} Medium. The core folding algorithm applies directly, but RL training requires backpropagation through the folded computation graph. The streaming softmax correction must be differentiable (the straight-through estimator used in TRACE provides a template). The main risk is that stochastic unmasking during RL rollouts may produce lower inter-rollout agreement than speculative verification branches, reducing folding effectiveness.
+
+\section{Conclusion}
+SpecFold identifies and exploits a pervasive yet previously untapped computational redundancy in diffusion LLM inference: the near-identity of hidden states between parent and child branches in multi-branch speculative verification. The solution---token-level residual gating that selectively reuses parent computation with lightweight streaming softmax corrections---is both principled (provably correct attention correction) and practical (six custom Triton kernels achieving up to 1.99$\times$ throughput over vanilla and 1.64$\times$ over speculation-only baselines). The most significant finding is that SpecFold \emph{unlocks} the practical value of multi-branch speculation: without folding, adding draft branches yields diminishing returns as per-pass cost grows linearly with branch count; with folding, the same branches provide substantial throughput gains because per-pass cost scales sublinearly. As diffusion LLMs mature into practical alternatives to autoregressive models for text generation, SpecFold's orthogonal cost decomposition---reducing per-pass cost independently of NFE reduction---establishes a complementary optimization axis that will be essential for making multi-branch speculative decoding economically viable at scale.
+
+\begin{thebibliography}{9}
+\bibitem{ho2026specfold}
+C.-E.~Ho, W.~Sun, C.-J.~Shih, H.~Li, Y.~Liu, and Y.~C.~Lin.
+\newblock SpecFold: Folding Multi-Branch Redundancy for Faster Speculative Decoding in Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.04875}, 2026.
+
+\bibitem{nie2025spiffy}
+Y.~Nie et~al.
+\newblock Spiffy: Speculative Decoding for Diffusion Language Models.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem{lou2024discrete}
+A.~Lou et~al.
+\newblock Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution.
+\newblock In \emph{Proc.\ ICML}, 2024.
+
+\bibitem{dream2025}
+Y.~Ye et~al.
+\newblock DREAM: Diffusion Rectification and Estimation-Adaptive Models.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem{wang2026trace}
+X.~Wang et~al.
+\newblock TRACE: Rollout-Guided Quantization-Aware Training for FP4 Reinforcement Learning of MoE Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.07767}, 2026.
+\end{thebibliography}
+
+\end{document}
