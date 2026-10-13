@@ -1,0 +1,133 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: SoloQ: Calibration-Free Quantization for Diffusion Language Models}
+\author{Auto-generated Report}
+\date{October 13, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Diffusion large language models (dLLMs) generate text through iterative block denoising rather than sequential autoregressive decoding, requiring many forward passes per generation. This multiplies the computational and memory cost, making efficient deployment critical. Post-training quantization (PTQ) is a natural remedy, but existing methods designed for autoregressive LLMs depend on \textbf{calibration data} to collect activation statistics for setting quantization parameters. For dLLMs, calibration is fundamentally problematic: activation distributions shift dramatically across masking states and denoising timesteps (Figure~1(b) of the paper shows layer-wise \texttt{down\_proj} input scales varying by up to $4\times$ across steps), making any single calibration set unrepresentative. Moreover, the paper demonstrates severe \textbf{calibration sensitivity}---switching calibration data from WinoGrande to MMLU substantially alters downstream accuracy, showing that calibration choices do not generalize across tasks.
+
+The problem is especially acute for \emph{block-diffusion} models (Fast-dLLM~v2, Nemotron-Labs-Diffusion), where standard methods like RTN and AWQ \textbf{collapse entirely} to near-zero accuracy under W4A4 quantization. Lee et al.\ (arXiv:2610.07121) propose SoloQ, a calibration-free PTQ method that derives all quantization parameters from mathematical properties of structured random rotations rather than data statistics.
+
+\subsection{Method}
+\paragraph{Core Insight: Predictable Distributions via Rotation.}
+SoloQ exploits a concentration-of-measure result: for a high-dimensional vector on the unit sphere, after applying a random orthogonal rotation, each coordinate's marginal distribution converges to $\mathcal{N}(0, 1/d)$ as dimension $d$ grows (Equation~3 of the paper). By rotating weights and activations into this predictable basis \emph{before} quantization, all quantization parameters (scales, codebooks) can be derived purely from tensor structure---no calibration data needed.
+
+\paragraph{K-RPBH Rotation.}
+The key technical contribution is the \textbf{Kronecker-extended Randomized Permuted Block-Hadamard (K-RPBH)} rotation. For dimension $d = k \cdot h$ (with $h$ a power of two):
+\begin{equation}
+\Pi = (Q_k \otimes I_h) \cdot \text{blkdiag}(H_h D_1, \ldots, H_h D_k) \cdot P
+\end{equation}
+where $P$ is a uniformly random permutation (balances energy across blocks), $H_h$ is the normalized Walsh-Hadamard matrix (efficient intra-block mixing), $D_i$ are diagonal Rademacher sign matrices, and $Q_k$ is a Haar-random orthogonal matrix that serves as the \textbf{novel cross-block mixer}. The cross-block mixer provably achieves uniform variance across all coordinates:
+\begin{equation}
+\mathbb{E}_{Q_k}\bigl[\text{Var}_D(\hat{z}_l^{(r)} \mid P, Q_k)\bigr] = \frac{1}{d}
+\end{equation}
+ensuring each rotated coordinate has the same expected variance regardless of input structure. K-RPBH achieves the best accuracy among all tested rotations while being $17\times$ faster than full Haar rotation on Fast-dLLM~v2 (5.8\,ms vs.\ 98.1\,ms). Unlike QuaRot, it supports arbitrary (non-power-of-two) dimensions.
+
+\paragraph{Quantization Pipeline.}
+For a linear layer $y = Wx$, weights are rotated offline ($W' = W\Pi^\top$) and activations rotated online ($x' = \Pi x$), then both are quantized independently. Two variants are provided:
+
+\emph{SoloQ-C} (codebook-based): Activations are normalized by $s_x = \|x'\|_2$ and quantized via Lloyd-Max scalar quantizers matched to the $\mathcal{N}(0,1/d)$ marginal. Weights are normalized per-row by $s_{W,i} = \|w'_i\|_2$ and quantized via E8P lattice quantizers:
+\begin{align}
+\hat{x}'_{\text{CB}} &= s_x \cdot Q_{\text{Lloyd}}(\tilde{x}) \\
+\hat{w}'_{i,\text{CB}} &= s_{W,i} \cdot Q_{\text{E8P}}(\tilde{w}_i)
+\end{align}
+
+\emph{SoloQ-N} (hardware-native): Uses NVFP4 format (E2M1 with two-level dynamic scaling---global $s_g$ and block-wise $s_j$ over groups of 16):
+\begin{equation}
+\hat{z}^{(j)}_{\text{NVFP4}} = s_g \cdot s_j \cdot Q_{\text{E2M1}}\!\left(\frac{z^{(j)}}{s_g \cdot s_j}\right)
+\end{equation}
+where both scales are derived directly from tensor values ($s_g = \max_i |z_i|$, $s_j = \max_{i \in G_j} |z_i|$), requiring no calibration.
+
+\paragraph{Scale-Only Bias Correction.}
+Low-bit quantization introduces magnitude distortion. SoloQ corrects this with a scalar absorbed into existing per-token scales:
+\begin{equation}
+c_{\text{bc}}(z) = \frac{\|z\|_2^2}{\langle q(z), z \rangle}
+\end{equation}
+ensuring the quantized vector's component along the original direction is preserved, at zero additional overhead.
+
+\paragraph{Block-Diffusion KV-Cache Quantization.}
+For block-diffusion models with persistent KV-caches, SoloQ introduces \textbf{commit-time quantization}: active denoising blocks remain in full precision; upon block commitment, keys receive per-channel asymmetric quantization (KIVI-style) and values follow the K-RPBH + codebook/NVFP4 path.
+
+\subsection{Results}
+Experiments span five dLLMs---LLaDA-8B-Base, LLaDA-1.5-8B, Dream-7B (full-sequence), Fast-dLLM~v2-7B, Nemotron-8B (block-diffusion)---across twelve benchmarks on NVIDIA hardware.
+
+\textbf{Full-sequence dLLMs (W4A4):} On LLaDA-1.5-8B, SoloQ-N achieves \textbf{68.48\%} average accuracy vs.\ 69.23\% FP16 ($-$0.75 points), \emph{exceeding all calibration-based methods} including STaR-Quant (66.93\%), DLLMQuant++ (64.31\%), QuaRot+GPTQ (61.06\%), and AWQ (58.49\%). On LLaDA-Base-8B, SoloQ-C reaches 57.74\% vs.\ 58.95\% FP16, again surpassing STaR-Quant (+0.67). On Dream-7B, SoloQ-N (62.53\%) is competitive but slightly below STaR-Quant (63.59\%).
+
+\textbf{Block-diffusion dLLMs (W4A4):} Standard methods \textbf{collapse entirely}---RTN and AWQ yield $<$7\% on Fast-dLLM~v2 and $<$2\% on Nemotron. SoloQ-N maintains \textbf{56.77\%} on Fast-dLLM~v2 (vs.\ 60.35\% FP16) and \textbf{70.76\%} on Nemotron (vs.\ 78.67\% FP16), outperforming QuaRot+GPTQ by +11.37 points on Nemotron. Adding 4-bit KV-cache (W4A4KV4) causes negligible degradation ($-$0.56 on Fast-dLLM~v2, +0.30 on Nemotron).
+
+\textbf{Efficiency:} Peak VRAM reduction of \textbf{2.31--2.61$\times$} and end-to-end inference speedup of \textbf{1.94--2.24$\times$} across all five models. For KV-cache-only quantization ($\sim$3 bits/entry), SoloQ-N (53.53\% avg) outperforms KIVI (50.26\%), OScar (46.62\%), and TurboQuant (4.03\%).
+
+\subsection{Limitations}
+(1)~\textbf{Dream-7B gap}: SoloQ falls 1.06 points below the best calibration-based method (STaR-Quant) on Dream-7B, suggesting some architectures may still benefit from calibration when it can be done carefully. (2)~\textbf{4-bit floor}: The paper focuses exclusively on 4-bit W+A quantization; behavior at lower bit-widths (2--3 bit) for the full pipeline is unexplored. (3)~\textbf{Commit-time latency spikes}: Block commitment triggers quantization operations that may cause latency variance at commitment boundaries. (4)~\textbf{Active block memory}: The commit-time strategy keeps active denoising blocks in full precision, partially offsetting memory savings for small block sizes. (5)~\textbf{Rotation overhead}: K-RPBH adds 5.8\,ms per rotation on Fast-dLLM~v2; while $17\times$ faster than Haar, this remains a per-forward-pass cost that compounds over many denoising steps.
+
+\subsection{Relevance to Research}
+SoloQ directly bridges Topics T1 (LLM efficiency / quantization) and T4 (diffusion LLM), the two threads that SpecFold (Review~\#122) also connects. Where SpecFold reduces per-pass \emph{computation} by folding redundant branches, SoloQ reduces per-pass \emph{precision} by rotating into a quantization-friendly basis---the two optimizations are orthogonal and could compose multiplicatively (SpecFold's folded positions use parent QKV projections that could themselves be 4-bit via SoloQ). The calibration-free approach resonates with TRACE (Review~\#120), which used rollout-guided QAT for FP4 RL training of MoE models; SoloQ achieves comparable or better accuracy with zero training, suggesting that mathematical structure (rotation-induced Gaussianity) can substitute for learned quantization parameters. The K-RPBH rotation's cross-block variance averaging is conceptually analogous to the phase-binned positional encoding in TinyCast (Review~\#119), where FFT-based periodicity detection provided zero-parameter structure discovery---both papers exploit mathematical guarantees to eliminate learned parameters. The block-diffusion KV-cache quantization connects to FreeToken's (Review~\#117) two-level expert-memory hierarchy: both manage heterogeneous precision across cache tiers, with SoloQ distinguishing active (full-precision) from committed (quantized) blocks rather than hot (GPU) from cold (CPU) experts.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Rotation-Aware Branch Folding for Quantized Multi-Branch Speculation}
+\textbf{Gap:} SpecFold (Review~\#122) folds redundant branch computation in multi-branch speculative decoding by comparing parent-child hidden-state residuals. SoloQ enables W4A4 dLLM inference. However, quantized hidden states have different residual distributions than full-precision states: the K-RPBH rotation changes the coordinate system in which residuals are measured, and 4-bit rounding noise may inflate residual magnitudes, causing SpecFold's threshold $\delta{=}0.1$ to either over-fold (missing genuine divergence masked by quantization noise) or under-fold (treating quantization artifacts as divergence).
+
+\textbf{Approach:} Develop a \textbf{rotation-aware residual gate} that operates in the K-RPBH rotated basis rather than the original basis. Since SoloQ guarantees near-Gaussian marginals after rotation, the gate threshold can be set analytically: for two K-RPBH-rotated vectors differing only at $S_t$ positions out of $N$, the expected relative residual follows a chi-squared distribution with $S_t \cdot d_h$ degrees of freedom, enabling a statistically grounded threshold rather than an empirical one. Implement folding directly on quantized (4-bit) QKV projections: the streaming softmax correction from SpecFold operates on attention logits $Q \cdot K / \sqrt{d_h}$, which can be computed in the NVFP4 format using SoloQ-N's two-level scaling. This would yield the first system combining branch folding with quantization for dLLM inference.
+
+\textbf{Feasibility:} High. Both SpecFold and SoloQ are inference-time optimizations with no training requirements. The main engineering challenge is fusing the K-RPBH rotation kernels with SpecFold's Triton kernel pipeline (six kernel families each), but both use custom Triton and can share the streaming attention infrastructure.
+
+\subsection{Direction 2: Denoising-Step-Adaptive Bit-Width Allocation via Rotation Diagnostics}
+\textbf{Gap:} SoloQ uses a fixed 4-bit width across all denoising steps, despite acknowledging that activation distributions vary significantly across steps (Figure~1(b)). Early steps (high masking ratio) operate on noisy, high-entropy representations where 4 bits may be excessive; late steps (low masking ratio) perform fine-grained token refinement where 4 bits may be insufficient. A fixed bit-width leaves both quality and efficiency on the table.
+
+\textbf{Approach:} Exploit the K-RPBH rotation's diagnostic capability: after rotation, the KL divergence between the empirical marginal and $\mathcal{N}(0, 1/d)$ directly measures how well the quantization parameters (derived from the Gaussian assumption) will perform. At each denoising step $t$, compute this KL divergence online (a single-pass statistic over the rotated activations) and use it to select the bit-width: steps with low KL (good Gaussian fit) can safely use 3 or even 2 bits via aggressive SoloQ codebooks; steps with high KL (poor Gaussian fit) use 4 or 8 bits. The bit-width schedule $b(t)$ can be precomputed for a given model via a single forward pass over synthetic masked inputs at each masking ratio, then stored as a lookup table. This connects to the adaptive threshold scheduling proposed for SpecFold (Review~\#122 follow-up) and the saturation-aware reweighting in SA-MRPO (Review~\#116), which similarly allocate resources based on per-objective difficulty.
+
+\textbf{Feasibility:} Medium. The KL diagnostic is cheap (single-pass, no calibration data). The main challenge is that NVIDIA hardware natively supports only specific bit-widths (FP4, INT4, INT8, FP16); mixed-precision within a single layer requires either software emulation (slow) or kernel-level multiplexing across Tensor Core formats. A practical compromise: allocate bit-widths at the granularity of entire denoising steps (all layers use the same width per step), which avoids intra-layer heterogeneity.
+
+\subsection{Direction 3: Calibration-Free Quantization for Diffusion LLM RL Rollouts}
+\textbf{Gap:} RL training of dLLMs (V-GRPO from Review~\#42, Flow-DPPO from Review~\#69) requires generating many rollout completions per prompt, each involving the full multi-step denoising process. TRACE (Review~\#120) demonstrated that FP4 quantization can accelerate RL rollouts for MoE models, but relied on rollout-guided QAT---a training procedure that is expensive and model-specific. SoloQ's calibration-free approach could provide the same memory and speed benefits without any QAT overhead, enabling quantized rollouts as a drop-in acceleration for any dLLM RL pipeline.
+
+\textbf{Approach:} Apply SoloQ's K-RPBH rotation to the policy model during the rollout phase of dLLM RL training. Since rollouts only require forward passes (no gradient flow through the quantized model), SoloQ can be applied as-is. The key question is whether quantization-induced policy perturbation affects RL convergence. Analyze this through the lens of TRACE's Theorem~1 (rollout-guided quantization never increases policy discrepancy): while SoloQ lacks TRACE's rollout-guided guarantee, the calibration-free approach provides a different guarantee---rotation-induced Gaussianity ensures bounded quantization error regardless of the input distribution, which may be sufficient for RL stability. Empirically validate on a dLLM RL benchmark (e.g., GSM8K with GRPO) by comparing: (a)~FP16 rollouts, (b)~SoloQ W4A4 rollouts with FP16 policy updates, (c)~TRACE QAT rollouts. If SoloQ rollouts match TRACE quality without the QAT cost, this establishes calibration-free quantization as a universal RL acceleration strategy.
+
+\textbf{Feasibility:} High. SoloQ requires no training modifications---the rotation matrices and quantization parameters are fixed offline. The main risk is that RL reward signals may be sensitive to the small accuracy differences between SoloQ and full-precision inference (e.g., the 0.75-point gap on LLaDA-1.5), potentially causing reward hacking or training instability. Mitigation: use full-precision for the value/critic model while quantizing only the policy model's rollout forward passes.
+
+\section{Conclusion}
+SoloQ establishes that structured random rotations---specifically, the K-RPBH rotation with its provable cross-block variance averaging property---can fully replace calibration-based approaches for quantizing diffusion language models. The method is the first to successfully quantize block-diffusion models at W4A4 precision (where standard methods collapse entirely), achieving 2.31--2.61$\times$ memory reduction and 1.94--2.24$\times$ speedup with minimal accuracy loss. The calibration-free guarantee is particularly valuable for dLLMs, where activation distributions shift across denoising steps in ways that no single calibration set can capture. By eliminating the data dependency in quantization, SoloQ makes dLLM compression as portable and reliable as the mathematical properties of high-dimensional rotations---a principled foundation for building more efficient diffusion-based text generation systems.
+
+\begin{thebibliography}{9}
+\bibitem{lee2026soloq}
+D.~Lee, A.~Ghosh, V.~Manjunath, B.~K.~Rhee, H.~Kook, S.~Xiao, Y.~Kim, and P.~Panda.
+\newblock SoloQ: Calibration-Free Quantization for Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.07121}, 2026.
+
+\bibitem{ashkboos2024quarot}
+S.~Ashkboos et~al.
+\newblock QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs.
+\newblock In \emph{Proc.\ NeurIPS}, 2024.
+
+\bibitem{nie2025spiffy}
+Y.~Nie et~al.
+\newblock Spiffy: Speculative Decoding for Diffusion Language Models.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem{wang2026trace}
+X.~Wang et~al.
+\newblock TRACE: Rollout-Guided Quantization-Aware Training for FP4 Reinforcement Learning of MoE Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.07767}, 2026.
+
+\bibitem{ho2026specfold}
+C.-E.~Ho et~al.
+\newblock SpecFold: Folding Multi-Branch Redundancy for Faster Speculative Decoding in Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.04875}, 2026.
+\end{thebibliography}
+
+\end{document}
