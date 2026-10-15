@@ -1,0 +1,140 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: TPPO: Tracking-Value PPO For Language Model Reasoning}
+\author{Auto-generated Report}
+\date{October 15, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+When PPO is applied to LLM reasoning with sparse terminal rewards (binary correct/incorrect), the critic must estimate the \emph{state value} at every token---i.e., the probability that the partial response will ultimately lead to a correct answer. Wang et al.\ (arXiv:2610.16794) demonstrate that \textbf{standard PPO critics catastrophically fail at tracking how this value evolves along a reasoning trajectory}: sign agreement between the critic's predicted value changes and Monte Carlo estimates is approximately \textbf{50.51\%}---essentially random chance. The critic cannot tell whether a given token made the response more or less likely to succeed.
+
+This matters because token-level credit assignment depends on value changes: $\hat{A}_t - \hat{A}_{t+1} = \hat{V}_{t+1} - \hat{V}_t$. If value changes are noise, the policy gradient cannot distinguish which tokens in a long reasoning chain contributed to success or failure. GRPO avoids this by treating the entire response as a single action, but sacrifices all within-sequence credit assignment---it cannot identify which parts of a chain were good versus bad.
+
+\subsection{Method}
+\paragraph{Bayesian Value Evolution.}
+TPPO's theoretical foundation is Proposition~4.1: under binary terminal rewards and $\gamma{=}1$, value evolution follows a natural Bayesian structure. The state value is the success probability $V^\pi(s_t) = \Pr_\pi[R{=}1 \mid s_t]$, and observing token $a_t$ updates this via Bayes' theorem. In \textbf{log-odds space}, the update becomes additive:
+\begin{equation}
+\text{logit}\, V^\pi(s_{t+1}) - \text{logit}\, V^\pi(s_t) = \log \frac{\Pr(a_t \mid s_t, R{=}1)}{\Pr(a_t \mid s_t, R{=}0)}
+\end{equation}
+Each token contributes a log-likelihood ratio measuring how diagnostic it is of eventual success. By Corollary~4.2, the value at any position can be reconstructed as:
+\begin{equation}
+V^\pi(s_t) = \sigma\!\left(\sum_{i=1}^{t} c_i^\pi\right)
+\end{equation}
+where $c_1^\pi = \text{logit}\, V^\pi(s_1)$ is the prior log-odds and $c_i^\pi$ for $i > 1$ are per-token log-odds increments.
+
+\paragraph{Cumulative Parameterization.}
+TPPO parameterizes the critic to mirror this theoretical structure:
+\begin{equation}
+\hat{V}_t = \sigma\!\left(\sum_{i=1}^{t} f_\phi(s_i)\right)
+\end{equation}
+where $f_\phi$ is a shared scalar head outputting one scalar per position from the transformer's hidden states. The cumulative sum forms a logit passed through sigmoid. This is fundamentally different from standard PPO critics that independently output $\hat{V}_t$ at each position: the cumulative structure enforces that value changes are explicitly modeled as additive increments in log-odds space.
+
+\paragraph{Binary Cross-Entropy Loss.}
+The value loss replaces standard MSE with BCE, which is the proper loss when the target is a probability under binary rewards:
+\begin{equation}
+\mathcal{L}_V = -\frac{1}{|T|}\sum_{t \in T}\bigl[R(y)\log \hat{V}_t + (1 - R(y))\log(1 - \hat{V}_t)\bigr]
+\end{equation}
+
+\paragraph{Automatic Gradient Decomposition (Proposition~C.2).}
+A key property of the cumulative parameterization: the gradient with respect to each increment $\hat{\Delta}_i = f_\phi(s_i)$ is:
+\begin{equation}
+\frac{\partial \mathcal{L}_V}{\partial \hat{\Delta}_i} = \frac{1}{T}\sum_{t=i}^{T}(\hat{V}_t - R)
+\end{equation}
+Each increment receives the aggregate learning signal from all subsequent positions that depend on it. Adjacent increments satisfy $\partial\mathcal{L}_V/\partial\hat{\Delta}_i - \partial\mathcal{L}_V/\partial\hat{\Delta}_{i+1} = (\hat{V}_i - R)/T$, meaning \textbf{position-dependent gradients emerge naturally from terminal-outcome supervision alone}---no explicit per-token value targets or Monte Carlo estimates at each position are required.
+
+\paragraph{PPO Objective.}
+The advantage and policy loss follow standard PPO with GAE:
+\begin{equation}
+\mathcal{L}_{\text{PPO}} = -\frac{1}{|T|}\sum_t \min\!\bigl(\rho_t(\theta)\hat{A}_t,\; \text{clip}(\rho_t(\theta), 1{-}\epsilon, 1{+}\epsilon)\hat{A}_t\bigr)
+\end{equation}
+with $\epsilon{=}0.2$ and importance-weight upper threshold of 2.0. When $\lambda{=}1$, $\hat{A}_t = R - \hat{V}_t$.
+
+\subsection{Results}
+Experiments span five base models (Qwen2.5-Math-1.5B, Qwen3-4B-Base, Qwen3-4B, Qwen3-8B-Base, Qwen3.5-9B) across math reasoning, Countdown, and scientific coding on 8$\times$H200 GPUs.
+
+\textbf{Mathematical Reasoning (7 benchmarks, $n{=}8$ rollouts):} On Qwen3-8B-Base, TPPO achieves \textbf{45.9\%} average vs.\ 38.5\% GRPO, 37.5\% PPO, 38.0\% SPPO, 37.6\% VAPO---a \textbf{+8.4 point gain} over the best baseline. On Qwen3-4B-Base: 41.6\% vs.\ 35.6\% SPPO (+6.0). Per-benchmark highlights (Qwen3-8B): AIME~2024 +10.0 over PPO (15.8$\to$25.8), MATH-500 +6.6 (78.8$\to$85.4), OlympiadBench +8.2 (42.0$\to$50.2).
+
+\textbf{Single-rollout ($n{=}1$):} On Qwen3-4B, TPPO achieves \textbf{64.1\%} vs.\ 54.0\% PPO (+10.1)---the largest reported improvement. AIME~2024: 44.2$\to$60.8 (+16.6).
+
+\textbf{Out-of-Distribution (Qwen3-8B):} ARC-C, AGI-Eval, BBH: average +2.1 over PPO (67.6$\to$69.7), confirming generalization beyond math.
+
+\textbf{Scientific Coding (Qwen3.5-9B):} Average +7.0 over PPO across 5 benchmarks. LiveCodeBench Code Gen.~v6: PPO \emph{degraded} from base (61.9$\to$57.6) while TPPO substantially improved (61.9$\to$73.1, \textbf{+15.5}).
+
+\textbf{Value Tracking Quality:} TPPO maintains 3.9--6.8 pp higher sign agreement with MC-estimated value changes vs.\ PPO. At higher signal threshold (SNR${>}1$): 4.9--7.4 pp advantage. PPO's sign accuracy \emph{deteriorates} during training; TPPO's remains stable.
+
+\textbf{Credit Assignment Quality:} Advantage cosine similarity with MC-reference advantages: consistently higher for TPPO. Sign accuracy: \textbf{+15.3--19.9 pp} improvement over PPO at final checkpoints (bootstrap-confirmed).
+
+\textbf{Training Stability:} Smaller actor gradient norms and slower entropy decay throughout training, indicating less premature policy collapse.
+
+\subsection{Limitations}
+(1)~\textbf{Scale}: Experiments cover models up to 9B parameters only; effectiveness at 70B+ is unverified. (2)~\textbf{Binary reward assumption}: The Bayesian formulation assumes binary terminal rewards and $\gamma{=}1$; extension to continuous rewards or discounted settings requires further work. (3)~\textbf{Domain coverage}: Evaluated on math, Countdown, and coding only; generalization to logical reasoning, planning, or open-ended generation is unknown. (4)~\textbf{No computational overhead analysis}: Wall-clock time and FLOP comparisons with standard PPO are not reported. (5)~\textbf{No comparison with process reward models}: PRM-based or MCTS-based credit assignment methods are not included as baselines.
+
+\subsection{Relevance to Research}
+TPPO directly advances Topic T2 (RL / policy optimization for LLMs). The Bayesian value decomposition provides a principled answer to the credit assignment challenge that has limited prior PPO-based methods reviewed in this series. DVAO (Review~\#59) addressed multi-reward PPO via dynamic variance-adaptive advantage but retained the standard value parameterization; TPPO's cumulative log-odds structure would complement DVAO's variance normalization by providing per-reward tracking values. The sign-accuracy diagnostic ($\sim$50.5\% for standard PPO) explains why GRPO-based methods (V-GRPO from Review~\#42, Co-RL from Review~\#118) perform competitively without critics---they sidestep a fundamentally broken component. SA-MRPO's saturation-aware reweighting (Review~\#116) down-weights ``mastered'' rewards; TPPO's value tracking enables a complementary strategy of down-weighting tokens whose value is already well-estimated, focusing learning on tokens where the critic is most uncertain. The automatic gradient decomposition (Proposition~C.2) connects to DelTA's discriminative token credit assignment (Review~\#57): both achieve per-token credit from terminal signals, but DelTA uses a separate discriminator while TPPO achieves it structurally through the cumulative parameterization. The LiveCodeBench result (PPO degrades, TPPO improves) parallels The Verification Horizon finding (Review~\#81) that reward quality matters more than reward quantity---TPPO effectively improves reward \emph{utilization} through better credit distribution.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Tracking-Value Critics for Diffusion LLM RL Training}
+\textbf{Gap:} TPPO's cumulative log-odds parameterization assumes a left-to-right autoregressive generation where each token incrementally updates the success probability. Diffusion LLMs generate text through iterative block denoising, where multiple tokens are unmasked simultaneously and the ``trajectory'' is a sequence of denoising steps rather than tokens. V-GRPO (Review~\#42) and Flow-DPPO (Review~\#69) applied RL to diffusion LLMs but used GRPO-style group baselines, sacrificing within-trajectory credit assignment. No existing method provides tracking-value critics for diffusion LLM RL.
+
+\textbf{Approach:} Extend TPPO's cumulative parameterization from per-token to per-denoising-step. At each step $t$, the diffusion model unmasks a set of positions $\mathcal{U}_t$; define the per-step increment as $c_t = f_\phi(\text{block\_state}_t)$ where the input is the full block state after unmasking. The value $\hat{V}_t = \sigma(\sum_{i=1}^t c_i)$ estimates the probability that the current partially-denoised block will yield a correct answer. The Bayesian update (Proposition~4.1) generalizes: observing the unmasked tokens $\{a_n\}_{n \in \mathcal{U}_t}$ collectively updates the log-odds by $\sum_{n \in \mathcal{U}_t} \log[\Pr(a_n \mid s_t, R{=}1) / \Pr(a_n \mid s_t, R{=}0)]$, an additive sum of per-token diagnostic ratios. The bidirectional attention in DLLMs naturally provides $f_\phi$ with full context at each step. Combine with SoloQ's W4A4 quantization (Review~\#123) for memory-efficient critic inference and SpecFold's branch folding (Review~\#122) for efficient multi-rollout value estimation.
+
+\textbf{Feasibility:} Medium. The Bayesian decomposition generalizes directly to multi-token unmasking steps. The main challenge is that diffusion LLMs' bidirectional attention means the ``state'' at step $t$ depends on all positions (not just the left context), potentially making the incremental decomposition less clean. The critic must condition on the full block state including remaining masks, requiring the scalar head to process mask-dependent representations.
+
+\subsection{Direction 2: Continuous-Reward Extension via Quantile Tracking Values}
+\textbf{Gap:} TPPO's formulation is restricted to binary terminal rewards ($R \in \{0, 1\}$) and $\gamma{=}1$. Many practical RL-for-LLM settings involve continuous rewards: partial credit for math solutions, style/safety scores from reward models, or composite multi-objective rewards (as in SA-MRPO, Review~\#116). The Bayesian log-odds decomposition does not directly apply when $R \in \mathbb{R}$.
+
+\textbf{Approach:} Replace the single sigmoid output with a \textbf{quantile tracking value} that models the full reward distribution rather than just the success probability. Define $K$ quantile levels $\tau_1, \ldots, \tau_K$ and parameterize $K$ cumulative log-odds streams in parallel: $\hat{V}_t^{(k)} = \sigma(\sum_{i=1}^t f_\phi^{(k)}(s_i))$, where each $\hat{V}_t^{(k)}$ estimates $\Pr[R \geq q_k \mid s_t]$ for quantile threshold $q_k$. The per-quantile BCE loss applies identically: $\mathcal{L}_V^{(k)} = -\frac{1}{|T|}\sum_t [\mathbb{1}[R \geq q_k]\log \hat{V}_t^{(k)} + \mathbb{1}[R < q_k]\log(1 - \hat{V}_t^{(k)})]$. The advantage is derived from the full quantile distribution: $\hat{A}_t = \sum_k w_k(\hat{V}_{t+1}^{(k)} - \hat{V}_t^{(k)})$, weighting value changes across the reward distribution. This connects to Beyond Scalar Rewards (Review~\#70), which internalized reasoning into score distributions---quantile tracking values provide the critic-side complement. The multi-stream structure is a natural fit for multi-reward settings (DVAO from Review~\#59, SA-MRPO from Review~\#116), where each reward component gets its own tracking-value stream.
+
+\textbf{Feasibility:} High. The per-quantile BCE loss is a direct generalization. The shared scalar head becomes a $K$-dimensional head (e.g., $K{=}5$ for quintiles), adding minimal parameters. The main risk is that quantile thresholds must be calibrated to the reward distribution---using fixed thresholds on a non-stationary reward scale (common in RL training) may degrade tracking accuracy.
+
+\subsection{Direction 3: Process Reward Model Distillation from Tracking-Value Critics}
+\textbf{Gap:} Process reward models (PRMs) that assign per-step reward labels are expensive to construct: they require either human annotation (costly) or Monte Carlo rollout estimation at every step (computationally expensive, as each position requires many completions). TPPO's tracking-value critic produces per-token value estimates that \emph{automatically} encode per-step credit---but these are ephemeral training byproducts, discarded after RL training. No existing method distills trained tracking-value critics into reusable PRMs.
+
+\textbf{Approach:} After TPPO RL training converges, use the trained tracking-value critic as a \textbf{teacher} to generate per-token value labels on a large corpus of reasoning trajectories (both correct and incorrect). For each trajectory, the critic produces $\hat{V}_1, \hat{V}_2, \ldots, \hat{V}_T$, and the per-token value changes $\Delta\hat{V}_t = \hat{V}_{t+1} - \hat{V}_t$ serve as process reward labels. Train a separate, lightweight PRM (e.g., a classifier head on a smaller model) to predict these labels given only the partial response. The distilled PRM can then be used for: (a)~best-of-$N$ reranking at inference (selecting trajectories with highest cumulative process rewards), (b)~providing dense reward signals for future RL training of different models (transfer across model families), and (c)~serving as a verifier in tree search during test-time compute scaling. This connects to the reward modeling thread: KnowRL (Review~\#32) used knowledge-guided rewards; TPPO's tracking-value distillation provides an alternative that derives dense rewards from the model's own learned credit assignment rather than external knowledge.
+
+\textbf{Feasibility:} High. The tracking-value critic produces labels at no additional training cost (they are computed during standard TPPO training). The main question is label quality: the critic's $\sim$53--55\% sign accuracy (vs.\ $\sim$50.5\% for standard critics) represents a meaningful but modest improvement. The distilled PRM's utility depends on whether this signal-to-noise ratio is sufficient for downstream applications like reranking. Empirically, the +15.3--19.9 pp advantage sign accuracy improvement suggests the labels carry substantial information.
+
+\section{Conclusion}
+TPPO identifies and resolves a fundamental failure mode in PPO for LLM reasoning: standard critics achieve only $\sim$50.5\% sign accuracy on value changes, rendering token-level credit assignment no better than random. The solution---a cumulative log-odds parameterization derived from the Bayesian structure of value evolution under binary rewards---enforces that value changes are explicitly modeled as additive per-token diagnostic ratios, and terminal supervision automatically decomposes into position-specific gradients without requiring per-token targets. The resulting critic enables TPPO to substantially outperform both PPO (+7.0--10.1 pp on math) and GRPO (+7.4 pp on Qwen3-8B), with improved credit assignment quality confirmed by +15.3--19.9 pp advantage sign accuracy over PPO. The principled Bayesian foundation opens clear paths for extension to diffusion LLM RL (per-denoising-step tracking), continuous rewards (quantile tracking), and process reward model distillation---establishing tracking-value critics as a foundational component for future LLM reasoning optimization.
+
+\begin{thebibliography}{9}
+\bibitem{wang2026tppo}
+F.~Wang, C.~Li, J.~Yan, Y.~Luo, Z.~Wang, Y.~Li, R.~Zhan, Y.~Cheng, and T.~Lin.
+\newblock TPPO: Tracking-Value PPO For Language Model Reasoning.
+\newblock \emph{arXiv preprint arXiv:2610.16794}, 2026.
+
+\bibitem{schulman2017ppo}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, and O.~Klimov.
+\newblock Proximal Policy Optimization Algorithms.
+\newblock \emph{arXiv preprint arXiv:1707.06347}, 2017.
+
+\bibitem{shao2024deepseekmath}
+Z.~Shao et~al.
+\newblock DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.
+\newblock \emph{arXiv preprint arXiv:2402.03300}, 2024.
+
+\bibitem{wang2026trace}
+X.~Wang et~al.
+\newblock TRACE: Rollout-Guided Quantization-Aware Training for FP4 Reinforcement Learning of MoE Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.07767}, 2026.
+
+\bibitem{lee2026soloq}
+D.~Lee et~al.
+\newblock SoloQ: Calibration-Free Quantization for Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.07121}, 2026.
+\end{thebibliography}
+
+\end{document}
