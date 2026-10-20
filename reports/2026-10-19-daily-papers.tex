@@ -1,0 +1,145 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: Tree-Aware Posterior Distillation for Long-Horizon Agentic Reinforcement Learning}
+\author{Auto-generated Report}
+\date{October 19, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Applying reinforcement learning with verifiable rewards (RLVR) to long-horizon, multi-turn agentic tasks (e.g., deep research with 8--15+ search interactions, multi-hop QA with 2--8 turns) faces two intertwined challenges. First, \textbf{sparse credit assignment}: only a terminal reward (exact match of the final answer) is available, and distributing meaningful credit to individual intermediate turns is high-variance. GRPO treats all turns equally via trajectory-level advantages; PPO requires an expensive learned critic that is unstable for LLM agents. Second, \textbf{policy staleness during sequential mini-batch updates}: as the policy updates across multiple gradient steps on a fixed rollout batch, importance ratios diverge from the behavior policy, with multiplicative variance growing exponentially in sequence length.
+
+Zou et al.\ (arXiv:2610.23181) propose \textbf{TreeOPSD} (Tree-aware On-Policy Self-Distillation), which decouples target construction from distribution matching. A tree of rollouts assigns turn-level credits via backed-up terminal rewards, then converts those credits into \emph{frozen teacher distributions} relative to the behavior policy. Multiple sequential updates then match the student to these frozen targets via KL divergence, with a gradient that is self-correcting: it recovers the exact on-policy policy gradient at initialization, applies bounded additive (not multiplicative) drift corrections, and automatically reverses direction if the policy overshoots the target.
+
+\subsection{Method}
+
+\paragraph{Tree Rollout Structure.}
+The tree arises from an ``initialize-then-expand'' sampling scheme. From each prompt, $M$ complete trajectories are sampled from the behavior policy. For each trajectory, $N$ anchor turns are uniformly sampled, and from each anchor a fresh continuation is branched to termination. This produces $K = M(N{+}1)$ terminal trajectories sharing prefixes up to branching points. The default configuration is $(M{=}4, N{=}2)$, giving $K{=}12$ terminals at compute cost comparable to a flat group of $G{=}8$ independent rollouts used in GRPO.
+
+\paragraph{Tree-Backed Turn Credit.}
+Terminal trajectories are scored by a verifier (exact match) and rewards standardized into advantages $A_k$. Credit is backed up recursively through the tree using behavior-policy likelihood weights:
+\begin{equation}
+\omega_{i,c} := \frac{\pi_{\theta_{\text{old}}}(a_c \mid h_c)}{\sum_{c' \in \mathcal{C}_i} \pi_{\theta_{\text{old}}}(a_{c'} \mid h_{c'})}, \quad
+V_i := \begin{cases} A_k & \text{if } i \text{ is leaf } i_k \\ \sum_{c \in \mathcal{C}_i} \omega_{i,c}\, V_c & \text{otherwise} \end{cases}
+\end{equation}
+This propagates terminal advantages to every intermediate turn, weighted by the behavior policy's probability of taking each branch---turns whose branches lead to diverse outcomes receive discriminative credit signals.
+
+\paragraph{Behavior-Relative Posterior.}
+A per-turn score measures the geometric-mean log-likelihood ratio between current and behavior policies:
+\begin{equation}
+s_{\theta,i} := \frac{1}{L_i} \sum_{j=1}^{L_i} \log \frac{\pi_\theta(a_{i,j} \mid h_{i,j})}{\pi_{\theta_{\text{old}}}(a_{i,j} \mid h_{i,j})}
+\end{equation}
+mapped to a Bernoulli posterior via the sigmoid: $p_{\theta,i} := \sigma(s_{\theta,i})$. Normalizing by turn length $L_i$ prevents longer turns from dominating. At the behavior policy, $s_{\theta_{\text{old}},i} = 0$ and $p_{\theta_{\text{old}},i} = 1/2$ for all turns---a symmetric baseline.
+
+\paragraph{Affine Teacher Construction.}
+The frozen teacher is derived by optimizing a proximal objective balancing credit ascent against a KL penalty from the behavior anchor:
+\begin{equation}
+J_i(\text{Ber}(q)) := V_i \log\frac{q}{1-q} - \tau \cdot D_{\text{KL}}(\text{Ber}(1/2) \,\|\, \text{Ber}(q))
+\end{equation}
+Solving in closed form yields the \textbf{affine teacher}: $q_i := 1/2 + V_i/\tau$, where the temperature $\tau := (K{-}1)/(\rho\sqrt{K})$ and $\rho \in (0, 1/2)$ is the target radius hyperparameter (default $\rho{=}0.25$). This bounds all teacher posteriors within $[1/2 - \rho,\, 1/2 + \rho]$, preventing extreme targets.
+
+\paragraph{TreeOPSD Loss.}
+The student matches frozen teachers via forward KL divergence:
+\begin{equation}
+\mathcal{L}_x(\theta) = \frac{1}{L_x} \sum_{i \in \mathcal{T}_x} L_i \Bigl[-V_i \cdot s_{\theta,i} + \tau \cdot D_{\text{KL}}\bigl(\text{Ber}(1/2) \,\|\, P_{\theta,i}\bigr)\Bigr] + C_x
+\end{equation}
+The loss decomposes into a \textbf{credit ascent term} ($-V_i \cdot s_{\theta,i}$, identical to REINFORCE with tree credits) and a \textbf{convex restoring penalty} ($\tau \cdot D_{\text{KL}}$) that pulls the policy back toward the behavior distribution, preventing overshooting.
+
+\paragraph{Token-Level Gradient and Self-Correction.}
+The gradient per token simplifies to:
+\begin{equation}
+\frac{\partial \mathcal{L}_x}{\partial \log \pi_\theta(a_{i,j} \mid h_{i,j})} = \frac{\tau}{L_x} (p_{\theta,i} - q_i)
+\end{equation}
+This gradient has three key properties (Theorem~2): (1)~At the behavior policy, it exactly recovers the tree policy gradient (on-policy tangent). (2)~The off-policy correction $\tau(p_{\theta,i} - 1/2)$ is \emph{additive} and Lipschitz-bounded, avoiding the exponential variance of multiplicative importance ratios. (3)~The gradient vanishes when $p_{\theta,i} = q_i$ (policy matches teacher) and \emph{reverses sign} if the policy overshoots---a finite-target equilibrium absent from GRPO/PPO.
+
+\paragraph{Theorem 1 (Tree Consistency).}
+The affine map $q_i = 1/2 + V_i/\tau$ is the unique symmetric radius-calibrated map that commutes with convex tree backup: the backed-up parent teacher equals the forward-KL barycenter of its child teachers. This enables lossless credit compression---only per-turn credits need to be stored, not per-leaf attributions.
+
+\subsection{Results}
+Experiments use Qwen3-4B and Qwen3-30B-A3B (MoE) on two task families: Multi-Hop QA (train on HotpotQA, evaluate on 4 benchmarks, 2--8 turns) and Deep Research (train on OpenResearcher, evaluate on 4 benchmarks, 8--15+ turns).
+
+\textbf{Deep Research (30B model):} TreeOPSD achieves \textbf{21.20\%} average accuracy vs.\ 16.23\% GRPO (+4.97 pp), 16.47\% GSPO, and 17.59\% TreePO (+3.61 pp). Per-benchmark highlights: BrowseComp-Plus 17.47 vs.\ 10.36 GRPO (+7.11 pp); xbench-DeepSearch 26.00 vs.\ 19.00 (+7.00 pp).
+
+\textbf{Multi-Hop QA (30B):} TreeOPSD 45.93\% avg vs.\ 44.80\% GRPO (+1.13 pp). Gains are smaller on shorter-horizon tasks, consistent with the hypothesis that the finite-target mechanism matters more when policy staleness is more severe.
+
+\textbf{4B model:} Deep Research 15.45\% (TreeOPSD) vs.\ 12.18\% (GRPO) (+3.27 pp); Multi-Hop QA 44.13\% vs.\ 43.37\% (+0.76 pp).
+
+\textbf{Ablation --- Rollout Allocation:} The $(M{=}4, N{=}2)$ configuration ($K{=}12$) is optimal. Flat trees $(M{=}8, N{=}0, K{=}8)$ lose the branching signal for credit assignment: Deep Research drops from 15.45\% to 11.28\%. The branching structure is clearly essential.
+
+\textbf{Ablation --- Target Radius:} Performance peaks at $\rho{=}0.25$ with graceful degradation across $[0.10, 0.40]$, indicating robustness to this hyperparameter.
+
+\textbf{Ablation --- Odds vs.\ Logistic Map:} The affine odds parameterization outperforms the logistic alternative, which breaks the tree-commutativity property (Theorem~1).
+
+\subsection{Limitations}
+(1)~\textbf{Binary rewards only}: All experiments use exact-match (EM) rewards; applicability to soft/continuous reward settings (LLM-as-judge, RLHF preference scores) is unclear, though the Bernoulli formulation naturally accommodates binary outcomes. (2)~\textbf{No comparison with learned critics}: The baselines are limited to GRPO variants; no PPO or process reward model comparisons are provided. (3)~\textbf{Modest short-horizon gains}: On Multi-Hop QA (2--8 turns), improvements over GRPO are small ($\sim$1 pp), suggesting limited benefit for standard single-turn RLHF. (4)~\textbf{Compute cost opacity}: No FLOPs, GPU-hours, or wall-clock times are reported; the claim that branching costs ``roughly half a full rollout'' is approximate. (5)~\textbf{Low absolute Deep Research accuracy}: Best accuracy remains 21.20\%, suggesting fundamental capability limits beyond the training algorithm. (6)~\textbf{Model family limited to Qwen3}: No experiments with other model families. (7)~\textbf{No tree replay}: Each tree is used for one iteration and discarded; replaying stored trees could improve sample efficiency.
+
+\subsection{Relevance to Research}
+TreeOPSD directly addresses the credit assignment problem central to Topic T2 (RL for LLMs). It extends the token-level credit assignment line explored in DelTA (Review~\#57) and CoRT (Review~\#103) from single-turn to multi-turn settings, providing turn-level credit via tree backup rather than token-level advantage estimation. The Bernoulli posterior formulation is conceptually related to TPPO (Review~\#125), which parameterized values as cumulative log-odds; both map policy ratios through sigmoid-like transformations to bound the optimization landscape, but TreeOPSD operates at the turn level with frozen targets rather than at the token level with a learned critic. The finite-target equilibrium property addresses the same policy staleness problem that motivated GSPO and ratio clipping in BandPO (Review~\#5)---but through a fundamentally different mechanism: rather than clipping importance ratios, TreeOPSD specifies a \emph{destination} (the teacher posterior) and lets the gradient self-correct. The tree rollout structure for credit assignment connects to ABSeeker (Review~\#109), which used answer-backtracked credit for long-horizon search agents; TreeOPSD provides a principled probabilistic framework for the same intuition. The on-policy distillation component bridges T2 with the extensive distillation literature (Reviews~\#53, \#63, \#65, \#79, \#84, \#87, \#92, \#95, \#97, \#100, etc.)---TreeOPSD is essentially self-distillation where the ``teacher'' is constructed from the behavior policy's own tree rather than from an external stronger model.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Tree-Aware Credit for Diffusion LLM Denoising Steps}
+\textbf{Gap:} TreeOPSD assigns credit to \emph{turns} in multi-turn agentic interactions, where each turn produces an observable action with environmental feedback. In diffusion LLMs (dLLMs), the iterative denoising process constitutes a different kind of multi-step decision chain: each denoising step refines the entire sequence, but intermediate steps produce no explicit reward signal. Current dLLM training (V-GRPO, Review~\#42; Flow-DPPO, Review~\#71) applies trajectory-level rewards to the full denoising chain without step-level credit assignment, analogous to how flat GRPO treats all turns equally.
+
+\textbf{Approach:} Adapt TreeOPSD's tree structure to the denoising process: at selected anchor denoising steps, branch multiple continuations (different random unmaskings or noise realizations) to termination. The tree backup then attributes terminal quality (e.g., text quality scores) to individual denoising steps, identifying which steps were pivotal for quality. The affine teacher construction applies directly: each denoising step receives a frozen teacher posterior $q_s = 1/2 + V_s/\tau$, and the policy is trained to match these targets via the bounded-gradient mechanism. This would be the first method to provide step-level credit for dLLM denoising without requiring a process reward model. The tree structure is particularly natural for dLLMs because branching at an intermediate denoising step requires only re-running the remaining steps---cheaper than branching at a turn boundary in agentic settings where each turn involves tool calls. The Bernoulli posterior over denoising step ratios would reveal which steps contribute most to generation quality, potentially informing adaptive step-count allocation (connecting to SpecFold's efficiency work, Review~\#122).
+
+\textbf{Feasibility:} Medium-high. The main technical challenge is that denoising steps in dLLMs are not independent ``turns'' but sequential refinements of the same latent state; the tree backup assumes independent branching, which may overcount shared information across branches. A masked-state-aware backup that conditions on the fraction of tokens already committed could address this.
+
+\subsection{Direction 2: Continual Tree Replay with Drift-Corrected Teachers}
+\textbf{Gap:} TreeOPSD constructs a tree of rollouts, uses it for one iteration of sequential updates, then discards it. This is wasteful: the tree structure and backed-up credits contain rich information about the task landscape that could benefit future iterations. Standard experience replay in RL stores transitions and reuses them, but the frozen teacher formulation in TreeOPSD is tied to the behavior policy at tree-generation time---replaying stale teachers under a drifted policy would violate the on-policy tangent property (Theorem~2). No existing method combines tree-structured credit with experience replay for LLM RL.
+
+\textbf{Approach:} Develop a \textbf{teacher update rule} that adjusts stored tree teachers as the policy evolves. When replaying a tree generated under behavior policy $\theta_{\text{old}}$, recompute the behavior-relative scores $s_{\theta,i}$ under the current policy and apply a first-order correction to the frozen teachers:
+$q_i^{\text{corrected}} = q_i + \lambda \cdot (p_{\theta,i} - 1/2)$
+where $\lambda$ controls the correction strength. This shifts the teacher toward the current policy's baseline, maintaining the finite-target equilibrium while allowing reuse. The correction is motivated by TreeOPSD's own Theorem~2: the off-policy correction term $\tau(p_{\theta,i} - 1/2)$ is exactly the quantity that compensates for drift, so incorporating it into the teacher partially ``re-centers'' the target. A priority queue could rank stored trees by their expected information value (measured by the remaining gap $\sum_i |p_{\theta,i} - q_i|$), replaying trees where the policy has not yet converged. This connects to Cortex's (Review~\#126) prospective rehearsal idea---rehearsing past tree experiences to prevent catastrophic forgetting of learned agentic strategies during continual training.
+
+\textbf{Feasibility:} Medium. The correction rule requires recomputing $s_{\theta,i}$ for all stored turns, which scales with replay buffer size. A budget-constrained variant that only replays the top-$k$ most informative trees (by priority score) could keep costs manageable. The main theoretical risk is that the first-order correction may not preserve the tree-consistency property (Theorem~1); higher-order corrections may be needed.
+
+\subsection{Direction 3: Adaptive Tree Topology via Uncertainty-Guided Branching}
+\textbf{Gap:} TreeOPSD samples $N$ anchor turns uniformly per trajectory for branching. This uniform allocation ignores the fact that some turns are more ``pivotal'' than others: a turn where the agent decides which search query to issue may have far more impact on the outcome than a turn where it summarizes already-retrieved information. Uniform branching wastes samples on low-impact turns and undersamples high-impact ones. No existing tree-based RL method adapts branching topology to the agent's own uncertainty.
+
+\textbf{Approach:} Use the model's \textbf{action entropy at each turn} as a proxy for turn importance: high-entropy turns (where the model is uncertain about which action to take) are more likely to be pivotal decision points. Before generating continuations, compute the per-turn action entropy $\mathcal{H}_i = -\sum_a \pi_{\theta}(a \mid h_i) \log \pi_{\theta}(a \mid h_i)$ from the initial trajectory, then sample anchor turns proportionally to $\mathcal{H}_i$ rather than uniformly. This concentrates branching budget on turns where the policy's decisions could go either way---exactly the turns where differential outcomes are most likely, producing more informative tree-backed credits. An alternative proxy is the \textbf{token-level confidence variance} within a turn: turns with high variance in per-token confidence may contain critical decision tokens surrounded by routine tokens. This connects to the experience activation framework from ExpActivator (Review~\#124), which used relevance vs.\ applicability to weight past experiences; here, we use uncertainty to weight future branching investments. The adaptive topology could also be integrated with the difficulty-stratified reasoning perspective from LLaTiSA (Review~\#39)---harder reasoning chains receive more branching budget.
+
+\textbf{Feasibility:} High. The entropy computation adds negligible overhead (a single forward pass is already available from the initial trajectory generation). The main risk is that entropy is a noisy proxy for turn importance: a turn may have high entropy due to multiple equally good actions (low impact) or due to genuine uncertainty about the correct action (high impact). A two-phase approach---first branch uniformly on a small budget to identify high-variance turns, then concentrate remaining budget on those turns---could mitigate this.
+
+\section{Conclusion}
+TreeOPSD introduces a principled framework for long-horizon agentic RL that cleanly separates credit assignment from policy optimization. The tree rollout structure provides turn-level credit signals via behavior-weighted backup of terminal rewards, while the affine teacher construction converts these credits into bounded, frozen target distributions. The resulting gradient has three desirable properties absent from GRPO and PPO: exact on-policy initialization, additive (not multiplicative) off-policy correction, and automatic overshoot reversal at the finite target. These properties are particularly valuable for long-horizon tasks where policy staleness across sequential mini-batch updates is severe---hence the outsized gains on Deep Research (+4.97 pp over GRPO at 30B) compared to shorter Multi-Hop QA (+1.13 pp). The theoretical contribution---that the affine odds map is the unique parameterization commuting with convex tree backup (Theorem~1)---provides principled justification for the design choices and distinguishes TreeOPSD from heuristic alternatives. For RL research, the paper demonstrates that specifying \emph{where to go} (finite teacher targets) can be more effective than specifying \emph{how far to go} (trust region constraints), particularly when the optimization landscape is traversed over many sequential steps.
+
+\begin{thebibliography}{9}
+\bibitem{zou2026treeopsd}
+H.~Zou, Q.~Wang, Y.~Mao, Y.~Qu, Y.~Guo, Z.~Liu, C.~Li, W.~Liu, S.~Yang, and X.~Ji.
+\newblock Tree-Aware Posterior Distillation for Long-Horizon Agentic Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2610.23181}, 2026.
+
+\bibitem{tppo2026}
+Z.~Author et~al.
+\newblock TPPO: Tracking-Value PPO For Language Model Reasoning.
+\newblock \emph{arXiv preprint arXiv:2610.16794}, 2026.
+
+\bibitem{abseeker2026}
+Z.~Author et~al.
+\newblock ABSeeker: Training Long-Horizon Search Agents via Answer-Backtracked Credit Assignment.
+\newblock \emph{arXiv preprint arXiv:2608.05102}, 2026.
+
+\bibitem{specfold2026}
+Z.~Author et~al.
+\newblock SpecFold: Folding Multi-Branch Redundancy for Faster Speculative Decoding in Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.04875}, 2026.
+
+\bibitem{cortex2026}
+J.~Zhang et~al.
+\newblock Cortex: Consolidating Context into Parametric Memory.
+\newblock \emph{arXiv preprint arXiv:2610.20399}, 2026.
+\end{thebibliography}
+
+\end{document}
