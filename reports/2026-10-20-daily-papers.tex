@@ -1,0 +1,139 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Daily Paper Review: MemT-1.0: Towards Memory-Native Evolution}
+\author{Auto-generated Report}
+\date{October 20, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Current LLM agents have no native mechanism to persist and evolve memory across interactions. When an agent engages in an unbounded sequence of conversations or tasks, prior context must be either placed in the prompt (linear cost in history length), retrieved from external textual memory stores (RAG-style, requiring separate infrastructure), or compressed into parametric updates (LoRA fine-tuning, limited capacity). None treat memory as a first-class, differentiable component of the model.
+
+Li et al.\ (arXiv:2610.26825) propose MemT-1.0, a \textbf{memory-native} architecture where dense associative memory matrices are embedded directly into selected Transformer layers, updated at every token through learned gates, and read via parallel attention heads. The memory state has constant size regardless of history length---providing a 66$\times$ persistent storage reduction vs.\ full KV cache at 128K tokens and 1.86$\times$ inference speedup---while outperforming all prior parametric memory baselines by $+$12.5 points on an 11-benchmark memory evaluation suite.
+
+The paper identifies a critical gap: existing parametric memory systems (Temp-LoRA, MemoryLLM, ICAE) achieve only 22--38 average score, while textual memory systems (MemOS, Mem0) achieve 49--69 and full-context baselines reach 65--66. MemT-1.0-Flash (50.60 avg) narrows this gap substantially, though it still trails textual systems by $\sim$18 points---particularly on tasks requiring detailed evidence retention over very long sequences.
+
+\subsection{Method}
+
+\paragraph{Architecture.}
+Selected Transformer layers are augmented with parallel memory modules. Each layer $l$ computes:
+\begin{equation}
+A^{(l)} = A^{(l)}_{\text{ori}} + A^{(l)}_{\text{mem}}
+\end{equation}
+where $A^{(l)}_{\text{ori}}$ is the standard attention output and $A^{(l)}_{\text{mem}}$ is the memory readout, combined via additive fusion. The backbone weights $\theta_b$ are \textbf{frozen}; only the memory module parameters $\phi$ (projections, gates, routing) are trainable. Two variants are released: MemT-1.0-Nano (36B total, 3B activated, 10M dynamic memory params) on Qwen3.6-35B-A3B, and MemT-1.0-Flash (288B total, 17B activated, 336M dynamic memory params) on DeepSeek-V4-Flash.
+
+\paragraph{Memory Representation.}
+The memory state at layer $l$, step $t$ is a dense matrix:
+\begin{equation}
+M^{(l)}_t \in \mathbb{R}^{H_{\text{kv}} \times d_k \times d_v}
+\end{equation}
+where $H_{\text{kv}}$ is the number of memory channels, $d_k$ and $d_v$ are key/value dimensions. This is a dense associative memory---a learned key-value store with implicit encoding. The total persistent state is $N_{\text{state}} = \sum_l E_l \cdot H_{\text{kv},l} \cdot d_{k,l} \cdot d_{v,l}$ (constant regardless of interaction history).
+
+\paragraph{Stable Gated DeltaNet-2 Update.}
+The memory is updated token-by-token using a stable variant of Gated DeltaNet-2. For each token $i$ at layer $l$, channel $h$:
+\begin{align}
+K^{(l)}_{t,h} &= \text{L2Norm}(\tilde{H}^{(l)}_t W_{\tilde{K},h}^{(l)}), \quad V^{(l)}_{t,h} = \tilde{H}^{(l)}_t W_{\tilde{V},h}^{(l)} \\
+U^{(l)}_{t,i} &= \sqrt{\beta^{(l)}_{t,i}} \cdot K^{(l)}_{t,i} \quad \text{(erase vector)} \\
+\tilde{M}^{(l)}_{t,i,h} &= \bigl[I - U_{t,i,h}^\top U_{t,i,h}\bigr] \cdot D^{(l)}_{t,i,h} \cdot \tilde{M}^{(l)}_{t,i-1,h} + U_{t,i,h}^\top \bigl(\omega^{(l)}_{t,i,h} \cdot V^{(l)}_{t,i,h}\bigr)
+\end{align}
+where $\beta$ is the learned erase gate (sigmoid), $\omega$ is the write gate (sigmoid), $D^{(l)}_{t,i,h} = \text{Diag}[\exp(\lambda^{(l)}_{t,i,h})]$ applies per-dimension exponential decay via the forget gate $\lambda = -\exp(s_h) \cdot \text{Softplus}(FW_\lambda + b_\lambda)$. The term $[I - U^\top U]$ is a \textbf{stable erase}: it projects out the memory component along the key direction before writing, preventing unbounded growth. Ablations show this stable mechanism contributes $+$1.74 points over vanilla GDN-2.
+
+\paragraph{Memory Readout.}
+Queries read from memory with gated, soft-capped output:
+\begin{equation}
+A^{(l)}_{\text{mem},t} = \text{Concat}_h \Bigl[\text{RMSNorm}\Bigl(\frac{Q^{(l)}_{t,h} M^{(l)}_{t,h}}{\sqrt{d_k}}\Bigr) \odot \text{SoftCapSiLU}(G^{(l)}_{t,h})\Bigr]
+\end{equation}
+where $\text{SoftCapSiLU}(x) = \tau \cdot \tanh(\text{SiLU}(x)/\tau)$ with $\tau{=}2$ prevents memory readout from dominating the residual stream. A snapshot reader design ensures all queries at step $t$ read the same incoming state $M_t$, decoupling reads from writes.
+
+\paragraph{Mixture-of-Storage (MoS).}
+To scale capacity without proportional compute increase, memory is expanded into $E$ experts: $M^{(l)}_{\text{MoS},t} = \{M^{(l)}_{t,e}\}_{e=1}^E$. Token-level routing via learned address vectors determines which experts handle utilization (reading) and storage (writing). Scaling from 2 to 4 experts yields $+$0.4 to $+$2.7 point gains that increase with training duration, suggesting progressive utilization of additional capacity.
+
+\paragraph{Training Pipeline.}
+The training has three stages: (0)~\textbf{Backbone Preparation}: capability profiling, attribution by intervention, and targeted data synthesis produce 126.5K trajectories (2.4B tokens), improving the backbone by $+$6.3 points. (1)~\textbf{Continued Pre-Training}: 20B tokens of sequential text divided into 2K-token segments; preceding segments accessible only through memory state (not in attention context). (2)~\textbf{Post-Training via Off-Policy Distillation}: a frozen full-context teacher provides soft targets, while the student sees only the current segment plus memory state:
+\begin{equation}
+\mathcal{L}(\phi) = \frac{1}{N_{\text{spt}}} \sum_{b,t,k} m_{t,k} \bigl[\lambda_{\text{KD}} \cdot \ell^{\text{KL}}_{t,k} + \lambda_{\text{CE}} \cdot \ell^{\text{CE}}_{t,k}\bigr]
+\end{equation}
+with Top-K=64 truncated KL at temperature $T_d{=}1.0$ and supervision mask $m_{t,k}$ selecting response tokens only. Total: 14B tokens across memory-native LM, explicit storage/utilization, and long-range memory tasks.
+
+\subsection{Results}
+\textbf{Memory Benchmarks (11 tasks):} MemT-1.0-Flash achieves \textbf{50.60} average, outperforming all parametric baselines (best: Temp-LoRA at 38.08, $+$12.52 pp) but trailing textual memory systems (MemOS: 68.55, $-$17.95 pp) and full context (DeepSeek-V4-Flash: 64.98, $-$14.38 pp). Nano achieves 46.97. The largest gaps to textual systems are on long-sequence evidence retention: LongMemEval-S 37.20 vs.\ 83.20 ($-$46 pp), BEAM-1M 37.04 vs.\ 72.59 ($-$35.5 pp).
+
+\textbf{General Capability Preservation:} Flash maintains exact parity with backbone (avg $\Delta{=}0.0$ across 6 benchmarks); Nano shows $-$0.9 average degradation. Memory noise injection does not degrade core capabilities.
+
+\textbf{Efficiency:} 1.86$\times$ inference speedup at 128K context, 66$\times$ persistent storage reduction vs.\ KV cache, 33$\times$ logical state reduction at 64K. Windowed MoS execution achieves 80\% peak training memory reduction with 1.6\% latency overhead.
+
+\textbf{Ablations:} Token-level updates outperform turn-level by $+$2.62 points. Stable update mechanism contributes $+$1.74 over vanilla GDN-2. CPT + Post-training (46.80) outperforms post-training alone (43.21) by $+$3.59.
+
+\textbf{Agentic Applications:} On SWE-bench Verified/Multilingual, experience-guided MemT-1.0 improves task success and consistency over agents without experience, achieving performance comparable to explicit textual experience systems.
+
+\subsection{Limitations}
+(1)~\textbf{Large gap to retrieval systems}: 18-point deficit to MemOS, with 46-point gap on LongMemEval-S, indicating dense associative memory cannot yet match explicit retrieval for fine-grained evidence retention. (2)~\textbf{Fixed memory capacity}: State size $N_{\text{state}}$ is fixed at deployment, unlike retrieval systems with unbounded storage. (3)~\textbf{No explicit continual learning evaluation}: Catastrophic forgetting of early memories as interactions accumulate is not systematically measured; the exponential decay forget gates erase old information but whether this is beneficial or harmful is not disentangled. (4)~\textbf{Opaque memory content}: Dense matrix states are not interpretable, unlike human-readable textual memories. (5)~\textbf{Backbone-specific}: Memory modules require full retraining when the backbone changes. (6)~\textbf{Training cost}: 34B tokens of specialized data plus backbone preparation, with off-policy distillation doubling compute via full-context teacher. (7)~\textbf{Evaluation capped at 128K tokens}: Performance at truly lifelong scales (1M+ tokens) is untested.
+
+\subsection{Relevance to Research}
+MemT-1.0 directly addresses T3's core challenge: how can LLM agents maintain lifelong memory across unbounded interactions without catastrophic forgetting? The dense associative memory with learned forget gates provides a principled architectural answer---the $[I - U^\top U]$ stable erase mechanism explicitly controls what is overwritten, complementing the exponential decay that controls what fades. This contrasts with Cortex (Review~\#126), which consolidated context into parametric memory via LoRA-based synaptic plasticity and structural expansion; MemT-1.0 instead maintains a separate, fixed-size state matrix that evolves without touching the backbone weights. The off-policy distillation training---where the full-context teacher supervises the memory-only student---echoes Cortex's context-to-memory distillation but operates at the token level rather than the episode level. The Mixture-of-Storage capacity scaling connects to EvoEmbedding (Review~\#78), which used evolvable representations for agentic memory retrieval; MoS provides the complementary dense-memory analog of EvoEmbedding's retrieval-based scaling. The snapshot reader design (decoupling reads from writes) resonates with Memanto (Review~\#40), which separated memory types by semantic function; MemT-1.0 separates by temporal phase instead. The token-level update granularity ($+$2.62 over turn-level) connects to the token-level credit assignment insights from TPPO (Review~\#125) and TreeOPSD (Review~\#129)---finer-grained updates provide better signal in both the memory and RL domains. The 18-point gap to textual memory systems establishes a clear benchmark for future work on native memory, and the capability-conditioned backbone preparation pipeline introduces a principled method for identifying and filling model knowledge gaps before adding memory capabilities.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Hybrid Native-Retrieval Memory with Learned Routing}
+\textbf{Gap:} MemT-1.0's dense associative memory excels at fast, approximate recall (PS-Bench: 97.48, competitive with textual systems) but fails catastrophically on tasks requiring exact evidence retention over long histories (LongMemEval-S: 37.20 vs.\ 83.20 for MemOS). Conversely, textual retrieval systems excel at exact recall but require external infrastructure and are brittle to retrieval failures. No existing system combines native parametric memory with selective retrieval in a unified, end-to-end trainable framework.
+
+\textbf{Approach:} Augment MemT-1.0's memory readout with a \textbf{learned spill-over mechanism}: when the memory readout confidence (measured by the gate magnitude $\|G^{(l)}_{t,h}\|$) falls below a learned threshold, the system writes the current interaction's text to an external key-value store and routes the query to retrieval. The routing decision is a differentiable Gumbel-softmax choice between native memory and retrieval, trained end-to-end with the same distillation loss. The native memory serves as a ``fast cache'' for frequently accessed, high-level patterns (personality, preferences, recurring procedures), while the retrieval store serves as a ``cold archive'' for rare, detailed facts. This mirrors the complementary memory systems theory from neuroscience (hippocampus for episodic detail, neocortex for consolidated gist). Cortex's (Review~\#126) prospective rehearsal mechanism could selectively replay cold-archive items through the native memory to promote consolidation of frequently retrieved items. The routing threshold naturally adapts: early in an interaction history (few memories), native memory handles everything; as memories accumulate and the dense matrix saturates, more queries spill to retrieval.
+
+\textbf{Feasibility:} High. MemT-1.0 already has the infrastructure for gated memory readout; adding a retrieval pathway requires only an additional routing head and a simple key-value store. The main challenge is end-to-end training across the discrete retrieval operation; the Gumbel-softmax approximation or straight-through estimator can handle this.
+
+\subsection{Direction 2: Memory Forensics --- Probing and Steering the Forget Gates}
+\textbf{Gap:} MemT-1.0's dense memory states are entirely opaque. The forget gates $\lambda$, erase gates $\beta$, and write gates $\omega$ control what is remembered and forgotten, but their behavior is never analyzed. Whether the model learns meaningful retention policies (e.g., retaining safety-critical information longer than trivia) or applies uniform decay is unknown. This opacity is both a scientific gap (we don't understand what the memory learns) and a safety concern (adversarial inputs could corrupt the memory state undetectably).
+
+\textbf{Approach:} Develop a \textbf{memory forensics toolkit} with three components: (1)~\emph{Forget-gate probing}: inject known facts at specific interaction steps, then measure the forget gate magnitudes $|\lambda^{(l)}_{t,i,h}|$ and survival probability (the fraction of initial memory norm retained after $N$ subsequent interactions) for facts of different categories (safety rules, user preferences, trivia). If the model has learned meaningful retention policies, safety-critical facts should show systematically smaller forget-gate magnitudes. (2)~\emph{Causal memory attribution}: for each output prediction, compute the gradient of the output logit with respect to each memory channel's state $\partial y / \partial M^{(l)}_{t,h}$, identifying which channels contribute most. This extends the Geometry Conflict analysis (Review~\#49) from weight-space gradients to memory-state gradients. (3)~\emph{Memory steering}: apply targeted perturbations to specific memory channels (identified by the attribution map) and measure downstream behavioral changes. If a channel primarily stores user preferences, perturbing it should change personalization without affecting factual responses. This connects to the representation-level analysis in Cortex (Review~\#126), which tracked consolidation quality via retention rate; here we track memory quality at the channel granularity.
+
+\textbf{Feasibility:} Medium-high. The probing and attribution components require only standard gradient computation through the memory operations, which are fully differentiable. The main challenge is scale: with $H_{\text{kv}} \times d_k \times d_v$ elements per layer, the memory state is high-dimensional, making per-element attribution expensive. Channel-level (rather than element-level) attribution is a practical compromise.
+
+\subsection{Direction 3: Memory-Aware Diffusion for Continual Visual Generation}
+\textbf{Gap:} MemT-1.0 demonstrates memory-native evolution for text-based LLM agents, but the multi-codebook diffusion LLMs reviewed in Intern Lumina U2 (Review~\#128) have no mechanism for persistent visual memory. When a unified model generates a sequence of images across sessions (e.g., maintaining consistent character appearance across interactions), it must re-specify all visual constraints in each prompt. No existing diffusion LLM has native persistent memory for visual generation consistency.
+
+\textbf{Approach:} Integrate MemT-1.0's Stable GDN-2 memory modules into the shared Transformer backbone of a multimodal diffusion LLM (e.g., LLaDA2.0-Uni or Intern Lumina U2). The memory state would accumulate both textual and visual information across interactions. For visual generation, the memory readout $A^{(l)}_{\text{mem}}$ provides conditioning from prior visual contexts---character appearances, scene layouts, style preferences---without requiring them in the current prompt. The multi-codebook visual tokens from Intern Lumina U2 would be stored in memory using the same GDN-2 update rule, with the $K{=}8$ codebook codes folded into the value dimension $d_v$. The MoS routing could specialize experts by modality: some experts preferentially store visual patterns (characters, scenes), others store textual patterns (user preferences, instructions). During denoising, the memory provides a persistent ``visual context'' that guides generation toward consistency with prior outputs. The forget gates would naturally handle evolving visual preferences (e.g., when a user requests a style change, old style information decays). This combines MemT-1.0's memory architecture (T3) with Intern Lumina U2's multi-codebook diffusion (T4), creating a continual visual generation agent.
+
+\textbf{Feasibility:} Medium. The architectural integration is straightforward since MemT-1.0's memory modules are parallel additions to Transformer layers. The main challenges are: (1)~visual tokens have different statistical properties than text tokens, potentially requiring separate gate initializations; (2)~the memory must store spatially structured visual information in a flat matrix, which may lose spatial relationships; and (3)~training requires multi-session visual generation data with consistency requirements, which is scarce.
+
+\section{Conclusion}
+MemT-1.0 establishes memory-native evolution as a viable paradigm for lifelong LLM agent memory, demonstrating that differentiable dense associative memory---updated token-by-token through stable gated mechanisms---can dramatically outperform prior parametric memory approaches ($+$12.5 points) while maintaining constant-size state (66$\times$ storage reduction vs.\ KV cache) and zero degradation of general capabilities. The Stable GDN-2 update with its erase-then-write mechanism and per-dimension exponential decay provides a principled architectural solution to the retention/forgetting tradeoff, and the Mixture-of-Storage scaling demonstrates that memory capacity can grow with bounded compute overhead. The 18-point gap to textual memory systems on evidence-intensive tasks establishes a clear frontier for native memory research: dense associative memory excels at pattern recall but struggles with exact detail retention, suggesting hybrid approaches as a natural next step. For continual learning research, MemT-1.0 introduces the first production-scale demonstration that memory can be a native, end-to-end trainable component of the foundation model rather than an external system, shifting the question from ``whether'' to ``how much'' memory can be internalized.
+
+\begin{thebibliography}{9}
+\bibitem{li2026memt}
+Z.~Li, Z.~Zhang, L.~Liu, Y.~Bu, et~al.
+\newblock MemT-1.0: Towards Memory-Native Evolution.
+\newblock \emph{arXiv preprint arXiv:2610.26825}, 2026.
+
+\bibitem{cortex2026}
+J.~Zhang et~al.
+\newblock Cortex: Consolidating Context into Parametric Memory.
+\newblock \emph{arXiv preprint arXiv:2610.20399}, 2026.
+
+\bibitem{luminau2}
+Q.~Yu et~al.
+\newblock Intern Lumina U2: A Multi-Codebook Diffusion Large Language Model.
+\newblock \emph{arXiv preprint arXiv:2610.20818}, 2026.
+
+\bibitem{evoembedding2026}
+Z.~Author et~al.
+\newblock EvoEmbedding: Evolvable Representations for Long-Context Retrieval and Agentic Memory.
+\newblock \emph{arXiv preprint arXiv:2606.21649}, 2026.
+
+\bibitem{memanto2026}
+Z.~Author et~al.
+\newblock Memanto: Typed Semantic Memory with Information-Theoretic Retrieval for Long-Horizon Agents.
+\newblock \emph{arXiv preprint arXiv:2604.22085}, 2026.
+\end{thebibliography}
+
+\end{document}
