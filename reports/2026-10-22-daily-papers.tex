@@ -1,0 +1,90 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Looped Uniform Diffusion Language Models}
+\author{Auto-generated Report}
+\date{October 22, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Uniform Diffusion Language Models (UDLMs) corrupt tokens by replacing them with random vocabulary tokens drawn uniformly, rather than using a dedicated \texttt{[MASK]} symbol as in Masked Diffusion Language Models (MDLMs). This creates a strictly harder denoising problem: the model must simultaneously infer \emph{whether} each position was corrupted and \emph{what} the clean token should be, since corruption is entirely unmarked. Consequently, UDLMs require more training compute to reach competitive quality. Prior work on \emph{looping}---recursively reusing a subset of Transformer layers within a single denoising step---had demonstrated benefits for MDLMs, but whether the same principle could help UDLMs remained an open question. Utpala et al.\ (2026) investigate whether iterative hidden-state refinement via looping can close the training efficiency gap for UDLMs \cite{utpala2026looped}.
+
+\subsection{Method}
+The architecture is a Diffusion Transformer (DiT) with 170M parameters, split into three structural components: a \textbf{Head} ($n_H$ blocks), a \textbf{Body} ($n_B$ blocks, looped $S$ times), and a \textbf{Tail} ($n_T$ blocks). The looped denoising procedure is:
+\begin{align}
+  e_t &= E_\theta(y_t), \quad h^{(0)} = H_\theta(e_t, t), \notag \\
+  h^{(r+1)} &= M_\theta(h^{(r)}, t) \quad \text{for } r = 0, \ldots, S{-}1, \notag \\
+  \hat{x} &= \mathrm{softmax}\bigl(T_\theta(h^{(S)})\bigr),
+\end{align}
+where $y_t = \mathrm{softmax}(w_t / \tau)$ is a soft input derived from the Duo Gaussian parameterization. Crucially, the noisy input remains fixed across loop iterations; only hidden states are refined. The body blocks share parameters across iterations (true weight-tying).
+
+The forward process follows $q_t(z_t^l \mid x^l) = \mathrm{Cat}(z_t^l;\, \alpha_t x^l + (1{-}\alpha_t)\mathbf{u})$, where $\mathbf{u} = 1/K$ is the uniform distribution and $\alpha_t$ is a decreasing noise schedule. The Duo++ variant approximates the continuous Gaussian embedding efficiently by retaining only the top-$k$ entries plus an estimate of the remaining softmax mass.
+
+Three loop-count training distributions are studied: (1)~\textbf{uniform}, sampling $S$ uniformly from $\{1, \ldots, S_{\max}\}$; (2)~\textbf{FLOP-proportional}, where $p(S) \propto F(S)^{-1}$ ensures equal expected FLOPs per loop count; and (3)~\textbf{noise-proportional}, coupling loop depth to noise level. The cost model is $F(S) = F_{\text{base}}(1 + (S{-}1)\rho)$ with $\rho = n_B F_{\text{layer}} / F_{\text{base}}$.
+
+A key theoretical contribution is the \textbf{retention probability decomposition}. The posterior probability that position $l$ was retained is:
+\begin{equation}
+  \frac{\gamma_t^l}{1 - \gamma_t^l} = \frac{K \alpha_t}{1 - \alpha_t} \cdot \pi_t^l(i),
+\end{equation}
+where $\pi_t^l(i)$ is the contextual prediction of the clean token. Analysis reveals that \textbf{93--94\% of perplexity improvement from looping} comes from better contextual prediction at replaced tokens, not from improved retention estimation.
+
+At inference, adaptive early-stopping is triggered when $\|h^{(r)} - h^{(r{-}1)}\|_F / \|h^{(r)}\|_F < \epsilon$ (with $\epsilon = 0.1$), allowing the model to allocate compute dynamically across diffusion steps.
+
+\subsection{Results}
+The primary claim is a \textbf{2.7--3.3$\times$ training FLOP reduction} to match the non-looped baseline NLL on OpenWebText and FineWeb-Edu. On zero-shot perplexity across seven evaluation datasets (PTB, WikiText-103, LM1B, LAMBADA, AG News, PubMed, arXiv), looping achieves an \textbf{11.5\% average perplexity reduction} (58.57 $\to$ 51.82 with $S=12$). Generative perplexity improves by up to 9.8\% at matched NFE while preserving unigram entropy (sample diversity).
+
+On ten multiple-choice benchmarks (HellaSwag, PIQA, BoolQ, ARC, MMLU, etc.), adaptive looping with FLOP-proportional training matches fixed $S=12$ accuracy with \textbf{34.8\% fewer loops} (average 7.82 vs.\ 12). Ablations show blocks 1--2 are optimal for the looped slice, and $S_{\max} = 12$ is the saturation point.
+
+A notable \textbf{negative result}: noise-proportional loop distribution underperforms FLOP-proportional by $+0.029$ NLL, contradicting the intuitive hypothesis that noisier inputs should receive more computation.
+
+\subsection{Limitations}
+All experiments use a single 170M-parameter model; scaling behavior at billion-parameter scale is unknown. No comparisons are provided against autoregressive baselines (e.g., GPT-2) or against looped MDLMs (LoopMDM), which limits contextualization. Generation quality is measured only by perplexity and unigram entropy---no MAUVE scores, coherence metrics, or human evaluation are included. The adaptive stopping threshold $\epsilon = 0.1$ is fixed without sensitivity analysis. With only 2 of 12 blocks looped, the head and tail may dominate inference cost, limiting practical wallclock savings.
+
+\subsection{Relevance to My Research}
+This paper directly advances \textbf{diffusion LLM architecture} (Topic~4). The looped architecture bridges diffusion LLMs and adaptive-depth/recurrent Transformer research (Universal Transformers, DEQ models). The retention probability decomposition provides theoretical insight into why UDLMs are harder than MDLMs and where compute investment yields returns. The finding that looping is orthogonal to sampler design and composable with other improvements (noise schedules, distillation, self-conditioning) makes it a stackable contribution for future diffusion LLM systems.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Looped Diffusion at Scale with Hybrid AR--Diffusion Decoding}
+\textbf{Gap:} All looping results are at 170M scale. It is unknown whether the 2.7--3.3$\times$ training efficiency gain persists, amplifies, or diminishes at 1B+ parameters. Moreover, the paper does not explore combining looped UDLMs with autoregressive decoding (e.g., block-wise AR with diffusion infill).
+
+\textbf{Approach:} Scale the looped UDLM to 1.3B and 7B parameters, measuring training FLOP reduction curves at each scale. Introduce a hybrid decoding scheme where an AR backbone generates block-level drafts and a looped diffusion module refines each block, with loop count allocated adaptively based on the AR model's confidence. Compare against pure AR, pure diffusion, and self-speculative baselines.
+
+\textbf{Feasibility:} Moderate. The architecture change (head/body/tail split) is straightforward to implement in existing DiT codebases. The main challenge is the computational cost of training 7B diffusion models, requiring $\sim$256 GPU-days. Preliminary results at 1.3B could be obtained within 2--3 weeks on a standard cluster.
+
+\subsection{Direction 2: Cross-Architecture Loop Transfer Between UDLM and MDLM}
+\textbf{Gap:} The paper explicitly leaves open whether looping helps UDLMs more or less than MDLMs. Additionally, no method exists to transfer a looped body trained under one corruption type (uniform vs.\ absorbing) to another, which would enable a single shared denoiser across corruption regimes.
+
+\textbf{Approach:} Train looped denoisers for both UDLM and MDLM variants at matched FLOPs. Measure relative looping gain ($\Delta$NLL per added loop) for each corruption type. Then, initialize a UDLM's looped body from a pre-trained MDLM loop (and vice versa), fine-tuning only the head/tail while freezing the body. If transfer works, design a \emph{corruption-agnostic} body that handles both uniform and absorbing noise via a corruption-type embedding appended to the timestep conditioning.
+
+\textbf{Feasibility:} High at 170M scale. The key experiment (cross-initialization) requires minimal additional training since only head/tail are fine-tuned. The corruption-agnostic body introduces one additional conditioning input. The main risk is that UDLM and MDLM may learn fundamentally different iterative refinement strategies that do not transfer.
+
+\subsection{Direction 3: Self-Conditioning Meets Looping---Eliminating Redundant Iteration}
+\textbf{Gap:} Looping refines hidden states \emph{within} a denoising step, while self-conditioning refines predictions \emph{across} consecutive denoising steps. These two iterative mechanisms may be partially redundant, and their interaction is unexplored. The paper notes that looping is ``orthogonal and composable'' with self-conditioning but provides no evidence.
+
+\textbf{Approach:} Combine looping and self-conditioning in a single UDLM and measure whether their benefits are additive, sub-additive, or super-additive. Develop a joint adaptive-compute controller that dynamically allocates budget between intra-step loops and inter-step self-conditioning iterations. Use the convergence criterion ($\|h^{(r)} - h^{(r{-}1)}\|_F / \|h^{(r)}\|_F$) for loop early-stopping and a prediction-change criterion ($\|\hat{x}_s - \hat{x}_{s{-}1}\|_1$) for self-conditioning early-stopping, sharing a single compute budget across both axes.
+
+\textbf{Feasibility:} High. Self-conditioning is a well-established technique requiring only an additional forward pass with the previous prediction concatenated to the input. The joint controller adds a lightweight MLP that outputs (loop count, self-conditioning flag) given the current noise level and hidden-state norm. Training with both mechanisms active may require 1.5$\times$ the baseline FLOPs due to the self-conditioning overhead, but the adaptive controller should recover efficiency at inference.
+
+\section{Conclusion}
+Utpala et al.\ demonstrate that looping---iterative hidden-state refinement via weight-tied body blocks---yields substantial training efficiency gains (2.7--3.3$\times$) for Uniform Diffusion Language Models. The retention probability decomposition reveals that nearly all improvement stems from better contextual prediction at corrupted positions, providing theoretical grounding for why recurrent computation helps despite unmarked corruption. The adaptive stopping mechanism enables compute-efficient inference with minimal quality loss. Key open questions remain around scaling behavior, comparison to MDLMs and AR models, and interaction with other iterative refinement techniques like self-conditioning. The orthogonality and composability of the approach position it as a foundational building block for next-generation diffusion LLM architectures.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Utpala et al.(2026)]{utpala2026looped}
+Saiteja Utpala, Chieh-Hsin Lai, Yuki Mitsufuji, and Praneeth Vepakomma.
+\newblock Looped Uniform Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.30066}, 2026.
+\end{thebibliography}
+
+\end{document}
