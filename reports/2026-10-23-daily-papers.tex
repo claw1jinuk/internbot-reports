@@ -1,0 +1,96 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Different Tasks, Different Timesteps ---\\Temporal Task-Aware Quantization for Diffusion Language Models}
+\author{Auto-generated Report}
+\date{October 23, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Post-training quantization (PTQ) for diffusion language models (DLMs) currently applies uniform activation precision across the entire denoising trajectory. Avivi et al.\ (2026) demonstrate that this is fundamentally suboptimal: quantization sensitivity is \emph{both task-dependent and timestep-dependent}. Unlike autoregressive LLMs, DLMs generate text through iterative masked denoising with irreversible token commitments at each step, so quantization errors at critical commitment windows propagate permanently. The paper finds that different tasks exhibit entirely different ``critical windows'': GSM8K (math) concentrates 27\% of task-relevant KL divergence in the first 8 steps, HumanEval (code) peaks in mid-trajectory steps 40--63, and MMLU-Pro (knowledge) shows broad early sensitivity. This motivates a task-aware temporal precision allocation framework \cite{avivi2026t2quant}.
+
+\subsection{Method}
+\textbf{T2Quant} (Temporal Task-Aware Quantization) operates in three stages: profiling, scheduling, and inference.
+
+\paragraph{Window partitioning.} The 128-step denoising trajectory is divided into $K = 16$ non-overlapping windows of 8 steps each. Each window is assigned a precision $b_k \in \mathcal{B} = \{3, 4, 6, 8\}$ bits.
+
+\paragraph{Surrogate signals.} Two label-free signals predict per-window precision importance:
+\begin{itemize}
+  \item \textbf{Local Quantization Divergence} ($\kappa_{w}$): the KL divergence between full-precision and quantized predictions, summed over committed score-relevant positions:
+  \begin{equation}
+    \kappa_{\tau,k}(b) = \frac{\sum D_{\mathrm{KL}}\bigl(p^{\mathrm{fp}}_{i,t,j} \,\|\, p^{(b)}_{i,t,j}\bigr)}{\sum |C_{i,t}|}.
+  \end{equation}
+  \item \textbf{Downstream Influence} ($I_w$): measures how much commitments in window $w$ redirect the generation trajectory by computing the KL divergence in the full-precision model's beliefs about still-masked positions before vs.\ after the window.
+\end{itemize}
+Their product $S_w = \mathbb{E}[\kappa_w] \cdot \mathbb{E}[I_w]$ serves as the combined benefit proxy.
+
+\paragraph{Theoretical foundation.} Proposition~1 bounds the expected task-score change via Pinsker's inequality:
+\begin{equation}
+  |\Delta M_w|^2 \leq \tfrac{1}{2}\,\mathbb{E}[J_w]\,\mathbb{E}[R_w^2],
+\end{equation}
+where $J_w$ is the commitment perturbation and $R_w$ is the downstream score sensitivity. Empirical validation shows correlations of $r = 0.96$--$0.98$ between $S_w$ and actual accuracy gains on GSM8K and MMLU-Pro ($r = 0.63$ on HumanEval).
+
+\paragraph{Dynamic programming.} Given a fixed average bit budget (e.g., 4.0 bits), the influence-weighted precision benefit $g_{\tau,k}(b) = \bar{i}_{\tau,k} \cdot [\kappa_{\tau,k}(b_0) - \kappa_{\tau,k}(b)]$ is maximized via DP:
+\begin{equation}
+  F_k(z) = \max_{b \in \mathcal{B},\; c_k(b) \leq z} \bigl\{F_{k{-}1}(z - c_k(b)) + g_{\tau,k}(b)\bigr\},
+\end{equation}
+yielding globally optimal per-window precision schedules. At inference, the schedule is applied via a zero-overhead window-index lookup.
+
+T2Quant is \textbf{quantizer-agnostic}: it was validated on top of DLLMQuant, FAIR-Calib, and STaR-Quant without modifying their internals.
+
+\subsection{Results}
+On three models (Dream-7B-Instruct, LLaDA-1.5-8B, LLaDA-8B-Instruct) across six benchmarks at W4A4, T2Quant improved \textbf{all 9 model$\times$quantizer combinations}. The maximum gain is \textbf{+6.7 percentage points} (DLLMQuant + T2Quant on Dream, 33.99 $\to$ 40.69). The best quantized configuration (STaR-Quant + T2Quant on Dream) recovers ${\sim}$90\% of FP16 performance (42.10 vs.\ 44.05 avg). T2Quant achieves the best quantized score in 11 of 12 model-benchmark cells. Notably, at 3.75 average bits T2Quant outperforms uniform W4A4 (48.4\% vs.\ 44.1\%), achieving better quality with fewer total bits.
+
+Ablations show: (1)~random schedules fail catastrophically ($-$14--19 points vs.\ baselines); (2)~only 16 unlabeled calibration prompts recover ${\sim}$75\% of full gains; (3)~performance is stable across 16-window to single-step granularity (within 1.7 points).
+
+\subsection{Limitations}
+No hardware speed or energy measurements are reported despite the practical efficiency motivation. Task identity must be known at inference time, limiting applicability to open-ended multi-task settings. The proxy signal correlation is weaker on HumanEval ($r = 0.63$). Only two DLM families (LLaDA, Dream) and a single weight/activation regime (W4A4) are tested. No comparison is made to the alternative strategy of running more denoising steps at uniformly lower precision.
+
+\subsection{Relevance to My Research}
+This paper bridges \textbf{diffusion LLM deployment} (Topic~4) and \textbf{LLM efficiency} (Topic~1). The central finding---that the temporal denoising trajectory is a resource to be managed, not just a computational cost---deepens understanding of how discrete diffusion generates text. The irreversible commitment mechanism unique to masked diffusion is formalized through the $J_w$/$R_w$ bound, contributing to error propagation theory for discrete diffusion. Practically, demonstrating that DLMs can be effectively quantized to W4A4 while retaining ${\sim}$90\% of FP16 quality addresses a key deployment barrier for diffusion language models.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Automatic Task-Oblivious Schedule Selection via Input Features}
+\textbf{Gap:} T2Quant requires pre-selecting a task-specific schedule at inference time. For mixed-task or open-ended deployment (e.g., chatbots), no mechanism exists to automatically determine which schedule to apply.
+
+\textbf{Approach:} Train a lightweight \emph{schedule selector} network that, given only the input prompt (before any denoising), predicts the optimal precision schedule. The selector takes the prompt's embedding statistics (mean, variance, top-$k$ token entropy) and outputs a softmax over a library of pre-computed schedules. Training uses the profiling data already generated by T2Quant: for each calibration prompt, the ground-truth label is the schedule with lowest KL divergence proxy. At inference, the selector adds a single MLP forward pass ($<$0.1\% overhead) before denoising begins.
+
+\textbf{Feasibility:} High. The selector is trivially small relative to the DLM. The main risk is that input prompts may not carry sufficient signal to predict denoising dynamics---but since task type strongly predicts schedule shape, even coarse task classification should suffice.
+
+\subsection{Direction 2: Joint Denoising Schedule and Precision Co-Optimization}
+\textbf{Gap:} T2Quant optimizes precision allocation for a fixed 128-step denoising schedule. However, the number of tokens committed per step (the ``unmasking rate'') and the precision at each step are jointly important. A step that commits many tokens at low precision may be worse than committing fewer tokens at higher precision.
+
+\textbf{Approach:} Extend the DP formulation to jointly optimize two variables per window: (1)~the activation precision $b_k$ and (2)~the fraction of masked tokens to unmask $u_k$. The cost model becomes $c_k(b_k, u_k) = n_{\text{committed}}(u_k) \cdot f(b_k)$, and the benefit function incorporates both quantization divergence and commitment quality (how well the model discriminates correct vs.\ incorrect tokens at the given precision). The DP state space grows from $K \times B$ to $K \times B \times U$ (where $U$ is the discretized unmasking rate set), but remains tractable for $K=16$, $|B|=4$, $|U|=4$.
+
+\textbf{Feasibility:} Moderate. The extended DP is straightforward, but the profiling cost increases since each $(b_k, u_k)$ combination requires a separate replay. With 16 combinations per window vs.\ the current 4, profiling cost roughly quadruples. This could be mitigated by profiling only at coarse granularity and interpolating.
+
+\subsection{Direction 3: Temporal Precision Scheduling for Continuous Flow Language Models}
+\textbf{Gap:} T2Quant targets masked (absorbing-state) discrete diffusion. Continuous flow-matching DLMs (e.g., Lafa, LangFlow) use a fundamentally different generation process---continuous interpolation paths with per-position asynchronous timesteps---where the notion of ``irreversible commitment'' does not directly apply. Whether temporal precision scheduling transfers to this setting is unknown.
+
+\textbf{Approach:} Adapt the T2Quant framework to continuous flow models by redefining the surrogate signals. Replace the commitment-based $\kappa_w$ with a \emph{velocity divergence} metric: $\kappa^{\text{flow}}_w(b) = \mathbb{E}\|v^{\text{fp}}_t - v^{(b)}_t\|^2$ measuring how much quantization perturbs the velocity field at each flow timestep. Replace $I_w$ with a trajectory divergence: generate pairs of trajectories (one full-precision, one quantized in window $w$) and measure endpoint divergence. Apply the same DP scheduling framework with these adapted signals. Test on Lafa-8B and LangFlow at W4A4.
+
+\textbf{Feasibility:} Moderate. The velocity divergence metric is easy to compute. The main challenge is that continuous flows lack discrete commitment points, so the error propagation bound (Proposition~1) must be rederived for the continuous case, likely using Gronwall-type stability arguments for ODE flows.
+
+\section{Conclusion}
+Avivi et al.\ introduce T2Quant, a principled framework that exploits the previously overlooked temporal axis of diffusion language model quantization. By combining two label-free surrogate signals---local quantization divergence and downstream influence---with dynamic programming, T2Quant allocates precision optimally across the denoising trajectory for each target task. The method consistently improves all tested quantizer/model combinations at zero inference overhead, with gains up to 6.7 percentage points and near-FP16 recovery at W4A4. The discovery that quantization sensitivity is jointly task- and timestep-dependent provides fundamental insight into how discrete diffusion processes generate text and where computational resources are most productively deployed.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Avivi et al.(2026)]{avivi2026t2quant}
+Ofek Avivi, Eliron Rahimi, Avi Mendelson, and Chaim Baskin.
+\newblock Different Tasks, Different Timesteps: Temporal Task-Aware Quantization for Diffusion Language Models.
+\newblock \emph{arXiv preprint arXiv:2610.31198}, 2026.
+\end{thebibliography}
+
+\end{document}
