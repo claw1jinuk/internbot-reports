@@ -1,0 +1,92 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: RSIHub --- A Composable Framework\\for Agent-Evolution Methods}
+\author{Auto-generated Report}
+\date{October 26, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Agent-evolution methods---Reflexion, Self-Refine, DSPy, Promptbreeder, A-Evolve, AHE, GEPA, Hyperagents, among others---each bundle their own execution pipeline, evaluation harness, and provenance tracking. This creates three problems: (1)~\emph{non-comparability}, since each method carries its own evaluation conditions; (2)~\emph{duplicated infrastructure}, with recurring concerns (sandbox construction, checkpoint/recovery, lineage tracking) re-implemented per method; and (3)~\emph{opaque attribution}, where genuine policy innovations cannot be separated from incidental infrastructure differences. Wang et al.\ (2026) observe that despite surface diversity, agent-evolution methods share a common lifecycle structure and propose RSIHub, a composable framework that factors out universal execution machinery so researchers express method-specific logic as lightweight ``recipes'' \cite{wang2026rsihub}.
+
+\subsection{Method}
+RSIHub decomposes agent evolution into a \textbf{seven-phase, nine-operator lifecycle} executed as a transaction per generation:
+
+\begin{enumerate}
+  \item \textbf{Select}: retrieve an eligible parent from the archive per a search policy (best-scoring, Pareto front, etc.).
+  \item \textbf{Rollout}: reconstruct the exact recorded parent commit via \texttt{ForkCertifiedParent}; execute on training tasks; return evidence.
+  \item \textbf{Analyze} (optional): distill rollout trajectories into bounded mutation evidence.
+  \item \textbf{Mutate}: propose edits within the declared \emph{mutable surface}.
+  \item \textbf{Guardrail}: verify diff against declared surface (\texttt{CheckSurface}), apply method-specific validation, filter near-duplicates.
+  \item \textbf{Evaluate}: finalize candidate via clean checkout, bind evaluation identity through a \emph{contract}, score on gate tasks, certify and append to archive.
+  \item \textbf{Absorb}: gate decides if child replaces parent; record annotations; optionally reflect to distill insights for future generations.
+\end{enumerate}
+
+The key abstraction is the \textbf{mutable surface block}, which declares filesystem paths a candidate may modify (\texttt{include}/\texttt{exclude} patterns). The framework enforces this via tree-diff checking, rejecting out-of-surface writes before evaluation. This enables both prompt-only and whole-harness evolution under identical operator interfaces.
+
+Measurement integrity is ensured by a \textbf{contract mechanism} binding six identity layers: candidate (commit hash, tree fingerprint), evaluator (frozen evaluator tree), data/trials (dataset-content hash, split assignments, seeds), runtime/model (endpoint digest, concurrency), fixed comparison identity, and integrity receipt. The \texttt{contract\_id} is the canonical digest of the complete payload, enabling post-hoc verification that any two evaluations were conducted under identical conditions.
+
+Four prior methods were implemented as recipes \emph{without framework source modifications}: AHE (47--61 lines of recipe config, 216--1087 lines of operator code), A-Evolve, GEPA, and Hyperagents, each reusing 2 existing operator bindings.
+
+\subsection{Results}
+On Terminal Bench~2 (89 tasks) and tau-3 Banking (97 tasks) with GPT-5.4 as target model, RSIHub demonstrates:
+
+\begin{itemize}
+  \item \textbf{+13.5 pp maximum improvement} (MiniSWE seed on Terminal Bench~2: 56.2\% $\to$ 69.7\% via Hyperagents/A-Evolve).
+  \item \textbf{No single method dominates}: rankings shift across benchmarks, seed agents, and task splits. AHE is best for Codex on Terminal Bench~2 (+2.2 pp) but Hyperagents leads for MiniSWE (+13.5 pp).
+  \item \textbf{Split-level regressions}: AHE drops gate score by $-3.4$ pp on Terminal Bench~2 (Codex); sealed regressions of $-4.1$ pp occur on tau-3 Banking---overall improvements mask degradation on held-out tasks.
+  \item \textbf{Execution fidelity}: framework overhead is 0.02\% median (0.06\% P95); variability matches direct execution.
+  \item \textbf{Fault recovery}: 420 fault-injection trials across 7 scenarios with zero state corruption.
+\end{itemize}
+
+\subsection{Limitations}
+The agent-driven mode (where an outer agent evolves the evolution strategy itself) is described but not experimentally validated. Only 2 benchmarks, 2 seed agents, and 4 methods are tested. The underlying LLM (GPT-5.4) is frozen throughout---all evolution operates at the prompt/scaffold level, not at the weight level. Only 1 child per generation is explored, leaving population-based search untested. Small task sets (20--27 sealed tasks) create statistical uncertainty. No compute cost analysis is reported.
+
+\subsection{Relevance to My Research}
+RSIHub is directly relevant to \textbf{continual learning for LLM agents} (Topic~3). The split-level regressions---where improvements on training tasks coexist with degradation on held-out tasks---constitute a \emph{system-level analogue of catastrophic forgetting}, even with frozen LLM weights. The three-way task split (train/gate/sealed) functions as a forgetting detection mechanism: the gate split serves as a retention probe, the sealed split as a forward transfer probe. The certified archive acts as episodic memory for the evolution process, and the optional \texttt{Reflect} operator performs knowledge consolidation across generations. The finding that no method dominates across settings motivates research on scaffold-level continual learning and adaptive evolution strategies.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Forgetting-Aware Gating with Elastic Retention Constraints}
+\textbf{Gap:} RSIHub's Gate operator uses binary admission control (accept/reject) based on aggregate score. It does not explicitly prevent performance degradation on previously-solved tasks---the split-level regressions of up to $-4.1$ pp demonstrate this. There is no analogue of regularization-based forgetting prevention (EWC, PackNet) at the scaffold level.
+
+\textbf{Approach:} Introduce a \texttt{RetainGate} operator that maintains a growing buffer of ``anchor tasks'' drawn from previously-passed gate and training tasks. Before admitting a candidate, \texttt{RetainGate} evaluates it on a random subset of anchor tasks and computes a retention score $r = 1 - |\{t \in \mathcal{A} : s_{\text{child}}(t) < s_{\text{parent}}(t)\}| / |\mathcal{A}|$. The candidate is admitted only if $r \geq \rho$ (a retention threshold) \emph{and} the overall score improves. This creates an elastic constraint analogous to EWC's Fisher-weighted penalty but operating at the task-evaluation level rather than the weight level.
+
+\textbf{Feasibility:} High. The \texttt{RetainGate} requires only additional evaluation calls on anchor tasks (10--20 tasks per generation). It integrates cleanly as a new Gate operator in RSIHub's lifecycle with no framework modifications. The main cost is increased evaluation budget per generation.
+
+\subsection{Direction 2: Cross-Run Knowledge Transfer via Evolved Skill Libraries}
+\textbf{Gap:} Each RSIHub evolution run starts from a seed agent with no transfer of evolved insights across runs or benchmarks. This prevents lifelong accumulation of agent capabilities---a core concern in continual learning. The \texttt{Record} and \texttt{Reflect} operators store annotations within a single run but lack cross-run persistence.
+
+\textbf{Approach:} Build a persistent \emph{skill library} that stores successful mutations as reusable, indexed modules. After each evolution run, the \texttt{Reflect} operator extracts generalizable mutation patterns (e.g., ``adding retry logic for timeout errors,'' ``decomposing multi-step tasks into subtask chains'') and stores them in a shared library with metadata (source benchmark, score delta, surface type). In future runs, the \texttt{Analyze} operator retrieves relevant skills from the library via embedding similarity to the current task description and injects them as mutation suggestions for the \texttt{Mutate} operator. Measure forward transfer by tracking how many generations are saved when starting from a skill-augmented seed vs.\ a bare seed.
+
+\textbf{Feasibility:} Moderate. The skill extraction requires a summarization step per successful mutation (one LLM call). The library retrieval uses standard embedding search. The main challenge is defining ``generalizability''---skills that help on one benchmark may hurt on another. A validation gate on retrieved skills (test on a small task sample before injecting) mitigates this risk.
+
+\subsection{Direction 3: Curriculum-Driven Evolution with Progressive Task Exposure}
+\textbf{Gap:} RSIHub uses static task sampling throughout evolution. Continual learning research shows that task presentation order significantly affects learning efficiency and forgetting. No existing agent-evolution method incorporates curriculum design into the evolution loop.
+
+\textbf{Approach:} Replace static training-task sampling with a curriculum controller that progressively exposes harder tasks as evolution proceeds. Define task difficulty as the inverse of the seed agent's pass rate. In early generations, sample predominantly from easy tasks (pass rate $> 0.5$); in later generations, shift toward hard tasks (pass rate $< 0.2$). Implement this as a modified \texttt{Select} operator that co-selects parent \emph{and} training task subset. Compare three curriculum strategies: (1)~easy-to-hard, (2)~hard-to-easy, (3)~uniform (current baseline). Measure both final performance and retention on easy tasks after hard-task exposure.
+
+\textbf{Feasibility:} High. Curriculum scheduling requires only modifying the task sampling distribution per generation, which is a lightweight change to the \texttt{Rollout} phase. The main risk is that with small task sets (50 training tasks), curriculum effects may be noisy. Pooling results across multiple seeds and benchmarks would increase statistical power.
+
+\section{Conclusion}
+RSIHub makes a systems-level contribution to agent evolution by separating method-specific policy from universal infrastructure through composable recipes, declared mutable surfaces, and certified evaluation with provenance tracking. Its most significant empirical finding for the continual learning community is that \emph{system-level forgetting is real and measurable}: evolved agents can improve on training tasks while regressing on held-out tasks by up to 4.1 percentage points, even with frozen LLM weights. The framework's finding that no single evolution method dominates across benchmarks and seeds motivates research on adaptive, forgetting-aware evolution strategies and cross-run knowledge transfer for lifelong agent improvement.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Wang et al.(2026)]{wang2026rsihub}
+Zimu Wang, Xiaobo Wang, Siyu Ye, Jiaqi Li, Silin Chen, Yuling Shi, Ruobing Wang, Jingjing Zhang, Chaofan Wang, Kai Wu, Mengnan Qi, Kai Cai, Xiaodong Gu, and Zilong Zheng.
+\newblock RSIHub: A Composable Framework for Agent-Evolution Methods.
+\newblock \emph{arXiv preprint arXiv:2610.32253}, 2026.
+\end{thebibliography}
+
+\end{document}
