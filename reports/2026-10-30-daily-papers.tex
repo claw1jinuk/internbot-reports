@@ -1,0 +1,88 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Multi-Token Prediction Done Right}
+\author{Auto-generated Report}
+\date{October 30, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Multi-Token Prediction (MTP) has become standard in frontier LLM training (DeepSeek-V3/V4, Nemotron~3, GLM-5, Qwen, Kimi~K3), adding auxiliary heads that predict future tokens to improve representations and enable self-speculative decoding. Teoh (2026) reveals a fundamental flaw through gradient decomposition: the standard MTP cross-entropy gradient decomposes into a desirable KL self-distillation component $\mathbf{g}_{\mathrm{KL}}$ and a harmful residual component $\mathbf{g}_{\mathrm{res}}$. The residual accounts for ${\sim}$80\% of gradient magnitude reaching the shared trunk yet exhibits 4.0--4.6$\times$ lower signal-to-noise ratio than $\mathbf{g}_{\mathrm{KL}}$. Worse, the SNR gap \emph{widens} with scale (4.1$\times$ at 167M, 4.6$\times$ at 1.2B), because the irreducible one-hot sampling noise dominates as models improve. Empirically, stepping along $\mathbf{g}_{\mathrm{res}}$ consistently \emph{increases} NTP loss---standard MTP actively fights next-token prediction \cite{teoh2026softmtp}.
+
+\subsection{Method}
+\textbf{Soft-MTP} eliminates the residual gradient via a straight-through routing trick that exactly recovers the KL divergence gradient without materializing vocabulary-sized logit tensors. The key modification augments the NTP hidden states:
+\begin{equation}
+  \tilde{h}_t = h^{(0)}_t + \sum_{k=1}^{K}\bigl[\mathrm{sg}(h^{(k)}_{t-k}) - h^{(k)}_{t-k}\bigr],
+\end{equation}
+where $\mathrm{sg}(\cdot)$ denotes stop-gradient. In the forward pass, the added terms cancel ($\tilde{h}_t = h^{(0)}_t$), preserving NTP predictions. In the backward pass, NTP gradients at position $t{+}k$ flow back through $h^{(k)}_t$ with a negative sign, exactly cancelling the residual:
+\begin{equation}
+  \nabla_{h^{(k)}_t}\bigl(\tilde{\mathcal{L}}_{\mathrm{NTP}} + \mathcal{L}^{(k)}_{\mathrm{MTP}}\bigr) = \mathbf{g}_{\mathrm{KL}}.
+\end{equation}
+This exploits the fact that teacher (NTP) and student (MTP) share the same output head $W_\theta$, enabling algebraic gradient recovery from existing cross-entropy computations. The implementation reduces to a single line: \texttt{h0[:, k:] += hk.detach() - hk}. Unlike explicit KL minimization (KL-MTP), which costs 21\,GB additional memory and 5.6\% throughput at 1.2B, Soft-MTP adds \textbf{zero measurable overhead}: identical throughput, memory, and MFU.
+
+Training uses LLaMA-style architectures (167M--1.2B), $K=3$ MTP heads, $\lambda_{\mathrm{MTP}} = 1.0$, FineWeb-Edu data (31.5B tokens), and Muon optimizer.
+
+\subsection{Results}
+At 1.2B parameters, Soft-MTP achieves:
+
+\begin{itemize}
+  \item \textbf{NTP perplexity}: 10.74 vs.\ 10.89 (standard MTP) and 10.57 (NTP-only baseline). On out-of-domain WikiText: 17.49 (matching NTP-only at 17.50), while standard MTP degrades to 18.16.
+  \item \textbf{Zero-shot accuracy}: 57.31\% avg across 7 benchmarks (vs.\ 56.80\% MTP, 56.75\% NTP-only). Gains grow with scale: $+0.07$ at 167M $\to$ $+0.51$ at 1.2B.
+  \item \textbf{Speculative decoding}: 1.76$\times$ speedup (vs.\ 1.74$\times$ MTP); +1.8\% acceptance length. Cross-domain gains: +1.5--2.8\% speedup (largest on math).
+  \item \textbf{Fine-tuning}: HumanEval pass@64: 43.90 (vs.\ 40.85 MTP, $+3.05$); MATH-500: 25.00 (vs.\ 23.20, $+1.80$); GSM8K: 49.66 (vs.\ 48.60, $+1.06$).
+  \item \textbf{Output head rank preservation}: Effective rank 437/496 (88\% of NTP baseline) vs.\ 131 (26\%) for standard MTP---standard MTP catastrophically collapses the output head.
+\end{itemize}
+
+Soft-MTP matches or beats KL-MTP on nearly every metric while being 5.6\% faster and using 21\,GB less memory. It dominates the Pareto frontier across $\lambda_{\mathrm{MTP}} \in \{0.25, 0.5, 0.75, 1.0\}$ and $K \in \{3, \ldots, 8\}$.
+
+\subsection{Limitations}
+All experiments cap at 1.2B parameters; behavior at frontier scale ($>$100B) is unverified. Absolute gains are modest at smaller scales ($+0.07$ accuracy at 167M). Some fine-tuning metrics show mixed results (KL-MTP beats Soft-MTP on GSM8K; MBPP pass@16 slightly favors standard MTP). The paper acknowledges that MTP's future is uncertain---DeepSeek-V4.1-Flash abandoned it for DSpark, and alternative speculative decoders like EAGLE exist. Single pre-training dataset (FineWeb-Edu) limits generalization claims.
+
+\subsection{Relevance to My Research}
+This paper directly advances \textbf{LLM efficiency and inference optimization} (Topic~1). The gradient decomposition reveals why standard MTP degrades NTP quality---the residual gradient introduces high-variance noise that worsens with scale---and the straight-through fix eliminates it at zero cost. For speculative decoding, Soft-MTP produces better-aligned draft heads (lower KL divergence: 0.364 vs.\ 0.384), directly improving acceptance rates. The finding that standard MTP collapses the output head's effective rank from 496 to 131 has implications for any shared-head architecture. The ``one-line fix'' paradigm demonstrates how careful gradient analysis can yield practically significant improvements with minimal implementation burden.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Soft-MTP at Frontier Scale with MoE Architectures}
+\textbf{Gap:} All Soft-MTP experiments use dense LLaMA-style models up to 1.2B. Frontier models (DeepSeek-V4, Qwen-3) use Mixture-of-Experts (MoE) architectures where expert routing interacts with MTP gradients in unexplored ways. The SNR analysis predicts that the residual's harm increases with scale, but this is unverified beyond 1.2B.
+
+\textbf{Approach:} Apply Soft-MTP to a 7B-active/46B-total MoE architecture (e.g., DeepSeek-MoE style with 64 experts, 6 active). The straight-through trick is architecture-agnostic and should apply directly to MoE shared output heads. Measure: (1)~whether the SNR gap continues widening at 7B active parameters; (2)~whether MoE expert routing patterns change under Soft-MTP (since cleaner gradients may reduce expert collapse); (3)~whether the output head rank preservation translates to better expert specialization. Compare speculative decoding speedups at this scale where acceptance rate improvements have larger absolute impact.
+
+\textbf{Feasibility:} Moderate. Requires ${\sim}$64 H100 GPUs for a meaningful training run (${\sim}$100B tokens). The code change is trivial (one line). The main risk is that MoE routing may interact with the gradient correction in unexpected ways, requiring load-balancing loss adjustments.
+
+\subsection{Direction 2: Extending Soft-MTP to Diffusion Language Models}
+\textbf{Gap:} Soft-MTP addresses gradient corruption in autoregressive MTP, where teacher and student share a linear output head. Diffusion language models (MDLMs, UDLMs) face an analogous problem: at each denoising step, the model predicts clean tokens at all positions simultaneously, and auxiliary losses (e.g., future-step prediction, self-conditioning) can similarly introduce noisy gradients through the shared denoiser backbone. No analysis of gradient decomposition exists for diffusion LLM auxiliary losses.
+
+\textbf{Approach:} Perform the same gradient decomposition for self-conditioning in masked diffusion LLMs (where the model's previous-step prediction is fed back as input). Decompose the self-conditioning gradient into a KL component (aligning current predictions with previous-step predictions) and a residual. If the residual exhibits similar SNR degradation, apply the straight-through trick to eliminate it. Test on LLaDA-style models at 1B scale, measuring perplexity, generation quality (MAUVE), and zero-shot benchmarks with and without the correction.
+
+\textbf{Feasibility:} Moderate. The gradient decomposition requires that teacher and student share an output head, which holds for self-conditioning in most DLLM architectures. The main uncertainty is whether the residual's SNR characteristics in diffusion (where conditioning context is partially masked) parallel those in autoregressive MTP.
+
+\subsection{Direction 3: Adaptive Horizon Selection via Per-Head Gradient SNR Monitoring}
+\textbf{Gap:} Soft-MTP uses a fixed horizon $K$ (typically 3) for all training. The paper shows that increasing $K$ degrades standard MTP but Soft-MTP remains robust. However, different positions within a sequence may benefit from different horizons---positions near high-entropy tokens (function words, topic shifts) may have lower-quality predictions for distant heads, making even the KL gradient noisy at large $K$.
+
+\textbf{Approach:} Implement per-head SNR monitoring during training. At each gradient step, compute the running average of $\|\mathbf{g}_{\mathrm{KL}}^{(k)}\|^2 / \mathrm{Var}(\mathbf{g}_{\mathrm{KL}}^{(k)})$ for each head $k \in \{1, \ldots, K_{\max}\}$. When a head's SNR drops below a threshold $\tau_{\mathrm{SNR}}$, reduce its loss weight $\lambda_k$ toward zero. This creates an \emph{adaptive horizon} that automatically expands during training (as predictions improve) and contracts for difficult positions. Implement via a lightweight EMA tracker ($<$0.01\% overhead) that periodically updates $\lambda_k$ values.
+
+\textbf{Feasibility:} High. The SNR computation uses quantities already available during backpropagation. The per-head weight adjustment is trivial. The main challenge is setting $\tau_{\mathrm{SNR}}$ without overfitting to training data statistics; a percentile-based threshold (e.g., disable heads in the bottom 20\% of SNR) would be robust.
+
+\section{Conclusion}
+Teoh demonstrates that standard multi-token prediction harbors a fundamental gradient pathology: the residual component of the MTP cross-entropy gradient accounts for 80\% of gradient magnitude but has 4--5$\times$ worse signal-to-noise ratio than the desirable KL self-distillation component, and this gap widens with scale. Soft-MTP eliminates the residual via a single-line straight-through gradient rerouting trick that exactly recovers KL gradients at zero computational overhead. The result is better NTP perplexity, higher downstream accuracy, improved speculative decoding acceptance rates, and preserved output head rank---all while being faster and lighter than the naive KL minimization alternative. The approach exemplifies how theoretical gradient analysis can yield practically significant efficiency gains with minimal implementation complexity.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Teoh(2026)]{teoh2026softmtp}
+Jayden Teoh.
+\newblock Multi-Token Prediction Done Right.
+\newblock \emph{arXiv preprint arXiv:2610.38331}, 2026.
+\end{thebibliography}
+
+\end{document}
