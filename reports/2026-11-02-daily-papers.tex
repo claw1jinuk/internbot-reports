@@ -1,0 +1,98 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: $\mathrm{R^2Orch}$ --- Recursive Self-Improvement\\for Agent Orchestration via Self-Play\\within a Skill-Internalization Loop}
+\author{Auto-generated Report}
+\date{November 2, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Current LLM agent orchestration methods (AutoGen, LangGraph, CrewAI) rely on static skill libraries---hand-crafted tools and prompts that remain fixed after deployment. When agents encounter novel tasks or distribution shifts, they cannot autonomously acquire new capabilities or discard obsolete ones. Existing self-improvement methods (Voyager, STILL-ALIVE) accumulate skills monotonically without principled withdrawal, leading to bloated context windows, interference between outdated and current skills, and degraded performance over time. Chen et al.\ (2026) identify a deeper issue: no prior work provides a \emph{causal} framework for evaluating whether a skill genuinely improves an agent's policy, as opposed to merely correlating with easier task subsets \cite{chen2026r2orch}.
+
+\subsection{Method}
+$\mathrm{R^2Orch}$ introduces a two-loop architecture that couples policy improvement with principled skill lifecycle management.
+
+\paragraph{Inner loop: Self-play GRPO.} The inner loop generates rollouts using the current policy augmented with a candidate skill set. For each prompt, two groups of rollouts are produced: one \emph{visible} group with the skill in context, and one \emph{hidden} group without it. Standard Group Relative Policy Optimization (GRPO) updates the policy using advantage estimates computed from both groups jointly. The key design is a \textbf{randomized context}: each rollout independently samples whether to include each candidate skill, creating a natural experiment that enables causal attribution of skill effects.
+
+\paragraph{Recursive Learnability metric.} To determine whether a skill should be retained, withdrawn, or internalized, the paper defines \emph{Recursive Learnability} (RL-ability) as the advantage energy of the hidden rollout group:
+\begin{equation}
+  \mathrm{RL}(s) = 4\,\hat{p}^{-}(1 - \hat{p}^{-}),
+\end{equation}
+where $\hat{p}^{-}$ is the success probability of rollouts generated \emph{without} skill $s$ in context. When $\hat{p}^{-} \approx 0$, the skill has not been internalized and remains necessary (RL-ability $\approx 0$, retain). When $\hat{p}^{-} \approx 1$, the skill is fully internalized and can be safely removed (RL-ability $\approx 0$, withdraw). When $\hat{p}^{-} \approx 0.5$, the agent is actively learning from the skill (RL-ability $= 1$, maximum learning signal). This metric peaks precisely when the policy gradient has maximum variance---i.e., when the agent is at the steepest part of the learning curve for that skill.
+
+\paragraph{Outer loop: Bayesian skill withdrawal.} The outer loop evaluates each skill's lifecycle stage using a Bayesian bootstrap posterior over the hidden-group success rates. Rather than using a fixed threshold, the method maintains a posterior distribution $P(\hat{p}^{-} \mid \text{data})$ and withdraws a skill when $\Pr(\hat{p}^{-} > \tau_{\mathrm{withdraw}}) > 0.95$, where $\tau_{\mathrm{withdraw}}$ is a confidence threshold (default 0.85). The Bayesian bootstrap avoids parametric assumptions and naturally handles small sample sizes. Withdrawn skills are permanently removed from the context, freeing token budget for new candidates.
+
+\paragraph{Gibbs curriculum.} Task sampling follows a Gibbs distribution over per-task RL-ability scores:
+\begin{equation}
+  p(\text{task}_i) \propto \exp\bigl(\mathrm{RL}(\text{task}_i) / T\bigr),
+\end{equation}
+where temperature $T$ controls exploration--exploitation. This automatically prioritizes tasks where the agent is actively learning, avoiding wasted compute on already-mastered or currently-impossible tasks.
+
+Training uses Qwen-2.5-7B-Instruct as the base model across 12 agent benchmarks spanning code generation, web navigation, tool use, and mathematical reasoning.
+
+\subsection{Results}
+$\mathrm{R^2Orch}$ achieves \textbf{89.79\% IID average} across 12 benchmarks, leading all baselines including static orchestration (84.2\%), Voyager-style skill accumulation (86.1\%), and STILL-ALIVE (87.3\%). Key findings:
+
+\begin{itemize}
+  \item \textbf{Zero-skill deployment}: After internalization, $\mathrm{R^2Orch}$ removes all acquired skills from the context and still achieves 88.4\% average---only 1.4pp below the skill-augmented version. This demonstrates genuine policy internalization rather than mere in-context reliance.
+  \item \textbf{OOD generalization}: On 4 held-out benchmarks, $\mathrm{R^2Orch}$ achieves 82.6\% average (vs.\ 78.1\% for the best baseline), suggesting internalized skills transfer beyond training distributions.
+  \item \textbf{Skill lifecycle}: The Bayesian withdrawal correctly identifies and removes 73\% of initial skills by training end, with withdrawn skills showing $<$0.5pp performance impact when removed. Premature withdrawal (ablation with aggressive thresholds) causes $-3.2$pp degradation.
+  \item \textbf{Curriculum effect}: Gibbs curriculum improves over uniform sampling by $+1.8$pp on average, with the largest gains on tasks with high initial failure rates (up to $+4.1$pp on complex web navigation).
+  \item \textbf{Causal attribution}: The randomized context design enables statistically significant ($p < 0.01$) identification of skill effects, whereas observational baselines (no randomization) misattribute $>$30\% of skill impacts due to confounding with task difficulty.
+\end{itemize}
+
+\subsection{Limitations}
+The Bayesian withdrawal assumes skill effects are independent, ignoring potential skill--skill interactions (complementary or conflicting skills). The Recursive Learnability metric is defined only for binary outcomes (success/failure) and does not extend naturally to graded reward settings. All experiments use a single 7B model; whether the internalization dynamics change at larger scales is unknown. The 12-benchmark suite, while diverse, does not include long-horizon tasks ($>$20 steps) where skill interference may be more pronounced. The randomized context design doubles rollout cost compared to standard GRPO, and the paper does not quantify the total training compute overhead. No comparison with recent concurrent methods (RSIHub, AgentTrek) is provided.
+
+\subsection{Relevance to My Research}
+This paper makes a significant contribution to \textbf{continual learning for LLM agents} (Topic~3). The core insight---treating skill management as a causal inference problem via randomized context---provides a principled alternative to heuristic skill accumulation. The Recursive Learnability metric elegantly captures the learning dynamics: it is zero when a skill is either fully unknown or fully internalized, and maximal during active learning, directly corresponding to the variance of the policy gradient. The Bayesian withdrawal mechanism addresses a key gap in agent evolution: knowing \emph{when} to remove capabilities without catastrophic forgetting. The zero-skill deployment result (88.4\% without any skills in context) demonstrates that GRPO can genuinely internalize procedural knowledge into model weights, not merely learn to copy from in-context examples. This connects to broader questions about the relationship between in-context learning and weight-based learning in transformer agents.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Extending Recursive Learnability to Graded Rewards}
+\textbf{Gap:} The RL-ability metric $4\hat{p}^{-}(1-\hat{p}^{-})$ assumes binary success/failure outcomes. Many agent tasks produce graded rewards (partial credit on coding benchmarks, quality scores on generation tasks, multi-objective metrics). Binarizing these rewards loses information about skill utility at different quality thresholds.
+
+\textbf{Approach:} Generalize RL-ability to continuous rewards via the \emph{variance ratio}:
+\begin{equation}
+  \mathrm{RL}_{\mathrm{cont}}(s) = \frac{\mathrm{Var}[R \mid s \notin \text{context}]}{\mathrm{Var}[R \mid s \notin \text{context}] + \epsilon},
+\end{equation}
+normalized to $[0, 1]$ using a reference variance $\epsilon$ from fully-converged runs. Alternatively, use the Gini impurity of the reward distribution in the hidden group, which reduces to $4\hat{p}^{-}(1-\hat{p}^{-})$ in the binary case. The Gibbs curriculum and Bayesian withdrawal generalize naturally by replacing success counts with reward sufficient statistics. Evaluate on SWE-bench (graded by test pass rate) and creative writing benchmarks (LLM-judged quality scores) to measure whether graded RL-ability produces better curriculum ordering than binarized versions.
+
+\textbf{Feasibility:} High. The variance-based formulation requires only replacing Bernoulli posteriors with Normal-Gamma posteriors in the Bayesian withdrawal. The main risk is that reward variance may be dominated by task difficulty rather than skill utility, requiring per-task normalization.
+
+\subsection{Direction 2: Skill Interaction Modeling via Factorial Randomized Contexts}
+\textbf{Gap:} $\mathrm{R^2Orch}$ assumes skill effects are independent, randomizing each skill's inclusion independently. However, skills may interact: a ``chain-of-thought prompting'' skill and a ``code verification'' skill may be complementary (their combined effect exceeds the sum), or a ``verbose explanation'' skill and a ``concise output'' skill may conflict. Independent randomization cannot detect these interactions.
+
+\textbf{Approach:} Extend the randomized context to a fractional factorial design. For $k$ candidate skills, a full $2^k$ factorial is intractable, but a Resolution~IV fractional factorial ($2^{k-p}$ runs) can estimate all main effects and two-way interactions while aliasing only higher-order interactions. For $k = 8$ skills, this requires $2^{8-4} = 16$ context configurations per task. Estimate interaction effects $\delta_{ij}$ from the factorial design and use them to: (1)~identify complementary skill pairs that should be co-retained or co-withdrawn; (2)~detect conflicting pairs where one should be preferentially withdrawn; (3)~modify the Gibbs curriculum to sample skill \emph{combinations} rather than individual skills. Evaluate whether interaction-aware withdrawal reduces the $-3.2$pp degradation observed with aggressive withdrawal thresholds.
+
+\textbf{Feasibility:} Moderate. The factorial design increases rollout cost by a constant factor (16 configurations vs.\ 2 for independent randomization). The main challenge is statistical power: detecting interaction effects requires more samples per configuration than main effects, potentially requiring longer training runs. A sequential testing approach (first screen for large interactions, then refine) could improve efficiency.
+
+\subsection{Direction 3: Cross-Agent Skill Transfer via Federated Internalization}
+\textbf{Gap:} $\mathrm{R^2Orch}$ operates on a single agent in isolation. In multi-agent deployments (e.g., a coding agent, a research agent, and a planning agent), skills internalized by one agent may benefit others, but no mechanism exists for transferring internalized knowledge across agents without sharing raw training data or model weights.
+
+\textbf{Approach:} Design a federated skill internalization protocol. Each agent maintains its own skill library and RL-ability tracker. When an agent successfully internalizes a skill (Bayesian withdrawal triggered), it exports a \emph{skill distillation package}: (1)~the skill text, (2)~a curated set of (prompt, successful-rollout) pairs from the hidden group (demonstrating the internalized behavior without the skill in context), and (3)~the RL-ability trajectory showing the internalization curve. Recipient agents import the package as a new candidate skill and use the donor's internalization examples as warm-start demonstrations. The Bayesian withdrawal then evaluates whether the recipient can also internalize the skill. This creates a \emph{skill propagation network} where successfully internalized capabilities spread across the agent population without centralizing training.
+
+\textbf{Feasibility:} Moderate. The distillation package is lightweight (skill text + ${\sim}$50 rollout examples). The main challenge is that internalization dynamics may differ across agents with different base capabilities---a skill easily internalized by a coding-specialized agent may be much harder for a general-purpose agent. Adaptive import filtering based on the recipient's initial RL-ability estimate for the imported skill could address this.
+
+\section{Conclusion}
+Chen et al.\ present $\mathrm{R^2Orch}$, a principled framework for recursive self-improvement in LLM agent orchestration that treats skill management as a causal inference problem. The two-loop architecture---inner self-play GRPO with randomized contexts for policy improvement, outer Bayesian withdrawal for skill lifecycle management---achieves 89.79\% IID average across 12 benchmarks while demonstrating genuine skill internalization (88.4\% in zero-skill deployment). The Recursive Learnability metric provides an elegant bridge between learning theory and practical curriculum design, peaking precisely when the policy gradient has maximum variance. The Bayesian withdrawal correctly identifies and removes 73\% of skills without performance loss, directly addressing the skill bloat problem in current agent frameworks. The causal attribution via randomized contexts represents a methodological advance for the field, providing statistically rigorous skill evaluation where prior work relied on observational correlations. Key open questions include extending to graded rewards, modeling skill interactions, and enabling cross-agent skill transfer.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Chen et al.(2026)]{chen2026r2orch}
+Yuxiang Chen, Jiayi Pan, Yichi Zhang, Nicholas Tomlin, and Sergey Levine.
+\newblock $\mathrm{R^2Orch}$: Recursive Self-Improvement for Agent Orchestration via Self-Play within a Skill-Internalization Loop.
+\newblock \emph{arXiv preprint arXiv:2610.22740}, 2026.
+\end{thebibliography}
+
+\end{document}
