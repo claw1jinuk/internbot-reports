@@ -1,0 +1,116 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Think Less, Locally ---\\Local Preference Learning for Reasoning Compression}
+\author{Auto-generated Report}
+\date{November 4, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Modern reasoning LLMs (DeepSeek-R1, o1) produce extended chains-of-thought spanning thousands of tokens, with hard problems like AIME24/25 eliciting 13{,}000--15{,}000 tokens per problem. Yuan et al.~\cite{yuan2026loco} argue that this ``overthinking'' is a \emph{preference} problem rather than a capability problem: models re-derive answers through alternative methods, perform redundant cross-checks, and explore unnecessary tangents even after sufficient information exists to reach the correct answer. Existing compression methods operate globally---comparing full trajectories---or modify segments of existing traces. LoCo (Local Compression) proposes that effective compression requires \emph{state-level} decisions: identifying specific intermediate reasoning states where further deliberation is unnecessary, then learning to conclude at those points via local preference optimization.
+
+\subsection{Method}
+LoCo operates in three stages: overthink detection, verified continuation generation, and local DPO training.
+
+\paragraph{Stage 1: Step-level overthink detection.}
+Reasoning traces are segmented into steps $s_i$ at paragraph breaks. For each step, a \emph{step confidence} score is computed from the model's own token probabilities:
+\begin{equation}
+  c_i = \frac{1}{|T_i|}\sum_{\tau \in T_i} \max_{v \in \mathcal{V}} \pi_M(v \mid S_{<\tau}),
+\end{equation}
+where $T_i$ is the set of token positions in step $s_i$. A \emph{confidence volatility} captures oscillation:
+\begin{equation}
+  v_i = \frac{(c_i - c_{i-1})^2}{4}.
+\end{equation}
+Overthinking states are detected by thresholding: $\mathcal{O} = \{i : c_i \leq q_{25} \;\text{and}\; v_i \geq q_{75}^v\}$, where $q_{25}$ and $q_{75}^v$ are the 25th and 75th percentiles of confidence and volatility across the training set. The intuition is that low confidence combined with high volatility indicates the model is struggling unnecessarily---oscillating rather than progressing. A stronger judge model (Qwen3-30B) then re-verifies each candidate, retaining only states labeled ``overthink.''
+
+\paragraph{Stage 2: Verified continuation generation.}
+From each detected overthinking state $P_i$ (the frozen prefix up to step $i$), $k{=}8$ continuations are sampled:
+\begin{equation}
+  y_i^{(1)}, \ldots, y_i^{(k)} \sim \pi_M(\cdot \mid P_i).
+\end{equation}
+Among correct continuations, the shortest is selected as the chosen response $y_i^+$, and the original verbose continuation serves as the rejected response $y_i^-$. A strict shortness filter requires $|y_i^+| < |y_i^-|$.
+
+\paragraph{Stage 3: Local DPO training.}
+The filtered pairs form a dataset $\mathcal{D} = \{(P_i, y_i^+, y_i^-)\}$ with constraints: minimum 300-token savings ($\delta{=}300$), prompt cap $c_p{=}6{,}000$ tokens, continuation cap $c_r{=}12{,}000$ tokens, and at most $K{=}3$ pairs per question. Training uses standard DPO:
+\begin{equation}
+  \mathcal{L}_{\mathrm{DPO}} = -\mathbb{E}_{(x,y^+,y^-) \sim \mathcal{D}}\!\Bigl[\log \sigma\!\Bigl(\beta\Bigl[\log\frac{\pi_\theta(y^+|x)}{\pi_{\mathrm{ref}}(y^+|x)} - \log\frac{\pi_\theta(y^-|x)}{\pi_{\mathrm{ref}}(y^-|x)}\Bigr]\Bigr)\Bigr],
+\end{equation}
+with $\beta{=}0.1$. The critical difference from standard DPO is that both $y^+$ and $y^-$ share an \emph{identical frozen prefix} $P_i$---the preference is conditioned on a specific intermediate reasoning state, not on the full trajectory. The model learns \emph{when to stop deliberating} at each state, rather than which complete solution is globally better.
+
+Training uses LoRA (rank~256, $\alpha{=}512$, dropout~0.05) on DeepSeek-R1-Distill-Qwen-7B for 2~epochs with learning rate $10^{-5}$, cosine schedule, effective batch size~64, and max sequence length 14{,}336 tokens on 4$\times$H20 GPUs. Training data comprises 14{,}027 math questions (math14k) with 3~rollouts each.
+
+\subsection{Results}
+LoCo achieves 41.7--45.4\% token reduction on five math benchmarks while \emph{improving} accuracy on four of five:
+
+\begin{itemize}
+  \item \textbf{MATH-500}: 91.88\% $\to$ 91.80\% ($-0.08$pp), tokens 4{,}015 $\to$ 2{,}243 (\textbf{44.1\%} reduction).
+  \item \textbf{AMC23}: 90.31\% $\to$ 91.56\% ($+1.25$pp), tokens 6{,}285 $\to$ 3{,}663 (\textbf{41.7\%} reduction).
+  \item \textbf{Olympiad}: 61.33\% $\to$ 62.78\% ($+1.45$pp), tokens 8{,}972 $\to$ 4{,}968 (\textbf{44.6\%} reduction).
+  \item \textbf{AIME24}: 50.83\% $\to$ 54.17\% ($+3.34$pp), tokens 13{,}493 $\to$ 7{,}364 (\textbf{45.4\%} reduction).
+  \item \textbf{AIME25}: 37.92\% $\to$ 40.42\% ($+2.50$pp), tokens 15{,}134 $\to$ 8{,}291 (\textbf{45.2\%} reduction).
+\end{itemize}
+
+\paragraph{Cross-domain transfer.}
+Trained exclusively on math data, LoCo transfers to code generation: 36.3\% compression on MBPP (accuracy unchanged at 84.05\%), 24.7\% on LiveCodeBench ($+0.74$pp), and 23.4\% on CodeContests ($+2.13$pp). This suggests LoCo reshapes general reasoning preferences rather than injecting task-specific shortcuts.
+
+\paragraph{Baselines.}
+DAST achieves only 4.8--7.4\% compression on easier math benchmarks and \emph{increases} token count on AIME by 3.4--6.9\%. TokenSqueeze achieves 22.5--39.2\% compression but with consistent accuracy drops ($-0.35$ to $-2.09$pp). LoCo dominates both on the AUC metric (area under the accuracy-vs.-token-budget curve) across all 8~benchmarks.
+
+\paragraph{Critical ablation: local vs.\ global.}
+Global trajectory-level preference pairs achieve only 5.2--15.8\% compression versus LoCo's 41.7--45.4\%---a 3--8$\times$ difference. This demonstrates that state-aware local decisions are fundamentally superior to global trajectory comparisons for reasoning compression. Random and uniform cutpoint selection achieves comparable compression ratios (41--43\%) but \emph{degrades} accuracy by 1.9--2.5pp, validating that the confidence-volatility detector identifies the right compression points. Using external (GPT-5.4) continuations instead of self-generated ones yields 31.8--36.0\% compression with smaller accuracy gains, confirming the importance of distributional alignment.
+
+\subsection{Limitations}
+All experiments use a single 7B model; whether overthinking patterns and LoCo's effectiveness scale to 14B--70B+ models is unknown. The pipeline depends on a 4$\times$-larger judge model (Qwen3-30B) for overthink verification, introducing a significant external dependency. The confidence-volatility heuristic with fixed percentile thresholds will miss overthinking states that exhibit high-confidence redundancy (e.g., confidently re-deriving an already-established result). Step segmentation by paragraph breaks is crude and may not align with actual reasoning units. Training data is math-only; domain-specific training for code might close the compression gap (23--36\% on code vs.\ 41--45\% on math). No comparison with RL-based length penalties or process reward models is provided. The minimum 300-token savings threshold, percentile cutoffs, and $K{=}3$ pair cap are all fixed without sensitivity analysis. No human evaluation of reasoning quality beyond final-answer accuracy is conducted.
+
+\subsection{Relevance to My Research}
+This paper makes a direct contribution to \textbf{reinforcement learning and preference optimization} (Topic~2). LoCo reframes reasoning compression as a preference learning problem and introduces a key methodological innovation: conditioning DPO on intermediate reasoning states rather than full trajectories. The ``local'' framing---where both chosen and rejected continuations share a frozen prefix at a specific state---provides a finer-grained optimization signal than trajectory-level methods, yielding 3--8$\times$ better compression with accuracy improvements rather than degradation. The cross-domain transfer result (math training $\to$ code compression) suggests that preference learning can reshape general cognitive strategies (when to stop deliberating) rather than just task-specific behaviors. The connection to reward modeling is implicit but important: the confidence-volatility detector serves as a process-level reward signal identifying suboptimal reasoning states, complementing the outcome-level DPO signal. This state-conditioned preference learning paradigm could generalize beyond compression to other fine-grained behavioral modifications in reasoning models.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Process Reward Models for Overthink Detection}
+\textbf{Gap:} LoCo's overthink detection relies on a heuristic (confidence $\leq q_{25}$ and volatility $\geq q_{75}^v$) followed by an external judge. This two-stage pipeline is ad hoc: the percentile thresholds are arbitrary, the judge introduces a 4$\times$-larger model dependency, and high-confidence overthinking (confidently re-deriving known results) is systematically missed.
+
+\textbf{Approach:} Replace the heuristic detector and judge with a trained \emph{process reward model} (PRM) that scores each reasoning step's marginal contribution to reaching the correct answer. Define the ``overthink score'' of step $s_i$ as $o_i = \mathrm{PRM}(P_i) - \mathrm{PRM}(P_{i-1})$: a step is overthinked when $o_i \approx 0$ (no progress) or $o_i < 0$ (regression) despite the correct answer being reachable from $P_{i-1}$. Train the PRM via Monte Carlo rollouts: from each prefix $P_j$, sample $N$ completions and estimate $\hat{V}(P_j)$ as the fraction reaching the correct answer. Steps where $\hat{V}(P_i) \leq \hat{V}(P_{i-1}) + \epsilon$ are labeled as overthinking. This subsumes both the low-confidence and high-confidence overthinking patterns, requires no external judge, and provides a continuous rather than binary signal that can weight the DPO loss by overthink severity.
+
+\textbf{Feasibility:} High. PRM training via Monte Carlo estimation is well-established (Math-Shepherd, OmegaPRM). The main cost is the rollout budget for PRM training ($N \times$ steps $\times$ questions), but this is a one-time cost amortized across all subsequent LoCo-style training runs. The PRM can be the same size as the target model, eliminating the larger-judge dependency.
+
+\subsection{Direction 2: Multi-Granularity Local Preferences with Hierarchical DPO}
+\textbf{Gap:} LoCo operates at a single granularity---paragraph-delimited steps. However, overthinking occurs at multiple scales: within a single step (redundant sub-calculations), across a few steps (unnecessary verification loops), and across the full trace (exploring alternative solution paths after finding one). A single-granularity detector captures only one of these patterns.
+
+\textbf{Approach:} Implement a hierarchical preference learning framework with three levels: (1)~\emph{token-level}: identify redundant token spans within steps via attention entropy---high-entropy spans that don't change the final prediction are candidates for removal; (2)~\emph{step-level}: LoCo's existing confidence-volatility detection; (3)~\emph{block-level}: detect redundant multi-step blocks (e.g., ``let me verify this another way'') via embedding similarity between block outcomes and prior reasoning states. At each level, construct local preference pairs (shorter vs.\ longer at matched prefixes) and train with a multi-level DPO objective:
+\begin{equation}
+  \mathcal{L} = \lambda_{\mathrm{token}}\,\mathcal{L}_{\mathrm{DPO}}^{\mathrm{token}} + \lambda_{\mathrm{step}}\,\mathcal{L}_{\mathrm{DPO}}^{\mathrm{step}} + \lambda_{\mathrm{block}}\,\mathcal{L}_{\mathrm{DPO}}^{\mathrm{block}},
+\end{equation}
+with weights tuned on a validation set. This multi-granularity approach should capture overthinking patterns that single-level detection misses, potentially pushing compression beyond 50\% while maintaining accuracy.
+
+\textbf{Feasibility:} Moderate. Token-level and block-level detection require new heuristics or learned detectors. The multi-level DPO training may introduce optimization conflicts between granularities (e.g., token-level compression preferring different behaviors than block-level). Careful curriculum scheduling---training coarse-to-fine---may be necessary. The data construction cost scales linearly with the number of granularity levels.
+
+\subsection{Direction 3: Adaptive Compression via State-Conditioned Length Budgets}
+\textbf{Gap:} LoCo applies uniform compression pressure across all problems and all reasoning states. However, the optimal compression ratio is problem-dependent: easy problems (MATH-500) can tolerate aggressive compression, while hard problems (AIME25) may need more deliberation at critical junctures. LoCo's fixed preference training cannot adapt to per-problem difficulty at inference time.
+
+\textbf{Approach:} Augment the model with a lightweight \emph{length budget predictor}: a small MLP head attached to the model's hidden state at the beginning of generation that predicts the optimal token budget $B^*$ for a given problem. Train this predictor on (problem, optimal-length) pairs collected during LoCo's data construction phase---for each problem, the shortest correct rollout across all sampled continuations provides the target length. At inference time, the predicted budget $\hat{B}$ conditions generation via a budget-aware KV cache: when the generated token count approaches $\hat{B}$, the model receives an explicit ``budget remaining: $k$ tokens'' signal appended to its context, encouraging it to conclude. Combine this with LoCo's local preference training by adding a budget-conditioned term to the DPO loss that upweights compression at states where the remaining budget is small. This creates an adaptive system: easy problems get tight budgets and aggressive compression, while hard problems get generous budgets and selective compression only at detected overthinking states.
+
+\textbf{Feasibility:} High. The budget predictor is a simple regression head trainable alongside LoCo with minimal overhead. The ``budget remaining'' signal is a prompt engineering technique requiring no architectural changes. The main risk is budget prediction accuracy---underestimating the required budget for a hard problem would force premature conclusions. A calibration procedure using held-out problems of known difficulty could mitigate this, and conservative budgets (predicting $1.2\times$ the estimated optimal) provide a safety margin.
+
+\section{Conclusion}
+Yuan et al.\ introduce LoCo, a local preference learning framework that reframes reasoning compression as a state-conditioned preference optimization problem. The three-stage pipeline---confidence-volatility overthink detection, verified continuation generation, and local DPO training---achieves 41.7--45.4\% token reduction on math benchmarks while improving accuracy by up to $+3.34$pp (AIME24), and transfers cross-domain to code with 23.4--36.3\% compression. The critical innovation is conditioning DPO on intermediate reasoning states rather than full trajectories: local preference pairs from frozen prefixes yield 3--8$\times$ better compression than global trajectory comparisons. The ablation showing that random cutpoints achieve comparable compression ratios but degrade accuracy validates that detecting the \emph{right} compression points is essential. LoCo demonstrates that overthinking in reasoning models is a learnable preference that can be corrected with fine-grained optimization signals, opening a new direction for efficient inference through behavioral rather than architectural modifications.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Yuan et al.(2026)]{yuan2026loco}
+Muyao Yuan, Liyan Xu, Weizhan Zhang, Muyan Jiao, Jiangnan Li, Jinchao Zhang, and Jie Zhou.
+\newblock Think Less, Locally: Local Preference Learning for Reasoning Compression.
+\newblock \emph{arXiv preprint arXiv:2611.04814}, 2026.
+\end{thebibliography}
+
+\end{document}
