@@ -1,0 +1,117 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Koopman Generative Operators\\for Efficient Probabilistic Time-Series Forecasting}
+\author{Auto-generated Report}
+\date{November 5, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Probabilistic time-series forecasting requires modeling the full predictive distribution $p(\mathbf{x}_{L+1:L+H} \mid \mathbf{x}_{1:L})$, not just point estimates. Existing approaches face a fundamental trade-off: latent dynamical models (K2VAE, D3VAE) impose structural priors via state-space or Koopman operators but rely on restrictive generation mechanisms (e.g., Gaussian VAE decoders) that limit distributional expressiveness, while modern generative models (TimeGrad, TSDiff, CSDI, Sundial) achieve high expressiveness but require 50--1000 iterative denoising or ODE-solver steps, making inference slow. Marshanski et al.~\cite{marshanski2026kgo} propose KGO (Koopman Generative Operators), which decouples temporal dynamics from uncertainty generation using two distinct Koopman operators, achieving expressive probabilistic forecasts with \emph{single-step} inference.
+
+\subsection{Method}
+KGO consists of four stages: representation learning, Koopman temporal rollout, dual decoding (deterministic + probabilistic), and adaptive fusion.
+
+\paragraph{Representation learning.}
+Input series $\mathbf{x}_{1:L}$ undergo RevIN normalization (per-variable), non-overlapping patch partitioning into $N = \lfloor L/P \rfloor$ patches, and encoding via stacked sLSTM blocks to produce latent sequence $\mathbf{Z} = [\mathbf{z}_1, \ldots, \mathbf{z}_N]$. The sLSTM provides $O(N)$ complexity versus $O(N^2)$ for Transformers.
+
+\paragraph{Koopman Patch Embedding (KoPE).}
+The final encoder state $\mathbf{z}_N$ is rolled out via a learned linear Koopman operator:
+\begin{equation}
+  \hat{\mathbf{z}}_{N+i} = \mathbf{K}^{i-1}\,\mathbf{z}_N, \quad i = 1, \ldots, M,
+\end{equation}
+where $\mathbf{K} \in \mathbb{R}^{D \times D}$ is orthogonally initialized and constrained via spectral normalization $\|\mathbf{K}\|_2 \leq 1$ for rollout stability. This decouples temporal evolution from uncertainty modeling: KoPE handles deterministic extrapolation while the generative decoder handles stochasticity.
+
+\paragraph{Koopman Flow Matching (KoFM).}
+The probabilistic decoder replaces iterative transport with a closed-form matrix-exponential flow. Given noise $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ and interpolation time $\tau \sim \mathcal{U}[0,1]$:
+\begin{equation}
+  \mathbf{x}^{(\tau)}_{N+i} = (1 - \tau)\,\boldsymbol{\epsilon} + \tau\,\mathbf{x}_{N+i}
+\end{equation}
+is the standard conditional flow matching interpolation. The interpolated input is lifted via a linear projection with Adaptive Layer Normalization (AdaLN) conditioned on KoPE latents $\hat{\mathbf{z}}_{N+i}$, then transported:
+\begin{equation}
+  \hat{\mathbf{z}}^{(1)}_{N+i} = e^{(1-\tau)\mathbf{A}}\,\hat{\mathbf{z}}^{(\tau)}_{N+i} + (1-\tau)\,\mathbf{b},
+\end{equation}
+where $\mathbf{A} \in \mathbb{R}^{D \times D}$ is the learned Koopman generator and $\mathbf{b} \in \mathbb{R}^D$ is a learned offset, both shared across patches. The matrix exponential $e^{(1-\tau)\mathbf{A}}$ provides the exact solution to the linear flow ODE, eliminating iterative sampling entirely. At inference ($\tau{=}0$), $e^{\mathbf{A}}$ is cached after training, reducing generation to a single matrix-vector product per sample.
+
+\paragraph{Deterministic decoder (ResMLP).}
+A residual MLP with GELU activations and a linear skip connection provides point forecasts: $\hat{\mathbf{x}}^{\mathrm{det}}_{N+i} = \mathrm{MLP}(\tilde{\mathbf{z}}_{N+i}) + \mathbf{W}_{\mathrm{res}}\,\tilde{\mathbf{z}}_{N+i}$.
+
+\paragraph{Adaptive Uncertainty Gate (AUG).}
+A lightweight encoder-router produces per-variable, per-horizon gating weights $g^h \in [0,1]$ (via Gumbel-Softmax during training):
+\begin{equation}
+  \hat{\mathbf{x}}_{L+h} = (1 - g^h)\,\hat{\mathbf{x}}^{\mathrm{det}}_{L+h} + g^h\,\hat{\mathbf{x}}^{\mathrm{prob}}_{L+h}.
+\end{equation}
+The gate conditions on raw historical context rather than encoded representations, justified by the data processing inequality. Stochastic contributions empirically increase at later forecast horizons, consistent with growing uncertainty.
+
+\paragraph{Training objective.}
+A combined CRPS loss:
+\begin{equation}
+  \mathcal{L} = \tfrac{1}{2}\bigl[\mathbb{E}\|\hat{\mathbf{X}} - \mathbf{X}^*\|_1 - \tfrac{1}{2}\mathbb{E}\|\hat{\mathbf{X}} - \hat{\mathbf{X}}'\|_1\bigr] + \tfrac{1}{2|\mathcal{Q}|}\sum_{q \in \mathcal{Q}} \rho_q(\mathbf{X}^* - \hat{\mathbf{X}}_q),
+\end{equation}
+combining an energy score (L1~accuracy minus sample repulsion) with quantile losses $\rho_q$ at levels $\mathcal{Q}$.
+
+\subsection{Results}
+Evaluated on 17 benchmark configurations (9~long-term, 8~short-term from ProbTS), KGO achieves:
+
+\begin{itemize}
+  \item \textbf{Long-term}: Best CRPS on 7/9 datasets, best NMAE on 9/9. Notable improvements over K2VAE: $-27.6\%$ CRPS on ETTh2-L, $-25.9\%$ on Weather-L, $-16.4\%$ on ETTm2-L and ILI-L.
+  \item \textbf{Short-term}: Best CRPS on 6/8 datasets, best NMAE on 7/8. Up to $-24.6\%$ CRPS improvement (ETTm2-S). KGO underperforms on Solar-S (CRPS 0.456 vs.\ K2VAE 0.367).
+  \item \textbf{Foundation models}: KGO (per-dataset trained) beats zero-shot TiRex, Chronos-2, and Sundial on 5/6~datasets, with Weather showing the largest gap ($-31.0\%$ CRPS vs.\ Sundial).
+  \item \textbf{Inference speed}: 11\,ms/window for 100 trajectories---$2.5\times$ faster than K2VAE (27\,ms), $\sim$35$\times$ faster than Sundial (387\,ms), $\geq$25$\times$ faster than iterative generative baselines.
+  \item \textbf{Memory}: 0.11\,GB average peak GPU usage.
+\end{itemize}
+
+\paragraph{Ablations.}
+Averaged across 36 long-term dataset-horizon pairs: removing KoPE (using last-patch or context pooling) degrades CRPS by 16.9\%, confirming the Koopman rollout is the most critical component. Replacing KoFM with normalizing flows or VAE degrades CRPS by 9.4\% and 7.2\% respectively. sLSTM outperforms Transformer encoder by 4.7\% in CRPS (with linear vs.\ quadratic complexity). AUG provides a consistent 2.1\% improvement over conditioning-based coupling. Spectral analysis of the learned $\mathbf{K}$ recovers daily and weekly cycles, confirming meaningful temporal structure.
+
+\subsection{Limitations}
+KGO uses channel independence, preventing cross-variate dependency modeling---likely explaining weaker performance on Traffic and Solar datasets with strong inter-variable correlations. The foundation model comparison is asymmetric (per-dataset trained vs.\ zero-shot). Parameter counts and FLOPs are not reported, making the efficiency claim incomplete. The affine transport $e^{\mathbf{A}}\mathbf{z} + \mathbf{b}$ maps Gaussian noise through a linear transformation, meaning the latent distribution is Gaussian; all distributional expressiveness must come from the nonlinear Lift/Reconstruction and decoder stages, which may limit modeling of heavy-tailed or multimodal forecast distributions. The spectral norm constraint $\|\mathbf{K}\|_2 \leq 1$ prevents modeling explosive or non-stationary dynamics. Training cost is not reported. No statistical significance tests appear in the main tables.
+
+\subsection{Relevance to My Research}
+This paper directly addresses \textbf{time series forecasting with foundation model connections} (Topic~5). KGO's central contribution---decoupling temporal dynamics from uncertainty generation via two Koopman operators---offers a principled alternative to the dominant approach of applying Transformers or diffusion models to time series. The single-step inference via cached matrix exponential achieves 25--50$\times$ speedups over iterative generative methods while maintaining or improving forecast quality, establishing a new Pareto frontier for probabilistic forecasting. The Koopman framework provides theoretical grounding (spectral analysis recovering temporal periodicities, exact log-density evaluation) that purely data-driven approaches lack. The strong results against foundation models (Chronos-2, Sundial, TiRex) suggest that structured inductive biases can compensate for massive pre-training data, informing the design of future time-series foundation models.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Cross-Variate Koopman Operators for Multivariate Forecasting}
+\textbf{Gap:} KGO's channel-independent design cannot model cross-variate dependencies, leading to weaker performance on datasets with strong inter-variable correlations (Traffic, Solar). Modern multivariate forecasters (iTransformer, Crossformer) demonstrate that cross-variate attention improves accuracy on these datasets.
+
+\textbf{Approach:} Replace the per-variate Koopman operator $\mathbf{K} \in \mathbb{R}^{D \times D}$ with a block-structured multivariate operator $\mathbf{K}_{\mathrm{mv}} \in \mathbb{R}^{CD \times CD}$ where $C$ is the number of variates. To manage the $O(C^2 D^2)$ parameter count, impose a \emph{Kronecker structure}: $\mathbf{K}_{\mathrm{mv}} = \mathbf{K}_{\mathrm{cross}} \otimes \mathbf{K}_{\mathrm{temp}}$, where $\mathbf{K}_{\mathrm{cross}} \in \mathbb{R}^{C \times C}$ captures cross-variate couplings and $\mathbf{K}_{\mathrm{temp}} \in \mathbb{R}^{D \times D}$ handles temporal evolution. The Kronecker structure ensures $(\mathbf{K}_{\mathrm{cross}} \otimes \mathbf{K}_{\mathrm{temp}})^i = \mathbf{K}_{\mathrm{cross}}^i \otimes \mathbf{K}_{\mathrm{temp}}^i$, preserving the efficient matrix-power rollout. Apply separate spectral norm constraints to each factor. The encoder pools cross-variate information through a lightweight attention layer before the sLSTM, providing a multivariate context for the Koopman rollout.
+
+\textbf{Feasibility:} High. The Kronecker factorization keeps parameter count at $O(C^2 + D^2)$ instead of $O(C^2 D^2)$, and the efficient Kronecker-vector product enables rollout in $O(CD)$ per step. The main risk is that the Kronecker assumption may be too rigid for complex cross-variate structures; a low-rank correction $\mathbf{K}_{\mathrm{mv}} = \mathbf{K}_{\mathrm{cross}} \otimes \mathbf{K}_{\mathrm{temp}} + \mathbf{U}\mathbf{V}^\top$ could relax this while keeping complexity manageable.
+
+\subsection{Direction 2: Nonlinear Koopman Transport via Deep Equilibrium Flows}
+\textbf{Gap:} KoFM's affine transport $e^{\mathbf{A}}\mathbf{z} + \mathbf{b}$ maps Gaussian noise to a Gaussian latent distribution. While the nonlinear Lift/Reconstruction stages add expressiveness, the core transport remains linear, potentially limiting the model's ability to capture heavy-tailed or multimodal forecast distributions (e.g., regime-switching financial series, bimodal weather patterns).
+
+\textbf{Approach:} Replace the single linear transport with a \emph{deep equilibrium Koopman flow}: define the transport as the fixed point of an implicit layer $\mathbf{z}^* = \sigma(\mathbf{A}\,\mathbf{z}^* + \mathbf{W}\,\hat{\mathbf{z}}^{(\tau)} + \mathbf{b})$, where $\sigma$ is a nonlinear activation. The fixed point can be found via Anderson acceleration in 5--10 iterations, and the Jacobian-free implicit differentiation (as in DEQ models) enables memory-efficient backpropagation. This preserves the structural benefits of the Koopman framework (the learned $\mathbf{A}$ still admits spectral interpretation) while allowing nonlinear transport maps. Importantly, the fixed point can be pre-computed and cached at inference time for a fixed $\hat{\mathbf{z}}^{(\tau)}$ conditioning, maintaining the single-step generation property. Evaluate on financial datasets with known regime-switching behavior and synthetic multimodal targets.
+
+\textbf{Feasibility:} Moderate. DEQ solvers are well-established but add complexity to training (convergence monitoring, Jacobian regularization). The 5--10 fixed-point iterations at inference are more expensive than the single matrix-vector product but still far cheaper than 50--1000 diffusion steps. The main risk is training instability from the implicit layer, which may require careful spectral norm scheduling of $\mathbf{A}$.
+
+\subsection{Direction 3: Pre-Trained Koopman Foundation Model via Dataset-Agnostic Spectral Priors}
+\textbf{Gap:} KGO is trained per-dataset, requiring separate models for each forecasting task. Foundation models (Chronos-2, Sundial, TimesFM) amortize training cost across datasets but lack KGO's structured temporal modeling. No Koopman-based foundation model exists.
+
+\textbf{Approach:} Pre-train a universal KGO on a large-scale multi-domain time-series corpus (e.g., the Monash, LibCity, and LOTSA repositories, totaling $>$100B time points). The key challenge is that the optimal Koopman operator $\mathbf{K}$ differs across datasets (different periodicities, dynamics). Address this via \emph{spectral priors}: initialize $\mathbf{K}$ as a block-diagonal matrix in the eigendecomposition, where each block corresponds to a canonical frequency (hourly, daily, weekly, monthly, yearly). During pre-training, the model learns to activate relevant spectral blocks via a lightweight frequency router conditioned on the input series' estimated spectral density. At fine-tuning or zero-shot inference, the router selects appropriate temporal dynamics without retraining $\mathbf{K}$ from scratch. The KoFM generator $\mathbf{A}$ is shared across datasets (as it models noise-to-data transport, not temporal dynamics), enabling direct transfer. Evaluate zero-shot against Chronos-2 and Sundial on held-out domains.
+
+\textbf{Feasibility:} Moderate. The spectral prior initialization and frequency routing are architecturally simple. The main challenges are: (1)~scaling sLSTM to the 100B+ token pre-training regime (unknown whether sLSTM scales as well as Transformers at this scale); (2)~the per-dataset spectral characteristics of $\mathbf{K}$ may not transfer well even with routing; (3)~engineering the multi-domain data pipeline. A staged approach---pre-train on a diverse 10B-token subset, then evaluate zero-shot transfer---would test feasibility before full-scale investment.
+
+\section{Conclusion}
+Marshanski et al.\ present KGO, a probabilistic time-series forecasting framework that decouples temporal dynamics (Koopman operator $\mathbf{K}$ for latent rollout) from uncertainty generation (Koopman generator $\mathbf{A}$ for single-step flow transport). The cached matrix exponential $e^{\mathbf{A}}$ eliminates all iterative sampling, achieving 25--50$\times$ inference speedups over diffusion and flow-matching baselines while improving CRPS on 13/17 benchmark configurations. The ablations confirm that KoPE (16.9\% degradation without) and KoFM (7.2--9.4\% degradation vs.\ VAE/normalizing flow alternatives) are the most impactful components. The spectral analysis of learned $\mathbf{K}$ recovering temporal periodicities provides interpretability absent from purely data-driven approaches. Key limitations---channel independence, linear transport expressiveness, and missing parameter counts---point to clear improvement directions. KGO establishes a new efficiency-quality Pareto frontier for probabilistic forecasting and demonstrates that structured Koopman inductive biases can rival or exceed both purpose-built probabilistic models and large-scale foundation models.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Marshanski et al.(2026)]{marshanski2026kgo}
+Raz Marshanski, Liran Nochumsohn, Mayank Jauhari, Boris~N.\ Oreshkin, and Omri Azencot.
+\newblock Koopman Generative Operators for Efficient Probabilistic Time-Series Forecasting.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2026.
+\end{thebibliography}
+
+\end{document}
