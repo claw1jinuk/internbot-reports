@@ -1,0 +1,94 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Fast and Exact Relative-Position\\Attention via Structure-Aware Kernels}
+\author{Auto-generated Report}
+\date{November 7, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Relative-position attention mechanisms (Shaw, Transformer-XL, DeBERTa, T5) augment attention scores with learnable terms depending on the relative distance between tokens. Standard implementations materialize the full $N \times N$ bias matrix in GPU HBM, reintroducing the quadratic memory-bandwidth bottleneck that FlashAttention specifically eliminated for content-based attention. At 8K tokens, a Shaw attention baseline uses 14{,}000\,MiB for the forward pass alone. Existing workarounds either materialize the full bias matrix ($O(N^2)$ memory) or use per-score callback mechanisms (FlexAttention/FlashInfer) that cause atomic contention in the backward pass and fail correctness checks for DeBERTa at $\geq$4K tokens. Boychev et al.~\cite{boychev2026sak} propose structure-aware kernels that achieve \emph{exact} computation of relative-position attention with up to 21$\times$ speedup and 63$\times$ memory reduction by exploiting structural properties of bias matrices.
+
+\subsection{Method}
+The paper unifies four relative-position mechanisms into a single canonical score equation:
+\begin{equation}
+  S_{ij} = \tau\bigl(\mathbf{q}_i^\top \mathbf{k}_j + \mathbf{q}_i^\top \mathbf{a}^Q_{\phi(i,j)} + \mathbf{k}_j^\top \mathbf{a}^K_{\phi(i,j)} + b_{\phi(i,j)}\bigr) + M_{ij},
+\end{equation}
+where $\mathbf{a}^Q_r, \mathbf{a}^K_r \in \mathbb{R}^d$ are learned relation vectors, $b_r$ is a learned scalar bias, $\phi(i,j)$ maps token pairs to relation row indices, $\tau$ is the scaling factor, and $M_{ij}$ is the causal mask. Shaw uses clipped offsets with $\Delta{=}256$ and $\mathbf{a}^Q$ only; DeBERTa uses both $\mathbf{a}^Q$ and $\mathbf{a}^K$ with $\tau{=}(3d)^{-1/2}$; T5 uses only scalar biases with log-bucketed offsets; Transformer-XL uses identity offset maps with $\mathbf{a}^Q$ and $b$.
+
+The ``structure-aware'' kernels exploit three properties of these bias matrices:
+
+\paragraph{Property 1: Reachable projection ranges.}
+A group of $G$ consecutive queries accesses only $N{+}G{-}1$ contiguous relation rows, not the full $2N{-}1$ rows. Group projections $\mathbf{Z}^Q_g = \mathbf{Q}_g \cdot (\mathbf{A}^Q_{\Omega_g})^\top$ are pre-computed before the tiled loop, restricting projection work to the reachable subset. With $G{=}128$ and $N{=}8$K, this adds only 1.6\% column overhead while nearly halving both projection work and HBM storage.
+
+\paragraph{Property 2: Constant-range reuse (saturation).}
+For clipped/bucketed maps with saturation limit $\Delta \ll N$, tiles where all offsets satisfy $|\delta| \geq \Delta$ map every pair to a single relation row. Instead of per-score lookups, the kernel broadcasts one pre-computed entry per query and one per key. Detection requires only two comparisons on tile-boundary offsets. The fraction of non-saturated tiles is $(2\Delta{-}1)/N$, approaching zero as $N$ grows.
+
+\paragraph{Property 3: Atomic-free gradient accumulation.}
+The backward pass uses a two-pass schedule where each query tile is assigned to a single thread block. Score gradients are accumulated by offset $\delta$ into on-chip buffers, ensuring each entry has exactly one writer. This eliminates the $O(N^2)$ atomic additions that plague FlexAttention's backward pass and guarantees deterministic summation order.
+
+The forward pass integrates these properties into a FlashAttention-style tiled loop: base scores $\tau \cdot \mathbf{Q}_I \mathbf{K}_J^\top$ are computed first, then relation terms are added on-chip using either broadcast (saturated tiles) or per-element lookup (non-saturated tiles), followed by online softmax. For T5's log-bucketed maps, buckets are expanded into $2\Delta{+}1$ rows by duplication, replacing index lookups with clipping; gradients are reduced by summing duplicated columns back into buckets in deterministic order.
+
+Implementation uses Triton for cross-architecture portability, with kernel specialization at compile time for active terms, map type, masking mode, and precision (FP16/BF16). Integration is provided as drop-in replacement for PyTorch SDPA, compatible with \texttt{torch.compile}.
+
+\subsection{Results}
+\paragraph{Attention-level throughput (H200, FP16, 8K tokens).}
+Speedups over the fastest production baseline: Shaw 6.4$\times$/21$\times$ (forward/backward), DeBERTa 3.7$\times$/7.1$\times$, T5 4.6$\times$/13$\times$, TXL 1.8$\times$/2.0$\times$. On RTX PRO 6000: Shaw reaches 15$\times$/19$\times$. Peak memory for Shaw forward drops from 14{,}000\,MiB to 222\,MiB (\textbf{63$\times$} reduction).
+
+\paragraph{End-to-end applications.}
+Parakeet-TDT-0.6B speech transcription: 1.8$\times$ throughput improvement (613$\to$1{,}103 RTFx) with 2.4$\times$ memory reduction (27$\to$11\,GiB) at identical 2.89\% WER. Canary-1B fine-tuning: enables training at 15--18 minute audio windows where NeMo SDPA runs out of memory; at 9\,min windows, 1.36$\times$ step-time speedup. DeBERTa-v3 on BIGPATENT at 4K tokens: 2.39$\times$ step-time speedup with 3.8$\times$ memory reduction (27$\to$7.1\,GiB), accuracy maintained at 67.6\%.
+
+\paragraph{Ablations.}
+Pre-computed projections are the most impactful component for speed (2.0--5.4$\times$ slowdown without them) but trade memory for speed. Atomic-free gradients are critical for backward speed (2.9--4.4$\times$ slowdown without). Reachable ranges and saturation have modest individual contributions (1.0--1.5$\times$) but compound at longer sequences. An optional recomputation mode trades 1.1$\times$ slowdown for 0.42--0.50$\times$ memory reduction.
+
+\subsection{Limitations}
+Identity offset maps (Transformer-XL) remain $O(N^2)$ in projection work and storage because $R = 2N{-}1$, limiting speedups to 1.8--2.0$\times$. \textbf{RoPE is not supported}---the dominant position encoding in modern LLMs (LLaMA, Mistral, Qwen)---because RoPE applies multiplicative rotations to Q/K rather than additive bias terms. DeBERTa forward memory actually increases vs.\ FlexAttention (804 vs.\ 48\,MiB at 8K tokens) due to pre-computed projections for both $\mathbf{a}^Q$ and $\mathbf{a}^K$. Long-audio WER degrades from 3.73\% (30s) to 6.40\% (18\,min) in Canary-1B experiments without analysis of whether this is a model or training stability issue. No comparison with approximate attention methods (linear attention, sparse attention). The $<$3\,minute one-time Triton compilation cost is non-trivial for rapid prototyping. No architecture-specific optimizations (warp specialization, async bulk transfers) are exploited, leaving performance headroom on Hopper/Blackwell GPUs.
+
+\subsection{Relevance to My Research}
+This paper makes a direct contribution to \textbf{LLM efficiency and inference optimization} (Topic~1). The core insight---that relative-position bias matrices have exploitable structure (reachable ranges, saturation, deterministic gradient sharding)---provides a principled framework for fusing position-dependent attention terms into FlashAttention-style tiled computation without any approximation. The 6.4--21$\times$ speedups and up to 63$\times$ memory reduction for Shaw/DeBERTa/T5 establish that the quadratic memory bottleneck of relative-position attention is an implementation artifact, not a fundamental limitation. The atomic-free backward pass eliminates a key correctness issue (FlexAttention's non-deterministic atomics) that affects training reproducibility. While RoPE exclusion limits direct impact on the most widely-deployed LLMs, the framework applies to the growing ecosystem of speech models (Parakeet, Canary, Whisper variants), encoder models (DeBERTa, T5), and any future architecture adopting additive position biases. The Triton-based implementation strategy---compile-time kernel specialization with cross-architecture portability---offers a reusable template for other structured-attention optimizations.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Extending Structure-Aware Kernels to RoPE via Linearized Rotation Decomposition}
+\textbf{Gap:} RoPE is the dominant position encoding in modern LLMs but falls outside this framework because it applies multiplicative rotations $R_\theta(i) \mathbf{q}_i$ and $R_\theta(j) \mathbf{k}_j$ rather than additive biases. The resulting score $\mathbf{q}_i^\top R_\theta(i{-}j) \mathbf{k}_j$ depends on the offset $\delta = i{-}j$ but through a rotation matrix, not a scalar or vector bias.
+
+\textbf{Approach:} Decompose the RoPE rotation $R_\theta(\delta)$ into a low-rank outer product plus residual: for each frequency pair $(\cos\theta_m\delta, \sin\theta_m\delta)$, the 2$\times$2 rotation block contributes a rank-2 term to the score. The key observation is that for clipped offsets $|\delta| \leq \Delta$, the set of distinct rotation matrices is finite ($2\Delta{+}1$ entries), analogous to the finite relation rows in Shaw/DeBERTa. Pre-compute the rotation-projected keys $\tilde{\mathbf{k}}_j^{(\delta)} = R_\theta(\delta)\mathbf{k}_j$ for offsets within $[-\Delta, \Delta]$ and use the saturation property: for $|\delta| > \Delta$, approximate $R_\theta(\delta) \approx R_\theta(\Delta \cdot \mathrm{sign}(\delta))$ (clipped rotation). This introduces a controlled approximation for distant tokens but is exact within the $\Delta$-window. Since distant tokens contribute exponentially less to attention (after softmax), the approximation error is bounded by the attention mass outside $\Delta$. Implement within the existing tiled kernel framework using the saturation detection mechanism. Evaluate on LLaMA-3 and Mistral, measuring both speedup and perplexity degradation as a function of $\Delta$.
+
+\textbf{Feasibility:} Moderate. The clipped-rotation approximation is theoretically sound (bounded error for distant tokens) but requires validating that $\Delta \ll N$ suffices in practice. For $\Delta{=}512$ and $d/2{=}64$ frequency pairs, each tile needs $1024 \times 64 = 65$K rotation entries, which may strain SRAM. A frequency-grouped approach (applying clipping only to high-frequency components that decorrelate faster) could reduce storage. The main risk is that RoPE's long-range phase coherence at low frequencies may require large $\Delta$ for zero degradation.
+
+\subsection{Direction 2: Joint Quantization-Aware Structure-Aware Attention}
+\textbf{Gap:} The current method operates in FP16/BF16 precision. As LLM serving moves toward FP8 and INT4 inference (via GPTQ, AWQ, FP8 KV caches), the interaction between quantized Q/K representations and the relative-position bias terms has not been analyzed. Quantization noise in Q/K could amplify or interact with the bias terms in unpredictable ways, and the structure-aware properties (saturation, reachable ranges) may enable quantization-aware optimizations not possible with standard attention.
+
+\textbf{Approach:} Extend the structure-aware kernel to natively support FP8 Q/K with FP16 bias computation. The key insight is that the bias terms $\mathbf{q}_i^\top \mathbf{a}^Q_r$ involve high-precision learned relation vectors that can absorb quantization noise: compute the base content score $\mathbf{q}_i^\top \mathbf{k}_j$ in FP8 (fast) but accumulate the bias terms $\mathbf{q}_i^\top \mathbf{a}^Q_r + b_r$ in FP16 (precise), then add both in FP16 before softmax. This ``mixed-precision structured attention'' preserves bias precision while leveraging FP8 tensor cores for the dominant $O(N^2 d)$ content-based computation. Additionally, for saturated tiles where all pairs map to a single relation row, the bias contribution is a constant offset to the entire tile's scores---this constant can be added \emph{after} the FP8 dot product without any precision loss, further optimizing the common case. Measure end-to-end throughput and accuracy on DeBERTa (which benefits most from structure-aware kernels) with W8A8 and W4A8 quantization schemes.
+
+\textbf{Feasibility:} High. FP8 tensor core support is native on Hopper/Blackwell. The mixed-precision accumulation is straightforward in Triton (cast products to FP16 before accumulation). The saturation-based optimization (constant bias after FP8 dot product) requires only minor kernel modifications. The main risk is that FP8 quantization noise in Q/K may degrade attention quality more than in standard (no-bias) attention, since the bias terms effectively amplify small Q/K value differences.
+
+\subsection{Direction 3: Adaptive Saturation Thresholds for Long-Context Scaling}
+\textbf{Gap:} The current saturation mechanism uses a fixed $\Delta$ determined by the model architecture (e.g., Shaw's $\Delta{=}256$). For very long sequences ($N > 100$K), the fraction of non-saturated tiles is $(2\Delta{-}1)/N < 0.5\%$, meaning $>$99.5\% of tiles use the efficient broadcast path. However, the 0.5\% of non-saturated tiles on the diagonal band still require full per-element lookups. For extremely long sequences, even this small fraction dominates latency because the non-saturated tiles are the largest (they span the full $\Delta$-width band).
+
+\textbf{Approach:} Introduce \emph{adaptive $\Delta$ scheduling}: during training, gradually increase $\Delta$ from a small initial value to the model's maximum, allowing the model to learn position representations that concentrate information at short distances. At inference, use a learned or calibrated $\Delta_{\mathrm{eff}} < \Delta_{\mathrm{max}}$ that clips the relation lookup window more aggressively, increasing the saturated fraction from 99.5\% to 99.9+\%. The clipping introduces approximation, but if the model was trained with increasing $\Delta$, it learns to concentrate position information within shorter ranges. Implement a ``$\Delta$-annealing'' schedule analogous to learning rate warmup: start training with $\Delta{=}32$, increase by 32 every 1000 steps until reaching $\Delta_{\mathrm{max}}{=}256$. At inference, calibrate $\Delta_{\mathrm{eff}}$ by measuring attention-weighted bias magnitude as a function of offset on a validation set, setting $\Delta_{\mathrm{eff}}$ to capture 99\% of the total bias mass. Evaluate throughput gains at 128K+ tokens and accuracy-vs-$\Delta_{\mathrm{eff}}$ tradeoffs.
+
+\textbf{Feasibility:} High. The $\Delta$-annealing schedule requires only modifying the clipping threshold during training, with no architectural changes. Calibration of $\Delta_{\mathrm{eff}}$ at inference is a lightweight one-time computation. The main risk is that reducing $\Delta_{\mathrm{eff}}$ at inference may degrade performance on tasks requiring precise long-range position discrimination (e.g., counting, structured data extraction), even if average perplexity is unaffected.
+
+\section{Conclusion}
+Boychev et al.\ present structure-aware GPU kernels that achieve exact relative-position attention with up to 21$\times$ speedup and 63$\times$ memory reduction over production baselines for Shaw, DeBERTa, T5, and Transformer-XL mechanisms. The approach exploits three structural properties: reachable projection ranges (restricting computation to relevant relation rows), constant-range reuse via saturation detection (broadcasting bias for tiles beyond the clipping threshold), and atomic-free gradient accumulation (deterministic two-pass backward). End-to-end, the method enables 1.8$\times$ throughput for Parakeet speech transcription, unlocks Canary-1B training at 15--18\,min windows previously impossible due to OOM, and achieves 2.39$\times$ speedup for DeBERTa at 4K tokens. The framework provides a unified treatment of four relative-position mechanisms via a canonical score equation, with Triton-based kernels that specialize at compile time. The main limitation is non-applicability to RoPE, which narrows impact on the most widely-deployed LLMs but leaves strong applicability to the growing encoder and speech model ecosystem.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+\bibitem[Boychev et al.(2026)]{boychev2026sak}
+Delyan Boychev, Ivo Petrov, and Dimitar~I.\ Dimitrov.
+\newblock Fast and Exact Relative-Position Attention via Structure-Aware Kernels.
+\newblock \emph{arXiv preprint arXiv:2611.01182}, 2026.
+\end{thebibliography}
+
+\end{document}
