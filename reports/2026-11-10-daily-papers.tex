@@ -1,0 +1,89 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: How Much Training-Inference Mismatch Can On-Policy Distillation Tolerate?}
+\author{Auto-generated Report}
+\date{November 10, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+On-policy distillation (OPD) trains a student LLM on its own generated responses scored by a fixed teacher model. To reduce the high computational cost of generating on-policy rollouts, practitioners employ quantized inference engines (e.g., FP8 instead of BF16) and asynchronous rollouts with stale weights. Both optimizations introduce \emph{training-inference mismatch}: the distribution from which rollouts are sampled diverges from the actual student distribution being trained. Yu et al.~\cite{yu2026mismatch} ask a precise question---how much of this mismatch can OPD tolerate before training quality degrades?---and provide the first systematic, quantitative answer.
+
+\subsection{Method}
+The authors introduce a unified scalar metric: the per-token KL divergence between the engine distribution $q$ and the trainer distribution $p_\theta$,
+\[
+  d_n = \frac{1}{N_n}\sum_{t} \bigl[\log q(y_t \mid y_{<t}) - \log p_\theta(y_t \mid y_{<t})\bigr],
+\]
+measured in nats/token and averaged across training steps. This ``mismatch currency'' allows comparing quantization-induced and staleness-induced errors on the same scale. The baseline vLLM BF16 engine already produces a tiny mismatch of 0.0008 nats/token due to numerical differences between inference and training frameworks.
+
+Training quality is assessed via held-out KL divergence against the teacher on 530 problems, with a failure threshold of $\geq$20\% relative degradation (confirmed by 95\% bootstrap confidence interval) or $\geq$5 percentage-point accuracy drop. A key theoretical contribution derives the mismatch-induced gradient bias:
+\[
+  \|g^z_{\mathrm{bias}}\|_1 \leq 2\,\|\delta\|_1\,\|A\|_\infty,
+\]
+where $\delta = q - p_\theta$ is the engine deviation and $A$ is the teacher-student log-ratio advantage. Crucially, this bias \emph{vanishes as the student converges to the teacher}, since $A \to 0$---a structural property absent in RL, where the reward signal remains constant.
+
+The authors further decompose total error into \emph{per-token error} (the engine assigns different probabilities to the same token at the same prefix) and \emph{prefix-shift error} (the engine reaches entirely different token sequences). When transitioning from passing to failing configurations, prefix-shift errors grow 5.3$\times$ while per-token errors grow only 2.1$\times$, identifying trajectory divergence as the dominant failure mode.
+
+Finally, a lightweight \emph{admission check} algorithm estimates mismatch offline using pre-collected rollouts, with a calibrated decision rule admitting configurations when $\hat{D}(c) < 0.27$ nats/token. This costs approximately 24 minutes on a single GPU versus 5.5--6 hours for a full training run on 8 GH200 GPUs.
+
+\subsection{Results}
+Experiments use DeepSeek-R1-Distill-Qwen-7B, DeepSeek-R1-Distill-Qwen-1.5B, and Llama-3.2-3B-Instruct as students on math reasoning tasks (AIME24, AIME25, AMC23, MATH-500). Key findings:
+
+\begin{itemize}
+  \item \textbf{Mismatch budget:} All 12 configurations with $D(c) \leq 0.184$ nats/token ($\leq$230$\times$ baseline) pass with relative KL degradation between $-5.0\%$ and $+6.4\%$. Configurations at $D(c) \geq 0.39$ nats/token fail with $+23\%$ or worse degradation. Catastrophic failures (every-layer FP8) at $D(c) = 0.56$--$0.68$ show $+54\%$ to $+60\%$ KL degradation.
+  \item \textbf{OPD vs.\ RL robustness:} Under identical mismatch-inducing engines, REINFORCE breaks at $\sim$12$\times$ baseline mismatch, GRPO at $\sim$60$\times$, while OPD tolerates $>$200$\times$---making OPD 3--17$\times$ more tolerant than RL methods.
+  \item \textbf{Combined speedup:} FP8 quantization (first/last layers in BF16) plus 8-step asynchronous rollouts yields 1.62$\times$ wall-clock speedup at equivalent quality, with accuracy dropping only 1.0 percentage point (61.5\% $\to$ 60.5\% on AIME/AMC).
+  \item \textbf{Per-token correction fails:} Truncated importance sampling raises held-out KL by 2.9--7.0\% and cannot fix prefix-shift errors, the dominant failure mode. Score centering (effective for RL) actually hurts OPD by 2.3--3.7\%.
+  \item \textbf{Architecture sensitivity:} DeepSeek models are highly sensitive to FP8 KV-cache quantization due to key-projection bias and lack of QK normalization; the first layer's cache accounts for 93--99\% of FP8 mismatch. Llama models with QK normalization show $\sim$0.01 nats/token under the same FP8 configuration.
+\end{itemize}
+
+\subsection{Limitations}
+The study evaluates only math reasoning tasks; the mismatch budget may differ for code generation, creative writing, or multi-turn dialogue. Training runs are limited to 200 steps, so long-horizon mismatch accumulation is not characterized. Only 7B-scale models are tested in depth; extrapolation to 70B+ is uncertain. The admission check requires calibration on representative full runs and may not transfer to novel model families. Only truncated importance sampling and score centering are tested as corrections; more sophisticated off-policy methods remain unexplored.
+
+\subsection{Relevance to My Research}
+This paper directly advances the understanding of \emph{policy optimization and distillation for LLMs} (Topic 2). The finding that OPD is 3--17$\times$ more robust than RL methods (REINFORCE, GRPO) under inference mismatch provides a principled explanation for OPD's practical success. The gradient bias bound---showing bias vanishes at convergence for OPD but persists for RL due to constant reward signals---is a key theoretical insight. The error decomposition into per-token vs.\ prefix-shift components formalizes the trajectory-level distributional shift problem, connecting OPD to offline RL theory. The practical engineering guidelines (FP8 with BF16 first layer, async staleness $\leq$8, admission check) are immediately useful for scaling distillation pipelines.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Mismatch-Aware Adaptive Rollout Scheduling}
+\textbf{Gap:} The paper establishes a fixed mismatch budget but does not explore dynamic adaptation---early in training when the student is far from the teacher (large $\|A\|_\infty$), mismatch is more costly; near convergence the bias vanishes regardless of engine quality. Current systems use constant quantization and staleness throughout training.
+
+\textbf{Approach:} Design an adaptive scheduler that monitors the mismatch metric $D(c)$ and the advantage magnitude $\|A\|_\infty$ online, then adjusts rollout precision dynamically: use BF16 with synchronous rollouts during high-advantage early phases, progressively relaxing to FP8/FP4 with increasing staleness as the student converges. The transition policy could be learned via a lightweight bandit that maximizes throughput subject to the mismatch budget constraint.
+
+\textbf{Feasibility:} High. The mismatch metric and advantage norms are already computed during training. Implementation requires only a scheduler wrapper around existing rollout engines. Expected to achieve near-2$\times$ end-to-end speedup (vs.\ the paper's 1.62$\times$) by aggressive approximation in late training.
+
+\subsection{Direction 2: Prefix-Shift Correction via Trajectory Reweighting}
+\textbf{Gap:} The paper shows that per-token importance sampling fails because the dominant failure mode is prefix-shift error (the engine explores different trajectories entirely). No trajectory-level correction method is tested, and the authors leave this as an open problem.
+
+\textbf{Approach:} Develop a trajectory-level reweighting scheme that detects prefix-shift events (where the engine's trajectory diverges significantly from the student's likely trajectory) and either downweights or replays these samples. One concrete method: compute the cumulative KL divergence along each trajectory, flag trajectories exceeding a threshold as ``shifted,'' and replace them with fresh on-policy rollouts from a small BF16 buffer. This creates a hybrid system where the majority of rollouts come from the fast quantized engine but a small fraction (targeting the shifted prefixes) come from an exact engine.
+
+\textbf{Feasibility:} Moderate. Requires maintaining a small BF16 rollout buffer alongside the quantized engine, adding $\sim$10--20\% memory overhead. The cumulative KL tracking is cheap (already measured for the admission check). The key challenge is determining the optimal replacement ratio without wasting the speedup gains.
+
+\subsection{Direction 3: Cross-Task and Cross-Scale Mismatch Transfer Laws}
+\textbf{Gap:} The mismatch budget of $[0.184, 0.39]$ nats/token is established only for 7B-scale math reasoning. The paper acknowledges that both task domain and model scale likely affect the budget, but provides no scaling law or transfer method. Teams working on code, language, or 70B+ models must repeat the expensive calibration.
+
+\textbf{Approach:} Conduct a systematic study across model scales (1.5B, 3B, 7B, 14B, 32B, 70B) and task domains (math, code, instruction following, summarization) to derive a \emph{mismatch scaling law}: $L_{\mathrm{budget}}(\text{scale}, \text{task}) = f(\text{model params}, \text{task entropy}, \text{architecture features})$. The architecture features should include QK normalization, key-projection bias, and attention head count---variables the paper identifies as affecting quantization sensitivity. This would make the admission check transferable across settings without per-configuration full training runs.
+
+\textbf{Feasibility:} Moderate to high. The experimental framework is well-defined by this paper; extending it to new scales/tasks is engineering-intensive but methodologically straightforward. The main cost is compute for the calibration grid ($\sim$50--100 full training runs across the scale-task matrix).
+
+\section{Conclusion}
+Yu et al.\ provide the first rigorous quantification of training-inference mismatch tolerance in on-policy distillation. The key insight is that OPD's self-correcting gradient bias---vanishing as the student converges---makes it fundamentally more robust than RL methods (3--17$\times$ more tolerant). The practical mismatch budget of $\leq$0.184 nats/token safely accommodates FP8 quantization and 8-step asynchronous rollouts, yielding 1.62$\times$ speedup at equivalent quality. The decomposition into per-token vs.\ prefix-shift errors reveals that trajectory-level divergence, not local probability inaccuracy, is the dominant failure mode---a finding with broad implications for efficient on-policy training systems. The lightweight admission check (24 minutes vs.\ 6 hours) provides a practical tool for engineering teams to screen new rollout configurations before committing to expensive training runs.
+
+\begin{thebibliography}{1}
+\bibitem{yu2026mismatch}
+C.~Yu, Z.~Wang, S.~Jiang, S.~Zhang, C.~Chai, Y.~Jiang, E.~Yoneki, and T.~Shi,
+``How Much Training-Inference Mismatch Can On-Policy Distillation Tolerate?''
+\textit{arXiv preprint arXiv:2611.11450}, 2026.
+\end{thebibliography}
+
+\end{document}
