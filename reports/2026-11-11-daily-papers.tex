@@ -1,0 +1,83 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Test-Time Scaling for Diffusion Language Models\\with Frequency-Aware Remasking}
+\author{Auto-generated Report}
+\date{November 11, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Diffusion language models (DLMs) generate text by iteratively denoising a fully masked sequence, committing tokens progressively via a remasking strategy. The dominant approach---certainty-based remasking---commits high-confidence tokens first, leaving uncertain positions for later refinement. Zuo et al.~\cite{zuo2026frequency} identify a critical failure mode they call \emph{false confidence}: on hard reasoning tasks, the model converges repeatedly to the same incorrect answer because locally confident but globally wrong tokens are committed early, constraining all subsequent predictions onto an incorrect trajectory. On the GSM8K hard subset, 45.16\% of unsolved questions produce a dominant wrong answer in $\geq$24/32 samples, and 14.52\% yield the identical wrong answer in all 32 samples. This defeats test-time scaling via repeated sampling, as additional compute merely reproduces the same error.
+
+\subsection{Method}
+The paper introduces \textbf{frequency-aware remasking}, which reverses the standard commitment order. A \emph{frequency score} tracks how often each position's predicted token changes during denoising:
+\[
+  f_i^{(t)} = \frac{\sum_{j=1}^{N_i^{(t)}} \mathbf{1}[\hat{x}_{i,j} \neq \hat{x}_{i,j-1}]}{\max(N_i^{(t)}, 1)},
+\]
+where $\hat{x}_{i,j}$ is the $j$-th observed prediction for position $i$ and $N_i^{(t)}$ counts total proposals through step $t$. High-frequency positions---where the model keeps changing its mind---are committed \emph{first}, forcing different samples to make different choices at precisely the undecided positions and creating genuine trajectory diversity.
+
+The commitment mechanism, \textbf{SAFE} (Support-Aware Frequency Selection), uses a gap-based algorithm: it collects distinct frequency values $u_1^{(t)} < \cdots < u_m^{(t)}$, forms candidate sets $H_j^{(t)} = \{i \in A_t \mid f_i^{(t)} \geq u_{j+1}^{(t)}\}$ constrained to at most half the active positions, and selects the split $j^*$ maximizing the frequency gap $u_{j+1}^{(t)} - u_j^{(t)}$. A consistency check requires $\leq$1 membership change between successive candidate sets to ensure stability, falling back to standard uncertainty-based remasking if violated or if fewer than 3 distinct frequency levels exist.
+
+The full system is a \textbf{two-stage adaptive pipeline}. Stage~1 (``fast base sampling'') applies the standard confidence-based decoder for $K_{\mathrm{base}}$ rounds (70\% of budget for $K \leq 30$; 60\% for $K \geq 40$), solving easy questions cheaply. Stage~2 applies frequency-aware remasking only to remaining unsolved questions with the leftover budget, concentrating diverse-exploration compute where it is needed. Each denoising block of $S{=}32$ steps begins with a warm-up phase ($\rho{=}0.5$ for LLaDA, $\rho{=}0.125$ for Dream) that accumulates frequency statistics under standard remasking before switching to SAFE.
+
+\subsection{Results}
+Experiments use LLaDA-8B-Instruct and Dream-7B-Instruct on MATH-500, HumanEval, and GSM8K. Key findings:
+
+\begin{itemize}
+  \item \textbf{Coverage gains:} On MATH-500, frequency-aware remasking achieves +3.73\% absolute over the Elimination baseline at $K{=}50$ (LLaDA) and +7.33\% at $K{=}40$ (Dream). On HumanEval, gains reach +11.39\% (LLaDA, $K{=}60$) and +10.98\% (Dream, $K{=}60$).
+  \item \textbf{Recovery on hard questions:} For questions unsolved by the base strategy in 100 samples (0\% base coverage), frequency-aware remasking with just 16 additional samples recovers 3.75\% on MATH-500 (Dream), 10.39\% on HumanEval (LLaDA), and 18.75\% on GSM8K (LLaDA).
+  \item \textbf{Answer diversity:} On the GSM8K hard subset (16 samples), SAFE produces 10.2 distinct answers vs.\ 2.4 for the baseline---a 4.25$\times$ increase---reducing dominant-answer share from 78.8\% to 31.2\% and improving coverage from 17.74\% to 45.16\% (+27.42\% absolute).
+  \item \textbf{Commitment direction matters:} Committing stable (low-frequency) tokens first solves 0.00\% of hard questions; committing high-frequency tokens first solves 9.33\%, confirming that the standard confidence-first paradigm is precisely wrong for difficult problems.
+  \item \textbf{LLM judge reliability:} A Gemini-2.5-Flash-Lite judge agrees with ground-truth oracles at $>$93\% (LLaDA) and $>$95\% (Dream), enabling practical deployment without gold labels.
+\end{itemize}
+
+\subsection{Limitations}
+The method specifically targets false-confidence failures; questions where the model fundamentally lacks required knowledge will not benefit. The warm-up ratio $\rho$ requires per-model tuning (0.5 for LLaDA vs.\ 0.125 for Dream) with no principled selection method. The frequency score tracks only binary token identity changes, ignoring confidence magnitude or distributional information. Computational overhead from frequency tracking and SAFE selection is not quantified. No comparison with autoregressive models of similar scale is provided, leaving the overall competitiveness of DLMs unclear. The two-stage formulation assumes complementary failure modes between base and frequency-aware decoders.
+
+\subsection{Relevance to My Research}
+This paper advances \emph{diffusion LLM} research (Topic~4) by identifying and solving a fundamental bottleneck in DLM test-time scaling. The false-confidence analysis reveals that 45\% of hard-question failures are structured---not random---convergence to wrong answers, a challenge unique to the iterative demasking paradigm. The frequency-aware remasking principle exploits DLMs' unique advantage over autoregressive models: the decoding strategy (which tokens to commit when) is an additional axis of variation beyond sampling noise. The two-stage adaptive allocation framework provides a general template for DLM test-time compute scaling. The 4.25$\times$ diversity gain from reversing the commitment order has implications for any iterative refinement system where early confident-but-wrong decisions propagate.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Distributional Frequency Scores for Richer Commitment Signals}
+\textbf{Gap:} The current frequency score is binary---it counts only whether the predicted token identity changed between steps, ignoring how much the full probability distribution shifted. A position where the model alternates between two near-equiprobable tokens receives the same score as one where the distribution undergoes large reorganization across many candidates. This coarseness limits the signal's ability to distinguish between genuinely uncertain positions and positions with stable multimodal distributions.
+
+\textbf{Approach:} Replace the binary frequency score with a \emph{distributional frequency} based on the step-wise KL divergence or Jensen-Shannon divergence between successive prediction distributions: $f_i^{(t)} = \frac{1}{N_i^{(t)}} \sum_j \mathrm{JSD}(p_\theta^{(j)}(\cdot \mid i) \| p_\theta^{(j-1)}(\cdot \mid i))$. This captures not just whether the top token changed but the magnitude and nature of distributional shifts. The SAFE gap-based selection can operate on these continuous scores without modification. Additionally, tracking the \emph{entropy trajectory} (whether entropy is increasing, decreasing, or oscillating) could distinguish positions approaching convergence from those in sustained oscillation.
+
+\textbf{Feasibility:} High. The token-level distributions are already computed by the model at each step; computing JSD adds negligible overhead (a few element-wise operations per position per step). The main engineering cost is storing per-position distribution snapshots rather than just top-token identities, which increases memory by a factor proportional to vocabulary size but can be approximated with top-$k$ truncation.
+
+\subsection{Direction 2: Learned Frequency-Guided Remasking via Reinforcement Learning}
+\textbf{Gap:} The SAFE algorithm is hand-designed with fixed heuristics (gap-based selection, consistency check, warm-up ratio). The commitment policy is static within each stage and does not adapt to the specific question's difficulty profile or the model's denoising trajectory. A learned policy could discover more effective commitment strategies that the gap heuristic misses.
+
+\textbf{Approach:} Train a lightweight policy network (e.g., a small transformer or MLP) that takes as input the current frequency scores, confidence scores, entropy values, and denoising step index, and outputs a per-position commitment probability. Train this policy via GRPO or PPO using the correctness of the final answer as reward. The policy would learn when to switch from confidence-based to frequency-based commitment, how aggressively to commit high-frequency tokens, and whether to vary strategy across denoising blocks. The two-stage structure could emerge naturally if the learned policy discovers that confidence-based commitment is optimal early and frequency-based is optimal for hard residuals.
+
+\textbf{Feasibility:} Moderate. The policy network is small (operates on per-position features, not full sequences), but training requires many rollouts through the DLM denoising process to get reward signal. Approximating with offline data (cached denoising trajectories from both strategies) could reduce cost. The reward is sparse (correctness of final answer) but the action space is well-structured (binary commit/remask per position).
+
+\subsection{Direction 3: Cross-Paradigm Frequency Analysis for Hybrid AR-Diffusion Models}
+\textbf{Gap:} The paper studies pure DLMs (LLaDA, Dream) but the recent trend is toward hybrid architectures that combine autoregressive and diffusion generation (e.g., Nemotron-Labs-Diffusion, LLaDA2.0-Uni). In hybrid models, some tokens are generated autoregressively while others are refined via diffusion. The interaction between AR-generated context and diffusion-refined segments creates a new class of false-confidence failures: AR tokens committed early may constrain the diffusion phase, and the frequency dynamics of diffusion-phase tokens depend on the quality of AR-phase context.
+
+\textbf{Approach:} Extend the frequency analysis to hybrid architectures by: (1) measuring how AR-generated prefix tokens affect the frequency scores of diffusion-phase tokens; (2) developing a \emph{cross-paradigm commitment policy} that decides whether a position should be generated autoregressively (committed immediately) or allocated to the diffusion phase (subject to frequency-aware remasking); (3) investigating whether AR-phase tokens benefit from a ``virtual frequency'' score computed by running a few diffusion refinement steps before committing. This would create an architecture where the boundary between AR and diffusion generation is dynamic and question-dependent.
+
+\textbf{Feasibility:} Moderate. Requires access to hybrid model internals (both AR and diffusion heads). The frequency measurement infrastructure from this paper transfers directly to the diffusion phase. The novel challenge is the cross-paradigm decision boundary, which may require a meta-controller. Initial experiments could simply apply frequency-aware remasking to the diffusion segments of existing hybrid models without modifying the AR-diffusion boundary.
+
+\section{Conclusion}
+Zuo et al.\ identify false confidence as a fundamental failure mode in diffusion language models: certainty-based remasking causes 45\% of hard-question failures to converge deterministically to the same wrong answer, rendering repeated sampling futile. Frequency-aware remasking reverses the commitment order, committing high-frequency (unstable) tokens first to force trajectory diversity. The SAFE algorithm with two-stage adaptive allocation achieves 4.25$\times$ more distinct answers and up to +11.39\% absolute coverage on HumanEval, while recovering solutions to questions completely unreachable by standard strategies even with 100 samples. The core insight---that DLMs' iterative demasking offers a decoding-strategy axis for test-time scaling beyond sampling noise---establishes a new framework for scaling compute in diffusion language models.
+
+\begin{thebibliography}{1}
+\bibitem{zuo2026frequency}
+B.~Zuo, Y.~Yu, D.~Zhou, and Y.~Zhu,
+``Test-Time Scaling for Diffusion Language Models with Frequency-Aware Remasking,''
+\textit{arXiv preprint arXiv:2611.10486}, 2026.
+\end{thebibliography}
+
+\end{document}
