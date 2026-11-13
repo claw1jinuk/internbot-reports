@@ -1,0 +1,88 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: SteerDistill --- Quantizing LLM Agents\\via Closed-Loop Teacher Steering}
+\author{Auto-generated Report}
+\date{November 12, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Standard post-training quantization (PTQ) and quantization-aware training (QAT) methods were designed for single-turn or static inference. When applied to LLM agents---models that take multi-step actions in interactive environments---reduced precision causes \emph{behavioral divergences}: one wrong action early in a trajectory cascades through subsequent turns, compounding into complete task failure. Cui et al.~\cite{cui2026steerdistill} demonstrate that unguided retries yield a correct action at only 9.6\% of divergent turns, showing that quantized agents rarely self-correct. This motivates a targeted recovery mechanism that identifies and corrects the specific decision points where behavioral failures originate.
+
+\subsection{Method}
+SteerDistill is a two-stage pipeline. \textbf{Stage~1 (Teacher-Steered Trajectory Revision)} generates corrected training trajectories via a closed-loop feedback cycle. Given a quantized student rollout that fails, the system: (1)~detects the first turn $t^*$ where the student's action produces an environment transition $\rho$ that mismatches the reference transition $\rho_T$ from a successful full-precision trajectory; (2)~has the teacher generate a structured \emph{steering prompt} $G$ with three components---discrepancy explanation, applicable conditions, and corrective rule; (3)~restores the environment to the state before $t^*$ and lets the \emph{student} generate a revised action conditioned on $G$; (4)~locally verifies whether the revised action produces the correct environment transition. If verification fails, feedback is appended to a memory buffer and the teacher refines $G$ (up to $R{=}4$ attempts). Critically, the student generates all corrections---the teacher only guides.
+
+\textbf{Stage~2 (Internalization via Asymmetric KL Distillation)} trains the student to reproduce corrections \emph{without} the steering prompt. At corrected turns, a forward KL loss forces the student to match the steered distribution:
+\[
+  \ell_{\mathrm{FKL}}(c, G; \theta) = D_{\mathrm{KL}}\bigl(\pi_{\theta_k}(\cdot \mid c, G) \;\|\; \pi_\theta(\cdot \mid c)\bigr),
+\]
+where $\pi_{\theta_k}$ is the frozen student with steering prompt and $\pi_\theta$ is the trainable student without it. At non-corrected turns, standard reverse KL distillation from the full-precision teacher maintains alignment:
+\[
+  \ell_{\mathrm{RKL}}(c; \theta) = D_{\mathrm{KL}}\bigl(\pi_\theta(\cdot \mid c) \;\|\; \pi_T(\cdot \mid c)\bigr).
+\]
+This asymmetric routing is justified because forward KL (mean-seeking) ensures faithful reproduction of corrections at divergent turns, while reverse KL (mode-seeking) preserves the teacher's sharpest predictions elsewhere. Quantization uses asymmetric group-wise (group size 64) fake quantization with straight-through estimator gradients.
+
+\subsection{Results}
+Experiments span five agentic benchmarks (BFCL~V4, $\tau$2-Bench, WebShop, ALFWorld, SearchQA) across three model families (Qwen3-8B, Qwen3.5-4B, Gemma~4~12B-it). Key findings:
+
+\begin{itemize}
+  \item \textbf{Near-lossless W4A16:} On Qwen3-8B, SteerDistill achieves 53.18\% average vs.\ 53.54\% BF16---only 0.36 points below full precision. The strongest baseline (QeRL) reaches 51.00\%, a 2.18-point gap.
+  \item \textbf{Cross-model consistency:} SteerDistill stays within 0.36--0.82 points of BF16 across all three model families, outperforming QeRL by 1.67--2.18 points in each case.
+  \item \textbf{Aggressive quantization:} At W4A8 (Qwen3-8B), SteerDistill achieves 51.62\% vs.\ QeRL's 49.69\% (+1.93). At W2A16, SteerDistill achieves 42.97\% vs.\ QeRL's 38.10\% (+4.87), with the advantage growing at lower bit-widths.
+  \item \textbf{Training efficiency:} SteerDistill outperforms QeRL by 1.84 percentage points on $\tau$2-Bench using 67\% fewer GPU hours (32 vs.\ 96 GPU hours to reach comparable quality).
+  \item \textbf{Steering effectiveness:} Teacher steering achieves 82.3\% turn-level correction rate vs.\ 9.6\% for unguided retries---an 8.6$\times$ improvement.
+  \item \textbf{Inference efficiency:} SteerDistill produces 4.0K tokens per successful trajectory vs.\ 4.1--5.2K for baselines, nearly matching BF16's 3.9K.
+\end{itemize}
+
+Ablations confirm each design choice: behavioral divergence detection via environment states (+1.83 over action text mismatch), teacher steering over unguided retry (+2.38) or teacher takeover (+1.78), structured prompts (+2.06 over free-form), local verification (+4.66 over no verification), and asymmetric KL routing (+1.55 over best uniform KL).
+
+\subsection{Limitations}
+The method requires successful full-precision reference trajectories; tasks where the teacher itself fails cannot be corrected. Local verification depends on environment-specific state introspection logic, limiting generalization to environments without observable, comparable transitions. The closed-loop revision adds computational overhead (up to $R{=}4$ student rollouts per divergent turn). Evaluation covers five structured agentic benchmarks in the 4B--12B parameter range; behavior at larger scales (30B+), with MoE architectures, or on open-ended agent scenarios (autonomous coding, long-horizon research) remains unknown. The teacher quality ceiling bounds correction quality.
+
+\subsection{Relevance to My Research}
+This paper directly advances \emph{LLM efficiency} research (Topic~1) by demonstrating that agentic quantization requires fundamentally different recovery mechanisms than standard quantization. The key insight---that behavioral divergences in multi-step agent trajectories cannot be corrected by token-level distillation alone---establishes a new problem formulation for efficient agent deployment. The closed-loop steering paradigm, where the teacher provides structured guidance and the student generates its own corrections, introduces a novel distillation modality distinct from both standard KD and on-policy distillation. The asymmetric KL routing (forward KL at corrected turns, reverse KL elsewhere) is a reusable technique for any scenario with heterogeneous training signal quality. The 0.36-point gap to BF16 at W4A16 makes 4-bit agent deployment practical.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Self-Steering via Internalized Divergence Detection}
+\textbf{Gap:} SteerDistill relies on an external full-precision teacher to generate steering prompts at deployment time during the data generation phase. After training, the quantized student has internalized corrections for seen failure modes, but cannot steer itself when encountering novel failures at deployment. The 9.6\% unguided self-correction rate suggests severe limitations in the student's metacognitive ability to detect and recover from its own errors.
+
+\textbf{Approach:} Train the quantized student to perform its own divergence detection and self-steering. Add an auxiliary ``monitor head'' that predicts, at each turn, whether the current action is likely to produce a behavioral divergence (trained on the divergence labels from Stage~1). When the monitor fires, the student generates a self-steering prompt using an internalized template learned from the teacher's steering prompts. This creates a fully self-contained agent that can detect and correct its own quantization-induced errors without any teacher at inference time.
+
+\textbf{Feasibility:} Moderate. The divergence detection signal is available from Stage~1 data. The monitor head is lightweight (single linear layer on hidden states). The main challenge is whether the quantized student can generate effective steering prompts for itself---the teacher's advantage may be precisely the higher-fidelity representations that quantization destroys. Initial experiments could test whether the monitor head alone (triggering a simple retry with temperature perturbation) provides meaningful recovery.
+
+\subsection{Direction 2: Extending Closed-Loop Steering to Diffusion LLM Agents}
+\textbf{Gap:} SteerDistill targets autoregressive quantized agents. Diffusion LLMs generate actions via iterative demasking, where quantization errors manifest differently---not as single wrong tokens cascading left-to-right, but as globally inconsistent token configurations that emerge from the parallel denoising process. The behavioral divergence detection and steering mechanisms are designed for sequential action generation and may not transfer directly.
+
+\textbf{Approach:} Adapt the closed-loop steering framework to diffusion LLM agents by: (1)~redefining behavioral divergence as environment-state mismatch after the diffusion agent's complete action generation (rather than per-token); (2)~applying steering prompts as prefix conditioning that biases the diffusion process toward correct actions during the denoising steps; (3)~using the frequency-aware remasking insight (from recent work on DLM test-time scaling) to identify which token positions in the action are most susceptible to quantization-induced false confidence, and targeting steering there. The internalization loss would use the same asymmetric KL routing but adapted to the diffusion training objective.
+
+\textbf{Feasibility:} Moderate. The environment-level verification transfers directly (it operates on complete actions, not generation mechanisms). The main challenge is integrating steering prompts into the diffusion denoising process, which requires modifying the masking schedule or conditioning mechanism. Existing work on conditional generation in DLMs provides a starting point.
+
+\subsection{Direction 3: Mismatch-Aware Quantization Precision Allocation for Agents}
+\textbf{Gap:} SteerDistill applies uniform quantization (e.g., W4A16) across all layers and all turns of the agent trajectory. However, the paper's own analysis shows that behavioral divergences cluster at specific turns and are caused by specific layers' sensitivity to quantization. A uniform precision budget wastes bits on turns/layers that are robust while under-allocating to critical decision points.
+
+\textbf{Approach:} Develop a mixed-precision quantization scheme informed by behavioral divergence analysis. Profile which layers and attention heads contribute most to divergent turns (using the divergence detection from Stage~1 as supervision). Allocate higher precision (e.g., 8-bit or BF16) to these critical components while using aggressive quantization (2-bit or 3-bit) elsewhere. Additionally, leverage the recent finding that OPD mismatch tolerance depends on the advantage magnitude---turns with high ``agentic advantage'' (where the correct vs.\ incorrect action has large reward difference) should receive higher precision. This creates a \emph{turn-aware, layer-aware} precision allocation that minimizes total bits while maintaining behavioral fidelity.
+
+\textbf{Feasibility:} High. Layer-wise sensitivity profiling is standard practice in mixed-precision quantization. The novel element is using behavioral divergence frequency (from SteerDistill's Stage~1) as the sensitivity signal rather than reconstruction error. Implementation requires only per-layer precision selection, which is supported by modern quantization toolkits. Expected to achieve W3 average precision at W4-equivalent agent performance.
+
+\section{Conclusion}
+Cui et al.\ establish that LLM agent quantization is fundamentally harder than standard LLM quantization due to error cascading across multi-step trajectories. SteerDistill addresses this via closed-loop teacher steering: the teacher identifies behavioral divergences via environment-state alignment, generates structured steering prompts, and the student generates corrections that are locally verified before internalization via asymmetric KL distillation. The result is near-lossless W4A16 quantization (0.36 points below BF16) with 67\% training efficiency gains over the strongest baseline. The 82.3\% turn-level correction rate (vs.\ 9.6\% unguided) and the growing advantage at lower bit-widths (+4.87 at W2A16) demonstrate that targeted behavioral correction is essential for deploying efficient LLM agents.
+
+\begin{thebibliography}{1}
+\bibitem{cui2026steerdistill}
+G.~Cui, X.~Li, Z.~Hao, X.~Ding, Y.~Liu, and T.~Cao,
+``SteerDistill: Quantizing LLM Agents via Closed-Loop Teacher Steering,''
+\textit{arXiv preprint arXiv:2611.13410}, 2026.
+\end{thebibliography}
+
+\end{document}
