@@ -1,0 +1,88 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: LoopFill --- Pipelined Multi-Token Speculative\\Decoding for Looped Transformers}
+\author{Auto-generated Report}
+\date{November 17, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Looped transformers apply a single weight-shared block $T$ times to refine hidden states before emitting each token. While parameter-efficient, this creates a severe latency bottleneck: generating one token requires $T$ sequential passes (e.g., $T{=}32$ for Huginn-3.5B). Zhu et al.~\cite{zhu2026loopfill} observe that intermediate loop depths produce meaningful predictions---the LM head at depth $d < T$ yields ``shallow-loop drafts'' that are often correct, especially for predictable tokens. This natural self-drafting capability, combined with suffix-tree retrieval, enables speculative decoding \emph{within} a single looped model without any external draft model or additional training.
+
+\subsection{Method}
+LoopFill maintains a \textbf{unified draft tree} per request, populated from two complementary sources: (1)~\emph{suffix-tree drafts} retrieved from local/global suffix trees indexing previously seen text (up to $Q{=}4$ candidates per lookup, weighted by match frequency with scaling constant $c{=}0.7$), and (2)~\emph{shallow-loop drafts} from the LM head applied at intermediate depths $d_1, d_2$ (top-$k{=}2$ candidates per depth; $d_1{=}4, d_2{=}8$ for Huginn; $d_1{=}1, d_2{=}2$ for Ouro). Suffix extensions attach immediately after shallow predictions, enabling multi-token speculation without waiting for full-depth completion.
+
+The \textbf{pipelining mechanism} is the core contribution. Multiple tokens at different loop depths share each batched forward pass: while token $k$ is at depth 20, token $k{+}1$ may be at depth 4 and token $k{+}2$ at depth 0---all processed simultaneously. At each step, only the root plus the top-$N{=}16$ highest-scoring nodes advance computation, where node scores follow a path-product: $s(v) = s(\mathrm{parent}(v)) \cdot w(v)$.
+
+\textbf{Verification} is continuous: when the root completes all $T$ loops, the full-depth distribution determines the next token. If it matches a draft child, that child is promoted to root with all its pre-computed loop work and descendants preserved. Otherwise, the correct token starts fresh. Output is \emph{lossless}---drafts determine which positions start early, never which token is emitted.
+
+The theoretical limiting speedup is:
+\[
+  \gamma_{\mathrm{LF}} = \frac{1}{1 - p_s} \cdot \frac{T}{\alpha d + (1-\alpha)T},
+\]
+where $p_s$ is the suffix hit rate, $\alpha$ is the shallow hit rate on suffix misses, and $d$ is the shallow draft depth. This satisfies $\gamma_{\mathrm{LF}} \geq \max\{\gamma_{\mathrm{suffix}}, \gamma_{\mathrm{shallow}}\}$, proving the combination is always at least as good as either source alone.
+
+\subsection{Results}
+Experiments use Ouro-1.4B/2.6B ($T{=}4$) and Huginn-3.5B ($T{=}32$) on seven benchmarks (GSM8K, MATH-500, BBH, HumanEval+, MBPP+, Spider, SpecBench). Key findings:
+
+\begin{itemize}
+  \item \textbf{Single-request latency:} LoopFill achieves \textbf{5.85$\times$} mean speedup on Ouro-2.6B and \textbf{5.13$\times$} on Huginn-3.5B (greedy decoding), with peaks of 8.23$\times$ on BBH. It outperforms LoopAhead (a \emph{trained} method) by 40\% on Ouro and 25\% on Huginn, and SuffixDecoding by 3.2$\times$/2.7$\times$.
+  \item \textbf{Loop-normalized accepted length:} $\gamma = 6.97$ (Ouro) and $\gamma = 7.45$ (Huginn), meaning $\sim$7 tokens generated per $T$ loop steps vs.\ 1.0 for standard decoding.
+  \item \textbf{Throughput at batch size 16:} 189.56 tok/s (2.81$\times$) on Ouro-2.6B; 129.18 tok/s (2.67$\times$) on Huginn-3.5B.
+  \item \textbf{Draft attribution:} Shallow-loop drafts contribute 55--57\% of accepted tokens; suffix drafts contribute 38--43\%. Task-dependent: suffix dominates summarization/RAG (50--61\%); shallow dominates translation (82--84\%). The second shallow depth $d_2$ contributes 5--26\% of tokens.
+  \item \textbf{Immediate emission:} 41\% of tokens on Huginn are emitted with zero additional wait---the next token's computation is already complete when the current token is output.
+  \item \textbf{Sampling impact:} Temperature 1.0 reduces speedup by 40--49\% (5.85$\times \to$ 3.50$\times$ on Ouro; 5.13$\times \to$ 2.60$\times$ on Huginn).
+\end{itemize}
+
+Ablations confirm: draft budget $N{=}16$ is optimal for concurrent serving (larger $N$ reduces B=16 throughput by 43\%); top-$k{=}2$ shallow drafts and suffix budget $Q{=}4$ are optimal; suffix weight scaling is robust across two orders of magnitude.
+
+\subsection{Limitations}
+The method is fundamentally limited to looped transformer architectures and cannot be applied to standard non-looped models (GPT, LLaMA), which dominate current deployment. Sampling degrades speedup by 40--49\%, limiting effectiveness for stochastic generation. Larger draft budgets that help single-request latency harm concurrent throughput (43\% reduction at $N{=}64$ vs.\ $N{=}16$ at B=16). Only models up to 3.5B parameters are tested; scaling behavior for larger looped transformers is unknown. All evaluation uses a single L20X GPU.
+
+\subsection{Relevance to My Research}
+This paper advances \emph{LLM inference efficiency} (Topic~1) by demonstrating that looped transformers contain a built-in self-speculation mechanism that largely eliminates their latency penalty. The 5--6$\times$ lossless speedup makes looped architectures significantly more competitive with standard transformers for deployment, since they already offer parameter efficiency during training. The unification of retrieval-based and model-based drafting (with the theoretical guarantee $\gamma_{\mathrm{LF}} \geq \max\{\gamma_{\mathrm{suffix}}, \gamma_{\mathrm{shallow}}\}$) establishes a principled framework for combining complementary speculation sources. The continuous pipeline paradigm---where draft and verification overlap rather than alternate---is a conceptual advance over the traditional two-phase speculative decoding approach. Combined with our prior reviews of looped transformers (Recurrent Looped Transformer, LatentLoop, Looped Uniform Diffusion LMs), this paper completes the picture of looped architectures as both parameter-efficient and inference-efficient.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: LoopFill for Looped Diffusion Language Models}
+\textbf{Gap:} LoopFill targets autoregressive looped transformers (Ouro, Huginn) where each output token requires $T$ sequential loop passes. Looped \emph{diffusion} language models (e.g., Looped Uniform Diffusion LMs from Review~\#130) also apply weight-shared blocks iteratively but generate tokens in parallel via demasking rather than left-to-right. The pipelining insight---that intermediate loop depths produce useful predictions---should transfer to the diffusion setting, but the interaction between loop-depth speculation and the demasking schedule is unexplored.
+
+\textbf{Approach:} Adapt LoopFill's shallow-loop drafting to the diffusion demasking process: at each denoising step, apply the LM head at intermediate loop depths $d < T$ to generate ``shallow demasking proposals'' for all masked positions simultaneously. Use these proposals to identify positions where the model is already confident at depth $d$ (high-confidence shallow predictions that agree with depth-$T$ predictions historically), and commit those positions early---effectively reducing the number of loop iterations needed per demasking step for easy positions. Hard positions still receive the full $T$ iterations. This creates a \emph{position-adaptive loop budget} within each denoising step.
+
+\textbf{Feasibility:} Moderate. The shallow-loop prediction infrastructure transfers directly from LoopFill. The challenge is integrating with the demasking schedule: committed tokens at shallow depth might introduce errors that propagate through subsequent denoising steps. The entropy spike detection from Review~\#149 could serve as a safety check---only allow shallow commitment at non-spike steps.
+
+\subsection{Direction 2: Dynamic Loop Depth via Confidence-Gated Early Exit}
+\textbf{Gap:} LoopFill speeds up inference through speculation but still executes the full $T$ loop iterations for every verified token. The paper shows that shallow-loop predictions are often correct (55--57\% of accepted tokens come from shallow drafts), implying that many tokens could be emitted at $d \ll T$ without quality loss. A per-token adaptive loop depth would compound with LoopFill's pipelining for even greater speedups.
+
+\textbf{Approach:} Add a lightweight confidence gate (single linear layer on the hidden state) trained to predict whether the shallow-depth prediction matches the full-depth output. When the gate fires with confidence above a threshold, the token is emitted at depth $d$ without completing the remaining $T - d$ iterations. For Huginn ($T{=}32$), if easy tokens exit at $d{=}4$--$8$ while hard tokens use all 32 iterations, the effective average depth could drop to $\sim$12--16, yielding an additional 2--2.5$\times$ speedup multiplicative with LoopFill's existing 5$\times$. The gate can be trained on cached (shallow prediction, full-depth prediction) pairs from standard inference without modifying the base model.
+
+\textbf{Feasibility:} High. The confidence gate is a single linear layer ($\sim$0 parameter overhead). Training data is free (log shallow vs.\ full predictions during normal inference). The main risk is quality degradation from premature exits; this can be mitigated by conservative thresholds and periodic full-depth verification checks (every $k$-th token forced to full depth regardless of gate confidence).
+
+\subsection{Direction 3: Cross-Request Draft Sharing for Serving Efficiency}
+\textbf{Gap:} LoopFill's suffix tree already shares information across requests via a global suffix tree of completed requests. However, draft tree \emph{computation} is not shared: if two concurrent requests have overlapping prefixes (common in serving scenarios with similar prompts), their draft trees are built and evaluated independently, duplicating work.
+
+\textbf{Approach:} Implement a shared draft cache that maps (prefix hash, loop depth) pairs to pre-computed hidden states and draft distributions. When a new request's prefix matches an existing cache entry, it inherits the cached draft tree (or subtrees) and their pre-computed loop states, skipping the initial speculation overhead. This is particularly effective for: (a)~few-shot prompts where the prompt prefix is shared across many requests; (b)~multi-turn conversations where the conversation history overlaps; (c)~batch serving of similar queries. The cache can use LRU eviction with prefix-length-weighted priorities.
+
+\textbf{Feasibility:} High. The draft tree data structure already stores per-node hidden states; caching these keyed by prefix hash is straightforward. The main challenge is cache invalidation---when a request's generation diverges from the cached prefix, all downstream cache entries must be discarded. Memory management requires bounding cache size relative to available GPU memory. Expected to provide 1.3--1.5$\times$ additional throughput improvement in high-overlap serving scenarios.
+
+\section{Conclusion}
+Zhu et al.\ demonstrate that looped transformers contain a natural self-speculation mechanism: intermediate loop depths serve as free draft models, and suffix-tree retrieval provides complementary data-driven drafts. LoopFill unifies both in a pipelined draft tree with continuous verification, achieving 5.13--5.85$\times$ lossless single-request speedups---outperforming even trained baselines by 25--40\%. The method largely eliminates the latency penalty of looped architectures: with $\gamma \approx 7.45$ on Huginn ($T{=}32$), the effective cost drops to $\sim$4.3 loop steps per token. Combined with the parameter efficiency of weight-shared blocks, this positions looped transformers as a compelling architecture for both training and inference efficiency.
+
+\begin{thebibliography}{1}
+\bibitem{zhu2026loopfill}
+S.~Zhu, S.~Huang, Y.~Zhao, and J.~You,
+``LoopFill: Pipelined Multi-Token Speculative Decoding for Looped Transformers,''
+\textit{arXiv preprint arXiv:2611.19649}, 2026.
+\end{thebibliography}
+
+\end{document}
