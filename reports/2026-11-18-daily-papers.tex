@@ -1,0 +1,80 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Self-Improvement Memory Enables\\Continual Recursive Self-Improvement}
+\author{Auto-generated Report}
+\date{November 18, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+When an AI agent's executable harness (prompts, tool pipelines, context management---everything except model weights) has been optimized for one setting, transferring it to a new benchmark or policy model often causes regression: source-evolved harnesses can perform \emph{worse} than the original seed. Yu et al.~\cite{yu2026sim} address Continual Recursive Self-Improvement (CRSI): how can the optimization process continue across setting changes without losing accumulated knowledge? They identify that the evolved harness alone leaves critical questions unanswered---\emph{why} each edit was proposed, \emph{what} it was expected to fix, and \emph{what} actually happened---and that without this history, target optimization repeats failures or blindly modifies inherited components.
+
+\subsection{Method}
+\textbf{Self-Improvement Memory (SIM)} is a structured record that tracks the optimizer's decision-making process rather than just the final artifact. Each memory entry has the form $m_i = (c_i, [(a_{ij}, o_{ij}, p_{ij})]_j)$, where $c_i$ is a root-cause problem identifier, $a_{ij}$ is the modification and rationale at attempt $j$, $o_{ij}$ records predicted vs.\ observed outcomes, and $p_{ij}$ is a provenance tuple (domain, benchmark, policy model, round number). Entries are grouped by root cause---not chronologically---forming a problem-indexed knowledge base. Failed modifications are recorded alongside successes, preventing the system from repeating mistakes.
+
+The optimization loop runs $N{=}10$ rounds with $k{=}5$ candidates per round. At each round, the proposer generates candidate harness modifications conditioned on the current harness, execution feedback, \emph{and the complete SIM}; the selector screens candidates using the same memory. Memory updates are append-only: only the accepted candidate's record is added, with measured outcomes recorded even if the edit regresses. The entire SIM is passed in the system prompt without retrieval or truncation.
+
+For continual transfer, source RSI produces final harness $H_S$ and memory $M_S$; target optimization resumes from $(H_S, M_S)$. The proposer can then retain, revise, replace, or remove inherited modifications with full access to their rationale and outcome history. A key insight: ``a transferable rationale can require a different implementation''---the \emph{why} transfers even when the \emph{how} does not.
+
+\subsection{Results}
+Experiments span text classification (3 to 8 datasets), coding (TB2.1 to TB4), workspace tasks, and engineering domains, using Gemini 3.8 Flash and Claude Opus 5.5 as policy/optimizer models. Key findings:
+
+\begin{itemize}
+  \item \textbf{Cross-dataset CRSI (6 transitions):} Full SIM exceeds Harness Transfer by 2.43--4.35 points across all transitions. In text classification, the source-evolved harness starts \emph{below} the seed (72.92 vs.\ 75.72) yet SIM reaches 77.92, surpassing even cold-start optimization (76.60).
+  \item \textbf{Cross-model CRSI (Opus$\to$Gemini, 4 domains):} Full SIM finishes highest in all four domains, exceeding Harness Transfer by 3.60--11.33 points. In workspace tasks, the source harness starts at 68.41 on Gemini (below seed's 73.89); SIM recovers to \textbf{84.75} vs.\ Harness Transfer's 73.42.
+  \item \textbf{Statistical validation (10 paired coding runs):} SIM improves in 9/10 pairs with mean gain of +2.36 points. Paired $t(9) = 4.06$, $p = 0.003$; effect size $d_z = 1.28$; 95\% CI $[1.05, 3.68]$.
+  \item \textbf{Generational CRSI:} Across Gemini 2.5$\to$3.5$\to$3.8$\to$4, CRSI helps for three of four transitions (+1.0 to +3.5 over fresh RSI). Gemini~4 Argon shows slight regression ($-0.8$), suggesting highly capable models may not benefit from inherited harness assumptions.
+  \item \textbf{Problem-Only Memory is insufficient:} An ablation passing only root causes (without modification rationale, outcomes, or provenance) shows inconsistent results ($-1.82$ to $+2.40$ vs.\ Harness Transfer), confirming that the full structured record is essential.
+  \item \textbf{Unified harness synthesis:} SIM enables merging optimizations across multiple models into a single shared harness that achieves 78.92\% (evolve) / 75.24\% (held-out), matching or exceeding per-model specialized harnesses.
+\end{itemize}
+
+\subsection{Limitations}
+Only the coding domain has the 10-pair statistical study; classification, workspace, and engineering are single-run comparisons. Only single-hop transitions are studied; longer chains of continual transfer are unexplored. The complete SIM is passed in context without retrieval, which may hit context window limits as memory grows over many rounds. The Gemini~4 Argon regression ($-0.8$) demonstrates negative transfer risk for highly capable target models. The optimizer's planning and search procedures are kept fixed---adaptive planning is future work. Deeper ablations on individual memory fields (removing only outcomes, removing only provenance) are not reported.
+
+\subsection{Relevance to My Research}
+This paper directly advances \emph{continual learning for LLM agents} (Topic~3) by introducing a novel form of meta-continual learning: continuity at the level of the self-improvement \emph{process} rather than task performance. SIM addresses a structural form of catastrophic forgetting---when target optimization modifies inherited components without knowing their purpose---by providing explicit rationale and outcome history. The problem-indexed, append-only memory with negative evidence (failed modifications recorded, not discarded) offers a principled architecture for agent experience accumulation. The finding that rationale transfers even when implementation does not ($+11.33$ points in cross-model workspace transfer) demonstrates that \emph{why}-level knowledge is a more robust transferable asset than code-level artifacts. This has direct implications for designing memory systems for lifelong learning agents.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Scalable SIM with Selective Retrieval}
+\textbf{Gap:} The current SIM is passed entirely in the system prompt without retrieval or truncation. This works for 10-round optimization but will not scale to long-lived agents that accumulate hundreds of improvement cycles across dozens of setting transitions. As memory grows, context window limits and attention dilution will degrade both proposer and selector quality.
+
+\textbf{Approach:} Replace the full-context SIM with a retrieval-augmented memory system. Index memory entries by root-cause embeddings and provenance features (model family, task domain, harness component affected). At each optimization round, retrieve the top-$k$ most relevant entries based on: (1)~embedding similarity between the current failure trace and stored root causes; (2)~provenance distance (same model family, similar task domain, recent rounds weighted higher); (3)~outcome quality (entries with successful resolutions weighted over repeated failures). Maintain a compressed ``memory summary'' (key statistics: number of entries, success rate per domain, most common root causes) that always fits in context, with retrieved entries appended for detail.
+
+\textbf{Feasibility:} High. Embedding-based retrieval over structured text entries is well-established. The main challenge is balancing retrieval precision (relevant entries only) with recall (not missing entries whose rationale transfers unexpectedly). The provenance tuple already provides natural indexing dimensions. Expected to maintain SIM's benefits while scaling to 100+ rounds and 10+ transitions.
+
+\subsection{Direction 2: SIM for Parametric Self-Improvement}
+\textbf{Gap:} SIM currently operates only on harness-level optimization (code modifications around a frozen model). The same principle---structured records of why modifications were proposed, what was predicted, and what actually happened---could apply to \emph{parametric} self-improvement: fine-tuning, RL, or continual post-training of model weights. When an RL training run is transferred to a new task distribution, the history of reward signal dynamics, learning rate schedules, and training instabilities from the source run contains valuable transferable knowledge.
+
+\textbf{Approach:} Extend SIM to track parametric optimization decisions: for each training stage, record the root-cause motivation (e.g., ``reward hacking on task X''), the modification (``added KL penalty with coefficient 0.01''), the predicted outcome (``reduce reward variance without accuracy loss''), the observed outcome (``reward variance reduced 40\% but accuracy dropped 2\%''), and provenance (model checkpoint, dataset version, training step). When transferring to a new task distribution or model scale, the parametric SIM would inform: which hyperparameter decisions to preserve, which reward shaping choices to revisit, and what failure modes to expect based on prior experience.
+
+\textbf{Feasibility:} Moderate. The SIM data structure transfers directly. The challenge is that parametric optimization has much higher-dimensional decisions (learning rate schedules, batch sizes, loss coefficients) than harness-level code edits. The root-cause grouping mechanism would need adaptation to handle continuous hyperparameter spaces. Initial experiments could focus on RL post-training, where the modification space is relatively structured (reward coefficients, KL penalties, training curricula).
+
+\subsection{Direction 3: Adversarial Memory Verification for Robust Transfer}
+\textbf{Gap:} SIM records are created by the same optimizer (proposer/selector) that consumes them. If the optimizer's root-cause analyses are systematically biased or incorrect, SIM propagates these errors across transitions. The paper's Problem-Only Memory ablation hints at this: root causes without detailed outcomes are unreliable, suggesting the root-cause labels themselves may be noisy. There is no mechanism to verify whether a stored root cause accurately identifies the true failure mode vs.\ a correlated but non-causal symptom.
+
+\textbf{Approach:} Add a \emph{verification layer} that stress-tests SIM entries before they influence target optimization. For each root-cause hypothesis in memory: (1)~generate a minimal reproduction of the claimed failure (a targeted test case that should trigger the root cause); (2)~apply the recorded fix and verify it resolves the reproduction; (3)~remove the fix and verify the failure returns. Entries that pass this causal verification are marked as ``verified''; those that fail are downweighted or annotated with the verification failure. This creates an ``evidence quality'' signal within SIM, allowing the optimizer to trust verified entries more than unverified ones during transfer.
+
+\textbf{Feasibility:} Moderate. Generating minimal reproductions requires the optimizer to understand the failure at a level sufficient for test case construction. This may work well for harness-level modifications (where the failure is typically observable in execution traces) but is harder for subtle performance regressions. The verification overhead is bounded: each entry is verified once and the result is cached. Expected to improve transfer robustness by 15--25\% on cross-model transitions where inherited root causes are most likely to be model-specific.
+
+\section{Conclusion}
+Yu et al.\ introduce Self-Improvement Memory (SIM), a structured record of the optimization process itself---root causes, modification rationale, predicted vs.\ observed outcomes, and provenance---that enables continual recursive self-improvement across benchmark and model changes. The key insight is that the improvement \emph{history} is a transferable asset separate from the improved artifact: rationale transfers even when implementation does not, closing cross-model gaps of up to 11.33 points. With statistical validation across 10 paired coding runs ($p{=}0.003$, $d_z{=}1.28$), SIM consistently improves upon harness-only transfer. The problem-indexed, append-only design with negative evidence establishes a principled memory architecture for meta-continual learning---enabling optimization processes, not just agents, to learn from experience.
+
+\begin{thebibliography}{1}
+\bibitem{yu2026sim}
+X.~Yu, F.~Xia, J.~Pan, Y.~Tang, C.~Liu, A.~Yu, S.~Jiang, Y.~Chen, L.~Xue, and T.~Yu,
+``Self-Improvement Memory Enables Continual Recursive Self-Improvement,''
+\textit{arXiv preprint arXiv:2611.18856}, 2026.
+\end{thebibliography}
+
+\end{document}
