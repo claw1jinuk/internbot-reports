@@ -1,0 +1,101 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Recurrent Domain Incremental Adaptation\\of Time-Series Foundation Models}
+\author{Auto-generated Report}
+\date{November 19, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+When a pretrained time-series foundation model (TSFM) is deployed in real-world settings, operating conditions change over time---different machinery loads, different human subjects, different recording environments---and these domain shifts degrade classification performance. Abeywickrama et al.~\cite{abeywickrama2026pact} address \emph{domain-incremental adaptation}: adapting a frozen TSFM to each new arriving condition while preserving performance on all previously encountered conditions, without catastrophic forgetting. The key observation motivating their approach is that \textbf{domain condition shift is highly non-uniform across the representation space}---some local regions of the embedding space degrade substantially after a condition change while others remain nearly unaffected. This means global corrections (full fine-tuning, global regularization) are suboptimal: they either over-correct stable regions (causing forgetting) or under-correct degraded regions (failing to adapt). Existing approaches fall short: test-time adaptation methods (TENT, CoTTA, EATA) operate label-free and cannot leverage small calibration sets; regularization methods (EWC, MAS, LwF) constrain all parameter changes uniformly; and domain-incremental methods like S-Prompts require domain identity at inference.
+
+\subsection{Method}
+\textbf{PACT (Piecewise Adaptation via Chart Transport)} freezes both the pretrained encoder $f_\theta$ and classifier head $h_\phi$ entirely, operating only in the embedding space. Each new condition $D_d$ arrives sequentially with only $\rho{=}5\%$ labeled calibration data. The method has three components:
+
+\textbf{1.~Chart construction.} Source embeddings are partitioned into $K$ local regions (``charts'') via $k$-means clustering:
+\[
+  \kappa(z) = \arg\min_{c \in \{1,\ldots,K\}} \|z - \mu_c\|_2^2,
+\]
+where $\{\mu_c\}$ are fixed centroids computed once from source data ($K{=}8$ for FD, $K{=}4$ for WISDM/HHAR/UCI-HAR, $K{=}1$ for Sleep-EDF).
+
+\textbf{2.~Low-rank residual transports.} For each new condition $d$, PACT learns a per-chart residual correction:
+\[
+  T_c^d(z) = z + \Delta_c^d(z), \quad \text{where } \Delta_c^d(z) = B_c^d A_c^d z,
+\]
+with $A_c^d \in \mathbb{R}^{r \times p}$ and $B_c^d \in \mathbb{R}^{p \times r}$ at rank $r{=}8$---a LoRA-style factorization applied in the \emph{embedding space} rather than to model weights. The transport loss combines cross-entropy on calibration data with Frobenius-norm regularization ($\lambda{=}10^{-3}$). After training (200 epochs, AdamW at $\text{lr}{=}10^{-3}$), transports are frozen and appended to a transport bank.
+
+\textbf{3.~Identity-preserving gated routing.} A per-chart 2-layer MLP gate (hidden width $q{=}64$, ReLU, dropout 0.2) produces routing weights over all available transports including an explicit identity (source) transport $T_c^0(z) = z$:
+\[
+  \pi_{c,d}^{(t)}(z) = \bigl[\mathrm{softmax}(g_c^{(t)}(z) / \tau)\bigr]_d, \quad d = 0, \ldots, t,
+\]
+with temperature $\tau{=}0.5$. The corrected embedding is:
+\[
+  \hat{z} = z + \sum_{d=1}^{t} \pi_{\kappa(z),d}^{(t)}(z)\, \Delta_{\kappa(z)}^d(z),
+\]
+ensuring that embeddings needing no correction can bypass all transports via the identity pathway ($d{=}0$). Gates are refit after each new condition using all retained source and calibration embeddings with domain-balanced oversampling. Crucially, \textbf{no domain identity is required at inference}---the gate determines the appropriate mixture automatically.
+
+\textbf{Theoretical guarantees.} Proposition~1 shows that for a source embedding $z$ with correct prediction $y_0$, the prediction is preserved whenever $(1 - \pi_0)\, B_t(z) < m_{y_0}(z) / (2L_h)$, where $\pi_0$ is the identity gate weight, $B_t(z) = \max_{1 \leq j \leq t} \|\Delta_c^j(z)\|_2$, $m_{y_0}$ is the classification margin, and $L_h$ is the head's Lipschitz constant. Empirical coverage: 99.8\% on FD, 97.5\% on HHAR, 71.1\% on UCI-HAR, with all certified predictions verified correct.
+
+\subsection{Results}
+Experiments span 5 datasets (FD bearing-fault diagnosis, WISDM, HHAR, UCI-HAR, Sleep-EDF), 8 backbone architectures (Sundial, Mantis, UniShape, MOMENT, Chronos-Bolt, Moirai, TSLANet, PatchTST), and 16 baseline methods. Key findings:
+
+\begin{itemize}
+  \item \textbf{Dominant performance on FD:} PACT achieves \textbf{0.9575 average macro-F1} with only \textbf{0.0021 relative forgetting}---an 11.15-point AMF1 improvement over DualCD (0.8460), the strongest baseline, using just 5\% labeled calibration data per condition.
+  \item \textbf{Consistent gains:} On WISDM, PACT (0.8774) beats LwF (0.7940) by 8.34 points. On HHAR, PACT (0.8367) edges DualCD (0.8296). On UCI-HAR, PACT (0.7864) surpasses LwF (0.7351) by 5.13 points.
+  \item \textbf{Near-zero forgetting:} Relative forgetting remains below 0.05 across all datasets (0.0021 on FD, 0.0292 on WISDM, 0.0210 on HHAR, 0.0425 on UCI-HAR, 0.0171 on Sleep-EDF), substantially lower than all baselines.
+  \item \textbf{Label-free methods fail:} TTA/SFDA methods (MAPU, TENT, ACCUP) consistently underperform source-only baselines, confirming that even small calibration sets are essential for reliable adaptation.
+  \item \textbf{Cross-backbone generalization:} PACT improves over source-only baselines consistently across all 8 architectures. Mantis achieves the strongest results overall: FD (0.985), WISDM (0.967), HHAR (0.925), UCI-HAR (0.922).
+  \item \textbf{Low-rank sufficiency:} Rank-8 residual transports match or exceed full-rank ($p{=}768$) AMF1 across all datasets, confirming that low-rank corrections serve as beneficial regularization.
+  \item \textbf{Ablations:} Head fine-tuning alone shows highest forgetting; ungated transports raise AMF1 but forget by correcting indiscriminately; full PACT achieves best AMF1 \emph{and} lowest forgetting, confirming that local transport, low-rank structure, and identity-preserving gating are complementary. Source $k$-means outperforms random chart placement by 3.11--7.02 AMF1 points.
+\end{itemize}
+
+\subsection{Limitations}
+PACT depends entirely on the frozen encoder's quality---if the encoder fails to distinguish classes under a new condition, embedding-space corrections have limited recovery capacity. The fixed $k$-means partitioning from source data may not reflect target distribution structure; target examples far from source support may share a chart despite requiring different corrections. The method handles \emph{covariate shift} only and assumes the labeling function is preserved across conditions (no concept drift). Gate refitting after each new condition can change predictions on earlier conditions, and the preservation guarantees are probabilistic rather than absolute. Memory grows linearly with the number of conditions (retained source and calibration embeddings). On Sleep-EDF, PACT (0.6129) does not clearly outperform LwF (0.6138), suggesting that for certain domain shift types or when $K{=}1$ is forced by data limitations, advantages are modest. Only classification tasks are studied; extension to forecasting or anomaly detection is not explored.
+
+\subsection{Relevance to My Research}
+This paper sits at the intersection of two core research topics: \emph{time-series foundation models} (Topic~5) and \emph{continual learning for LLM agents} (Topic~3). The fundamental challenge---adapting a frozen foundation model to sequentially arriving domains without catastrophic forgetting---is precisely the continual learning problem applied to the TSFM setting. PACT's key insight that domain shift is \emph{locally non-uniform} in embedding space provides a principled alternative to global adaptation strategies. The LoRA-style low-rank factorization applied in embedding space (rather than weight space) is a novel adaptation paradigm that could extend to other foundation model types. The identity-preserving gate with theoretical prediction preservation guarantees addresses catastrophic forgetting with formal rigor rarely seen in continual learning methods. Combined with our prior reviews of time-series foundation models (Timer-S1, QuitoBench, Nexus, SAGA, Toto~2.0, TinyCast, Forecast Collapse, LLaTiSA, Koopman Generative Operators) and continual learning methods, this paper demonstrates that the ``adapt-in-embedding-space'' paradigm can effectively bridge the gap between TSFM pretraining and real-world deployment under distribution shift.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: PACT for Time-Series Forecasting Foundation Models}
+\textbf{Gap:} PACT is designed and evaluated exclusively for classification tasks, where a frozen linear head produces discrete class predictions. Time-series \emph{forecasting} foundation models (MOMENT, Chronos-Bolt, Moirai, Toto~2.0) face analogous domain shift problems---the same model must forecast under changing operating conditions---but the output space is continuous (future values) rather than discrete (class labels). The chart transport framework would need adaptation to handle regression-style outputs where the notion of ``classification margin'' and ``prediction preservation'' differs fundamentally.
+
+\textbf{Approach:} Extend PACT to forecasting by replacing the classification head with a frozen forecasting decoder and redefining the transport objective. Instead of cross-entropy on class labels, optimize transports to minimize forecasting loss (MSE/MAE) on small calibration windows where both input and future values are available. The identity-preserving gate generalizes naturally: the preservation guarantee becomes a bound on forecast deviation $\|\hat{y}_{\text{forecast}} - y_{\text{source-forecast}}\|_2$ rather than a classification margin condition. The chart construction remains unchanged (partition the encoder's embedding space). For conditions where only input data is available (no future values for calibration), combine PACT's supervised transport with unsupervised distribution alignment (e.g., optimal transport between source and target embedding distributions within each chart) as a regularizer.
+
+\textbf{Feasibility:} High. The chart transport framework transfers directly---only the loss function and preservation guarantee change. The main challenge is obtaining labeled calibration data for forecasting (requires a short observation window where ground truth is available), which is naturally available in streaming deployment (past predictions can be verified against realized values). Expected to be particularly effective for industrial forecasting where operating conditions change discretely (e.g., manufacturing process parameter changes).
+
+\subsection{Direction 2: Adaptive Chart Refinement via Target-Aware Splitting}
+\textbf{Gap:} PACT's chart construction is fixed at initialization via source-domain $k$-means and never updated. The authors acknowledge this limitation: ``target examples that fall far from source support may share a chart despite requiring different corrections.'' As conditions accumulate, the original source partitioning becomes increasingly misaligned with the evolving embedding distribution. This is especially problematic when target conditions introduce entirely new regions of the embedding space that the source $k$-means did not anticipate.
+
+\textbf{Approach:} Implement a chart splitting mechanism triggered by transport residual heterogeneity. After fitting a transport for condition $d$ in chart $c$, compute the variance of residual norms $\text{Var}(\|\Delta_c^d(z_i)\|_2)$ across calibration points in that chart. If variance exceeds a threshold (indicating that a single transport cannot uniformly correct the chart), split the chart into sub-charts via $k$-means on the calibration embeddings and fit separate transports for each sub-chart. The gate architecture naturally accommodates variable chart counts---simply add new chart-specific gate heads. To prevent chart proliferation, merge charts whose transports are similar (small Frobenius distance between transport matrices) across all conditions. This creates a \emph{growing, pruning} chart structure that adapts to the evolving domain landscape.
+
+\textbf{Feasibility:} Moderate. The splitting criterion (residual variance) is cheap to compute. The main challenge is gate refitting---when chart boundaries change, all gates must be refit, and routing decisions for earlier conditions may change. A conservative approach would only split charts when the variance exceeds a high threshold (e.g., 2$\times$ median), limiting chart growth. The merge operation provides a natural counterbalance. Expected to close the gap between PACT's performance and oracle routing (which uses ground-truth condition labels).
+
+\subsection{Direction 3: Transport Consolidation for Scalable Lifelong Deployment}
+\textbf{Gap:} PACT's transport bank grows linearly with the number of conditions: each new condition adds $2Kr$ parameters per chart and requires gate expansion. For lifelong deployment scenarios with hundreds or thousands of condition changes (e.g., continuous sensor monitoring across years of varying operational states), both the parameter count and gate routing complexity become prohibitive. The gate must route among an ever-growing number of transports, and the softmax denominator grows with each condition, potentially diluting routing precision.
+
+\textbf{Approach:} Periodically consolidate the transport bank by merging transports that serve similar correction functions. Define transport similarity between conditions $i$ and $j$ in chart $c$ as $\|B_c^i A_c^i - B_c^j A_c^j\|_F / \max(\|B_c^i A_c^i\|_F, \|B_c^j A_c^j\|_F)$. When similarity exceeds a threshold, merge via weighted SVD: compute the rank-$r$ truncated SVD of $\sum_{d \in \text{merge set}} w_d B_c^d A_c^d$, where $w_d$ reflects condition frequency or recency. The merged transport replaces all constituent transports, and the gate is refit with the reduced routing dimension. Additionally, implement a ``dormancy'' detector: transports whose maximum gate weight across all retained embeddings falls below $\epsilon$ for $n$ consecutive conditions are pruned entirely. This bounds the transport bank size at $O(\text{effective\_diversity})$ rather than $O(\text{num\_conditions})$.
+
+\textbf{Feasibility:} High. SVD-based merging is computationally trivial for small matrices ($p \times r$ with $r{=}8$). The similarity metric leverages the existing low-rank structure. The dormancy detector adds negligible overhead (track maximum gate weights during refitting). The main risk is information loss from premature merging---if two conditions with similar transports later diverge in their correction needs due to new incoming conditions, the merge cannot be undone. A mitigation is to retain the original transport parameters in cold storage (compressed, not in the active gate) for potential recovery. Expected to maintain $>95\%$ of PACT's performance while bounding active transport count at 3--5$\times$ the number of distinct correction patterns.
+
+\section{Conclusion}
+Abeywickrama et al.\ introduce PACT, a piecewise adaptation framework that corrects frozen TSFM embeddings via local, low-rank residual transports with identity-preserving gated routing. The key insight---that domain shift is non-uniform across the representation space and therefore demands local rather than global correction---yields dominant performance: 0.9575 AMF1 with 0.0021 forgetting on bearing-fault diagnosis, surpassing the best baseline by 11.15 points using only 5\% calibration data. The theoretical prediction preservation guarantee (99.8\% empirical coverage on FD) provides formal assurance that source-domain predictions are maintained through adaptation. By operating entirely in embedding space with frozen encoder and head, PACT demonstrates that the ``adapt-in-embedding-space'' paradigm can effectively bridge the gap between foundation model pretraining and real-world deployment under sequential domain shift---a critical capability for scaling TSFMs to production environments where operating conditions inevitably evolve.
+
+\begin{thebibliography}{1}
+\bibitem{abeywickrama2026pact}
+S.~Abeywickrama, P.~Gong, E.~Eldele, M.~Wu, and C.~Yuen,
+``Recurrent Domain Incremental Adaptation of Time-Series Foundation Models,''
+\textit{arXiv preprint arXiv:2611.24075}, 2026.
+\end{thebibliography}
+
+\end{document}
