@@ -1,0 +1,97 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Composable Soft-Prompt Distillation\\of RL Experts --- Toward Continual Post-Training}
+\author{Auto-generated Report}
+\date{November 24, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+After supervised fine-tuning (SFT), large language models undergo reinforcement learning (RL) post-training to acquire specialized capabilities across domains such as mathematics, code generation, agentic tasks, and instruction following. Each domain typically produces a separate RL expert---a full copy of the model weights fine-tuned for that domain. Zhang et al.~\cite{zhang2026cspd} address the fundamental challenge: \textbf{how to combine multiple RL experts into a single deployable system that retains all their capabilities, without catastrophic forgetting, and while supporting continual addition of new experts}. Current approaches have significant drawbacks: weight merging (Task Arithmetic, TIES) is a one-shot operation that produces mixed results for RL experts and requires recomputation for each new expert; multi-teacher on-policy distillation (MOPD) achieves strong in-domain results but requires expensive joint retraining whenever a new expert arrives and can degrade out-of-domain performance; LoRA-based approaches still modify weights and encounter interference. None of these methods are truly \emph{modular and continual}---they all require some form of joint retraining or one-shot merging when new experts arrive. CSPD (Composable Soft-Prompt Distillation) proposes a fundamentally different architecture: keep the backbone frozen, represent each expert's knowledge as a compact soft prompt in the input space, and compose experts simply by concatenating their prompts at inference time.
+
+\subsection{Method}
+\textbf{Single-expert distillation.} Given a frozen pre-RL backbone model with parameters $\theta_0$ and an RL expert (teacher) for domain $j$, the goal is to learn a soft prompt $P_j \in \mathbb{R}^{L \times d}$ ($L{=}256$ vectors, $d$ is the embedding dimension) that makes the frozen backbone behave like the expert:
+\[
+  P_j^* = \arg\min_{P_j} \mathbb{E}_{(x,y) \sim \mathcal{D}_j} \Bigl[-\frac{1}{|y|}\sum_{t=1}^{|y|} \log p_{\theta_0}(y_t \mid I(P_j, x), y_{<t})\Bigr],
+\]
+where $I(P_j, x)$ inserts the soft prompt before the question $x$ in the system message position, $\mathcal{D}_j$ contains verifier-filtered correct teacher responses, and only $P_j$ is updated (the backbone remains frozen). This standard sequence-level cross-entropy is optimized with the Muon optimizer for 200 updates.
+
+\textbf{Prefix-robust training (critical innovation).} During training of each individual soft prompt, 50\% of training examples are augmented with a random prefix of 128--256 tokens sampled from other questions in the same domain, placed \emph{before} the soft prompt (excluded from the loss). This exposes each prompt to varied preceding context, ensuring it functions regardless of what precedes it in the input sequence---essential for composition, where each prompt will be preceded by other prompts.
+
+\textbf{Composition via concatenation.} At inference time, $k$ expert prompts are composed by simple concatenation:
+\[
+  p(y \mid x) = p_{\theta_0}\bigl(y \mid I(P_{1:k}^*, x)\bigr), \quad P_{1:k}^* = [P_1^*; \ldots; P_k^*] \in \mathbb{R}^{kL \times d}.
+\]
+No joint training is required---experts ``meet only at inference.'' New experts are simply appended in arrival order, creating a growing library of compact expert modules. The composition is approximately order-invariant (MCSI order: 67.83 avg vs.\ ISCM reverse: 67.72).
+
+\textbf{Serving efficiency.} Since the backbone is frozen and shared across all requests, different prompt combinations can share one batch. Soft prompts are prefill-only operations (no per-decode-step overhead like LoRA), achieving \textbf{2.40$\times$ output throughput} advantage over rank-4 LoRA at 32 concurrent requests.
+
+\subsection{Results}
+\textbf{Single-expert distillation (23 tasks).} Across 23 teacher-student pairs spanning math, code, and agent tasks (models from 7B to 35B): 22 of 23 settings recover $\geq$90\% of expert performance, and 15 settings \emph{match or exceed} the teacher. Recoveries range from 88.1\% (MiMo-7B-RL on code) to 200\% (TMax-27B on agent tasks). Notably, some soft prompts exceed their teachers, suggesting the frozen backbone retains untapped capability that the prompt can unlock more cleanly than RL fine-tuning.
+
+\textbf{Four-expert composition (Qwen3-4B-Base).} Composing math, code, science, and instruction-following experts:
+\begin{itemize}
+  \item \textbf{CSPD: 67.83 avg} (107.5\% recovery), essentially matching MOPD (67.79, 107.2\%)---the strongest baseline requiring joint retraining.
+  \item CSPD outperforms all weight-merging approaches: Task Arithmetic (67.27), TIES (67.47).
+  \item CSPD substantially outperforms LoRA-based approaches: LoRA+TA (65.50), LoRA+TIES (66.19).
+  \item Prefix-robust training contributes \textbf{+3.33 points} (64.50 $\rightarrow$ 67.83).
+\end{itemize}
+
+\textbf{Continual addition dynamics.} Sequential addition of experts produces \emph{monotonically increasing} average performance: unprompted 50.41 $\rightarrow$ +IF 60.99 $\rightarrow$ +Science 61.67 $\rightarrow$ +Code 63.67 $\rightarrow$ +Math 67.83. Individual domains show both positive and negative interactions, but the aggregate trend is strictly upward.
+
+\textbf{Out-of-domain generalization.} On six held-out benchmarks (XSTest, TruthfulQA, BFCL, TriviaQA, BBEH, FinQA): CSPD achieves the best mean generalization (\textbf{56.6}) vs.\ MOPD (53.5), LoRA+TA (53.8), TIES (54.1). By keeping the backbone frozen, CSPD avoids the out-of-domain degradation that weight-modifying methods suffer---a \textbf{+3.1-point advantage} over MOPD, with particularly strong gains on BFCL (+6.2) and XSTest (+4.0).
+
+\textbf{Mechanistic analysis.} The soft prompt closes 86.8\% of the teacher-student KL divergence in next-token distributions, while natural language instructions with the same intent close at most 2.1\%. The prompt primarily works by increasing ``checking tokens'' (?, But, Check) and decreasing ``flow tokens'' (paragraph breaks, So, Thus)---making the model verify intermediate reasoning steps. Response tokens attending directly to the soft prompt carry 80\% of the improvement.
+
+\textbf{Serving efficiency.} Throughput remains within 1.5\% of the unadapted backbone, with 2.40$\times$ output throughput and 2.27$\times$ P95 latency reduction compared to LoRA at 32 concurrent requests.
+
+\subsection{Limitations}
+The composition study uses only one backbone (Qwen3-4B-Base), four domains, and a single training seed. Expert interactions are not fully controlled---adding certain experts can temporarily degrade performance on existing domains (e.g., code reducing IFBench by 2.1 points before recovery). Several hyperparameters are selected on evaluation benchmarks, making some recovery ratios potentially optimistic. Each soft prompt adds 256 positions to the context, so attention and KV-cache costs grow linearly with expert count ($256k$ additional tokens for $k$ experts)---a bottleneck for large expert libraries. Soft prompts are tied to their backbone and cannot transfer across base models; moving to a new backbone requires re-distillation. No theoretical analysis explains when or why composition by concatenation should work, and the largest backbone tested for composition is 4B parameters.
+
+\subsection{Relevance to My Research}
+This paper sits at the intersection of \emph{reinforcement learning} (Topic~2) and \emph{continual learning for LLM agents} (Topic~3). The core challenge---combining multiple RL-trained experts into a continually expandable system---is precisely the continual post-training problem that emerges as LLMs acquire specialized capabilities through RL in different domains. CSPD's approach of keeping the backbone frozen while representing expert knowledge in the input space (soft prompts) offers a fundamentally different paradigm from weight-space methods: instead of modifying the model (risking forgetting and interference), it \emph{programs} the model's behavior through learned input prefixes. This connects to our prior reviews of on-policy distillation methods (OPD Mismatch, DOPD, Pass-the-Baton, Filter-Then-Reweight, ReNIO) by showing that distillation need not modify model weights at all. The prefix-robust training innovation---exposing prompts to varied preceding context during training---is an elegant solution to the composition problem that parallels how continual learning methods handle distribution shift. The monotonically increasing aggregate performance during sequential expert addition, combined with the 2.40$\times$ throughput advantage over LoRA, makes CSPD particularly attractive for real-world deployment where new RL capabilities must be added incrementally without service disruption.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Automatic Prompt Router for Selective Expert Activation}
+\textbf{Gap:} CSPD concatenates \emph{all} available expert prompts for every query, adding $256k$ tokens to the context for $k$ experts. For large expert libraries ($k > 10$), this becomes prohibitively expensive and may actually degrade performance as irrelevant prompts contribute noise. The paper identifies prompt selection as a key future direction but does not address it. Moreover, some queries benefit from only a subset of experts (e.g., a pure math question does not need the instruction-following expert's prompt).
+
+\textbf{Approach:} Train a lightweight router network $R_\phi(x) \in [0,1]^k$ that, given a query $x$, predicts which expert prompts to include. The router operates on the query embedding (from the frozen backbone's first layer) and outputs a binary or soft selection over the $k$ available prompts. Train $R_\phi$ using the composition quality as the reward signal: for a held-out set of queries with known domain labels, evaluate whether including/excluding each prompt improves or degrades the verifier score. The router can be a simple 2-layer MLP over the mean query embedding ($\sim$10K parameters), adding negligible overhead. At inference time, only the selected prompts are concatenated, reducing the prefix length from $256k$ to $256k'$ where $k' \ll k$. A key design choice is whether to allow ``prompt stacking'' (soft selection via attention weighting) or strict binary gating; the former preserves the cross-domain synergies observed in CSPD while the latter maximizes efficiency.
+
+\textbf{Feasibility:} High. The router is small and can be trained on the same evaluation data used for composition benchmarking. The main challenge is handling queries that benefit from multiple domains simultaneously (e.g., a coding problem requiring mathematical reasoning)---the router must learn to activate multiple prompts for such queries. The existing mechanistic analysis (attention patterns to soft prompts) could serve as a training signal: prompts receiving minimal attention from response tokens are candidates for exclusion.
+
+\subsection{Direction 2: Cross-Backbone Prompt Transfer via Embedding Alignment}
+\textbf{Gap:} CSPD's soft prompts are tied to their backbone---moving to a new backbone requires re-distilling every expert from scratch, which requires access to all original RL teachers. This is a critical limitation for practical deployment: when a foundation model provider releases an improved base model, all accumulated expert prompts become obsolete. This directly conflicts with the ``continual'' promise of CSPD.
+
+\textbf{Approach:} Learn a lightweight alignment function $A: \mathbb{R}^{d_\text{old}} \rightarrow \mathbb{R}^{d_\text{new}}$ that maps soft prompt vectors from the old backbone's embedding space to the new backbone's embedding space. The alignment is trained on a small set of ``anchor'' queries where both backbones produce similar behavior: for each anchor query $x$, optimize $A$ so that the new backbone prompted with $A(P_j^*)$ produces the same output distribution as the old backbone prompted with $P_j^*$. The alignment function can be a simple affine transformation ($A(v) = Wv + b$) if the embedding dimensions match, or a low-rank projection otherwise. For backbones in the same model family (e.g., Qwen3-4B to Qwen3-8B), the embedding spaces may be sufficiently similar that the alignment is nearly identity. Train $A$ once per backbone transition using 100--500 anchor queries, then apply it to all existing soft prompts. This creates a ``prompt migration'' pipeline that preserves the library across backbone upgrades.
+
+\textbf{Feasibility:} Moderate. The success depends on how structurally similar the old and new embedding spaces are---same-family upgrades (Qwen3-4B to Qwen3-8B) likely work well, while cross-family transfers (Qwen to LLaMA) may require more complex alignment. The main risk is that the optimal prompt behavior in the new backbone may differ substantially from the old backbone (e.g., the new backbone may already partially encode the expert's capability). A practical mitigation is to verify transferred prompts on a small eval set and re-distill only those that fail to meet a recovery threshold.
+
+\subsection{Direction 3: Soft-Prompt Distillation for Diffusion Language Model Experts}
+\textbf{Gap:} CSPD is designed for autoregressive (AR) language models, where the soft prompt precedes the input in a left-to-right sequence. Diffusion language models (DLMs)---which generate text through iterative denoising rather than sequential token prediction---have a fundamentally different generation mechanism: the model processes the entire sequence simultaneously at each denoising step, and there is no natural ``prefix'' position. As DLMs increasingly undergo RL post-training (DARE, V-GRPO, Flow-DPPO from our prior reviews), the same multi-expert composition problem will arise, but CSPD's concatenation-based composition cannot be directly applied.
+
+\textbf{Approach:} Adapt soft-prompt distillation to DLMs by embedding expert knowledge in the \emph{conditioning} rather than the input sequence. For masked diffusion LMs (MDLMs), insert learnable soft tokens at fixed positions within the sequence (e.g., as a prefix block that is never masked during denoising), and optimize them to minimize the KL divergence between the prompted frozen DLM's denoising distribution and the DLM expert's distribution at each timestep: $P_j^* = \arg\min_{P_j} \mathbb{E}_{t, x_t}[\text{KL}(p_{\text{expert}}(x_0 \mid x_t) \| p_{\theta_0}(x_0 \mid x_t, P_j))]$. For composition, the key insight is that DLMs already handle ``context'' tokens that are fixed during denoising (e.g., the prompt in conditional generation)---multiple expert prompts can occupy separate fixed-token regions, each influencing the denoising process without interfering with each other. The prefix-robust training transfers naturally: augment training with random fixed-token contexts to ensure each expert prompt works alongside others.
+
+\textbf{Feasibility:} Moderate. The main challenge is that DLMs' bidirectional attention means soft prompts influence generation differently than in AR models---each prompt token attends to and is attended by all sequence positions at every denoising step, potentially creating stronger interference between composed prompts. The denoising timestep adds another dimension: different experts may need to exert influence at different denoising stages (early steps for global structure, late steps for domain-specific details). A starting point would be to test single-expert distillation on existing DLM RL experts (e.g., from DARE or V-GRPO training) before attempting composition.
+
+\section{Conclusion}
+Zhang et al.\ introduce CSPD, a modular framework that distills each RL expert into a compact soft prompt ($256$ vectors) for a frozen backbone, then composes experts by simply concatenating their prompts at inference time. The key innovation---prefix-robust training that exposes each prompt to varied preceding contexts---enables composition without joint training, contributing +3.33 points to the four-expert average. CSPD matches MOPD (the strongest joint-training baseline) at 67.83 average across math, code, science, and instruction following, while achieving \textbf{+3.1 points better out-of-domain generalization} by keeping the backbone frozen. The framework supports truly continual expert addition: each new expert is independently distilled and appended without revisiting previous experts, with monotonically increasing aggregate performance. Combined with 2.40$\times$ throughput advantage over LoRA and 86.8\% KL-divergence closure (vs.\ 2.1\% for natural language instructions), CSPD establishes soft-prompt distillation as a viable paradigm for composable, continual RL post-training---a critical capability as LLMs increasingly acquire diverse specialized skills through domain-specific reinforcement learning.
+
+\begin{thebibliography}{1}
+\bibitem{zhang2026cspd}
+Z.~Zhang, C.~Yang, X.~He, C.~Liu, Y.~Yin, Z.~Liu, Z.~Yin, Y.~Li, Z.~Liu, J.~Li, M.~Jin, C.~Li, Z.~Weng, R.~He, W.~Gao, J.~Deng, C.~Wu, H.~Shen, W.~Chai, C.~Zhao, Z.~Ying, K.~Liu, A.~Chen, P.~Ma, Z.~Wang, A.~Patel, Z.~Gan, and X.~E.~Wang,
+``Composable Soft-Prompt Distillation of RL Experts: Toward Continual Post-Training,''
+\textit{arXiv preprint arXiv:2611.27376}, 2026.
+\end{thebibliography}
+
+\end{document}
