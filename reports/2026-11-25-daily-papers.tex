@@ -1,0 +1,94 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Lazy Agents Answer Against Their Own Beliefs ---\\Reinforcement Learning with Verifiable Beliefs\\Teaches Them to Act on What They Believe}
+\author{Auto-generated Report}
+\date{November 25, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+When multi-step AI agents built on vision-language models (VLMs) operate on long-horizon tasks requiring evidence gathering before answering, they frequently provide answers before collecting sufficient evidence---a failure mode the authors term \textbf{premature commitment} or ``laziness.'' Sin et al.~\cite{sin2026rlvb} make a striking observation: agents write explicit belief statements naming multiple possible answers (expressing genuine uncertainty), yet commit to a single answer anyway---they literally \emph{answer against their own stated beliefs}. Existing RL frameworks fail to address this because: (1)~\textbf{outcome rewards} (e.g., GRPO) treat lucky guesses identically to evidence-backed answers, reinforcing laziness rather than penalizing it, with 18--53\% of step groups producing zero learning signal; and (2)~\textbf{process rewards from LLM judges} (e.g., PPO with judge) can reward lucky guesses and penalize correct-but-uncertain reasoning when judges see hidden ground truth. Neither framework teaches agents \emph{when} to stop gathering information.
+
+The paper fills this gap by exploiting \textbf{simulator knowledge}: in training environments, simulators know which observations rule out which hidden answers, enabling computation of exact posterior probabilities. This posterior---representing ``the belief supported by the evidence''---provides a verifiable, judge-free reward signal that depends solely on gathered evidence, never on which answer happens to be correct in a given episode.
+
+\subsection{Method}
+\textbf{POMDP formulation.} Interactions are modeled as a partially observable MDP: a hidden target $\theta \in \Theta$ is drawn from prior $p_0$ and fixed during an episode; the agent takes evidence actions $a_t \in \mathcal{A}$ producing observations $o_t \sim p(\cdot \mid \theta, a_{1:t})$, then decides when to commit to an answer $y \in \mathcal{Y}$. The exact posterior $b_t(\theta) \propto p_0(\theta)\prod_{s<t} p(o_s \mid \theta, a_{1:s})$ restricts the prior to targets consistent with every observation.
+
+\textbf{Posterior teacher (oracle policy).} A teacher policy $\pi^*$ acts on the exact posterior $b$. The answer value is $Q(b, y) = \log\bigl(c(t)\,\hat{\rho}(b)\,b(y) / b_{\max}\bigr)$, where $c(t) = e^{-\lambda t/T}$ is a time discount and $\hat{\rho}(b)$ is the probability the teacher answers at this belief state. Evidence action values use $n$-step lookahead: $Q^{(n)}(b,a) = \sum_o p(o \mid b,a)\, V^{(n-1)}(b^{(a,o)})$. The teacher selects between answering and gathering evidence with probability $p_{\text{ans}} = \sigma(\Delta/\tau)$ where $\Delta$ compares the best answer to best evidence values.
+
+\textbf{Posterior process reward (core contribution).} The reward for a turn $x$ at history $h$ is:
+\[
+  R(h, x) = \log \pi^*(u \mid b) + S_{\text{dec}} + \eta(S + W),
+\]
+where $\log\pi^*(u \mid b)$ is the \emph{action term} (rewards evidence-gathering while posterior is uncertain, penalizes premature commitment), $S_{\text{dec}}$ is a decision scoring rule, and $S + W$ captures belief accuracy and width penalties. \textbf{Critical property:} the reward depends solely on gathered evidence, never on which answer is true---it cannot reward lucky guesses. In practice, the action term alone suffices (ablations show the belief term actually \emph{decreases} performance).
+
+\textbf{Policy update.} Training compares $N$ sampled turns within the same history (step-level credit):
+\begin{itemize}
+  \item \textbf{RLVB (policy gradient):} $w_i \propto R(h, x_i) - \frac{1}{N-1}\sum_{j \neq i} R(h, x_j)$
+  \item \textbf{RLVB-EM:} $w_i \propto e^{R(h, x_i)/\alpha}$ (normalized)
+\end{itemize}
+Gradient steps on weighted log-likelihood proceed until KL divergence exceeds $\epsilon$. Training uses LoRA adapters with up to 50 updates on HiddenGames only.
+
+\subsection{Results}
+Experiments use three VLMs (Qwen3-VL-4B-Thinking, Qwen3-VL-8B-Thinking, Qwen3.5-4B) across three benchmarks: HiddenGames (7 tasks, 756 test games), Pro-Worlds (15 novel visual puzzles, 300 test episodes, \emph{never seen in training}), and RoboQuest (10 kitchen manipulation tasks, 500 test episodes, \emph{never seen in training, no exact posterior available}).
+
+\begin{itemize}
+  \item \textbf{Consistent gains:} RLVB improves over base in all 9 model$\times$benchmark settings, with an average improvement of \textbf{+17.1\%}. On Qwen3-VL-4B, the RoboQuest gain reaches \textbf{+32.8 points} (28.4\% $\rightarrow$ 61.2\%).
+  \item \textbf{Outcome RL fails:} GRPO and outcome-PPO average $-1.0\%$ and $-5.1\%$ respectively---they cannot solve the premature commitment problem.
+  \item \textbf{Outperforms judge-based RL:} RLVB beats PPO with DeepSeek-V4.1-Flash judge by \textbf{+9.3\%} on average across all settings, while requiring 1.6$\times$ fewer GPU-hours and no judge API calls.
+  \item \textbf{Dramatic behavioral shift:} Premature commitment rates drop from 76--87\% (base) to \textbf{44--46\%} (RLVB). Mean posterior at commitment on HiddenGames rises from 31.7\% to \textbf{65.0\%}. Episodes reaching sufficient evidence ($b \geq 0.95$) increase from 8\% to \textbf{51\%} on HiddenGames, 0.4\% to \textbf{12\%} on Pro-Worlds, 36\% to \textbf{74\%} on RoboQuest.
+  \item \textbf{The ``acting on beliefs'' insight:} Agents committing despite naming multiple possible answers drops 30$\times$: from 3--68\% (base) to \textbf{0.1--2.2\%} (RLVB). Yet belief accuracy itself does \emph{not} improve---RLVB works by teaching agents \emph{when to stop}, not \emph{what to believe}.
+  \item \textbf{Efficiency:} RLVB uses 74.2 A100 GPU-hours (vs.\ 120.1 for judge-based PPO). RLVB-EM achieves moderate gains at only 29.7 hours (4.0$\times$ cheaper).
+  \item \textbf{Transfer to unseen environments:} Gains transfer to Pro-Worlds and RoboQuest despite training only on HiddenGames, with RoboQuest having no exact posterior available at test time---a pure generalization test.
+\end{itemize}
+
+\subsection{Limitations}
+RLVB requires exact posterior computation during training, restricting it to simulated environments where the simulator can enumerate hidden states. In one setting (RoboQuest with Qwen3.5-4B), the judge-based PPO approach outperforms RLVB (57.1\% vs.\ 54.0\%). Belief accuracy does not consistently improve (and sometimes worsens), meaning belief quality is not a reliable byproduct. The transfer mechanism to environments without exact posteriors (like RoboQuest) is observed empirically but not theoretically explained. All benchmarks use simulated environments with discrete answer sets; applicability to open-ended real-world tasks with continuous answer spaces is untested. Experiments use 4B and 8B models only; behavior at larger scales is unknown.
+
+\subsection{Relevance to My Research}
+This paper is directly relevant to \emph{reinforcement learning} (Topic~2) through its novel reward design for multi-step agents and connects to \emph{continual learning for LLM agents} (Topic~3) through the agent behavior modification framework. The core contribution---a process reward derived from exact posterior computation that is verifiable, judge-free, and immune to lucky-guess reinforcement---addresses a fundamental challenge in RL post-training: how to provide credit for \emph{process quality} (evidence gathering) rather than just \emph{outcome quality} (correct answer). This is closely related to our prior reviews of reward modeling methods: where Criteria Exposure (Review~\#148) showed that verifier overfitting via Goodhart's Law degrades embodied self-improvement, RLVB avoids this entirely by grounding rewards in evidence rather than outcomes. The finding that agents learn \emph{when to act on beliefs} rather than \emph{what to believe}---with a 30$\times$ reduction in acting against stated beliefs---reveals a separable component of agent competence that existing RL methods completely miss. The transfer to environments without exact posteriors suggests the learned ``patience'' behavior generalizes beyond the training signal, relevant to deploying agents in real-world settings where simulator knowledge is unavailable.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: Approximate Posteriors for Real-World RLVB Training}
+\textbf{Gap:} RLVB's requirement for exact posterior computation restricts training to simulated environments with enumerable hidden states. Real-world agent tasks (web navigation, software debugging, scientific experimentation) lack simulators that can compute exact posteriors, preventing direct application of the method despite the demonstrated transfer to unseen environments.
+
+\textbf{Approach:} Replace the exact posterior with a \emph{learned posterior model} $\hat{b}_\psi(y \mid h_t)$ trained to approximate the true posterior from observation histories. Train $\hat{b}_\psi$ in simulation (where exact posteriors are available as supervision) using a cross-entropy loss: $\mathcal{L}_\psi = -\sum_y b_t(y)\log\hat{b}_\psi(y \mid h_t)$. The posterior model takes the same observation history as the agent and outputs a distribution over answers. Once trained, $\hat{b}_\psi$ can be deployed in real-world environments where exact posteriors are unavailable, providing approximate RLVB rewards for continued training. The key question is whether the posterior model generalizes across environment types: train on HiddenGames-style tasks but deploy on web navigation, where ``evidence'' is page content and ``hidden state'' is the answer to a question. A domain-agnostic posterior model could operate on the agent's \emph{stated beliefs} (which RLVB already requires) and learn to calibrate them against evidence quality, creating a self-supervised posterior signal.
+
+\textbf{Feasibility:} Moderate. The posterior model is a standard sequence classifier, trainable with existing infrastructure. The main challenge is domain transfer: a posterior model trained on grid-world observations may not generalize to natural-language web pages. A mitigation is to train on diverse simulated environments (combining HiddenGames, Pro-Worlds, and synthetic text-based tasks) to learn domain-agnostic evidence-to-certainty mappings. The ablation showing that the action term (when to stop) matters more than belief accuracy suggests approximate posteriors may suffice---even a rough estimate of ``is there enough evidence?'' could drive substantial gains.
+
+\subsection{Direction 2: Verifiable Beliefs for Diffusion Language Model Agents}
+\textbf{Gap:} RLVB is designed for autoregressive VLMs that generate reasoning, belief statements, and actions sequentially. Diffusion language models (DLMs)---which generate text through iterative denoising---are increasingly used as agent backbones (our prior review: MDLMs as text-based world models). DLMs face an analogous premature commitment problem during \emph{denoising}: tokens may converge to confident predictions before sufficient contextual evidence propagates, analogous to our prior finding of ``false confidence'' in DLMs (Review~\#146, Frequency-Aware Remasking). However, the belief-action structure of RLVB cannot be directly applied because DLMs do not generate tokens sequentially.
+
+\textbf{Approach:} Adapt the verifiable belief framework to the denoising process by defining a ``denoising posterior'' at each step $t$: given the current noisy sequence $x_t$, compute the posterior probability that each masked/noisy token position will ultimately resolve to each vocabulary element, conditioned on the already-committed (high-confidence) tokens. This posterior can be computed exactly for masked diffusion models by enumerating consistent completions (tractable for short sequences or with factored approximations). The RLVB reward then becomes a per-step denoising reward: at each denoising step, reward the model for maintaining uncertainty at positions where the denoising posterior is spread (insufficient evidence from context) and reward commitment only when the posterior concentrates. This creates a ``patient denoising'' policy that avoids false confidence by analogy with RLVB's patient evidence-gathering. The connection to entropy spikes (Review~\#149) is direct: spikes occur when the model transitions between uncertain and committed states, and the verifiable belief framework provides a principled reward for managing this transition.
+
+\textbf{Feasibility:} Moderate-to-low. The main challenge is posterior computation: for masked diffusion over a vocabulary of size $V$ at $L$ positions, exact enumeration is intractable ($V^L$ possibilities). Factored approximations (assuming conditional independence across positions given committed tokens) reduce this to $O(LV)$ but sacrifice accuracy. A practical starting point would be a small-vocabulary, short-sequence setting (e.g., discrete code generation with $V{=}256$, $L{=}64$) where approximate posteriors are more reliable. If successful, this would unify the ``evidence-gathering patience'' insight across both autoregressive and diffusion paradigms.
+
+\subsection{Direction 3: Hierarchical Belief-Aware RL for Multi-Agent Coordination}
+\textbf{Gap:} RLVB addresses single-agent premature commitment. In multi-agent settings---where multiple LLM agents must coordinate to solve a task (e.g., collaborative debugging, distributed scientific experimentation)---the premature commitment problem is amplified: each agent may commit based on its \emph{local} evidence while ignoring that other agents hold complementary information. The posterior becomes a \emph{joint} belief over all agents' observations, and the ``laziness'' of one agent can cascade to others (e.g., Agent~A commits prematurely, Agent~B incorporates A's premature answer as evidence, reinforcing the error).
+
+\textbf{Approach:} Extend RLVB to a multi-agent setting with \emph{hierarchical beliefs}. Each agent $i$ maintains a local posterior $b^i_t$ over the hidden state based on its own observations. A coordinator (which can be one of the agents or a separate module) maintains a \emph{joint posterior} $b^{\text{joint}}_t$ that integrates information from all agents' communicated beliefs. The RLVB reward is computed at two levels: (1)~\emph{local reward}: penalizes agent $i$ for committing when its local posterior is uncertain (standard RLVB); (2)~\emph{coordination reward}: penalizes agent $i$ for committing when its answer disagrees with the joint posterior, or when other agents' beliefs suggest additional evidence is available. The coordinator decides when the joint belief is sufficiently concentrated to commit, explicitly modeling the value of information from other agents. Training proceeds in simulation where the joint posterior can be computed exactly from all agents' observations.
+
+\textbf{Feasibility:} Moderate. The hierarchical belief structure adds complexity but each component (local posterior, joint posterior, coordinator) uses existing RLVB machinery. The main challenge is communication: agents must share belief summaries without overwhelming bandwidth, requiring compression of belief states into compact messages. The 30$\times$ reduction in single-agent belief-action misalignment suggests substantial room for improvement in multi-agent settings where misalignment cascades. A proof-of-concept on a two-agent version of HiddenGames (each agent sees different parts of the board) would validate the approach.
+
+\section{Conclusion}
+Sin et al.\ identify and address a critical failure mode in multi-step VLM agents: premature commitment despite expressed uncertainty---agents that literally answer against their own stated beliefs. RLVB exploits simulator-computed exact posteriors to provide a verifiable process reward that depends solely on evidence quality, never on outcome luck. The result is a 30$\times$ reduction in belief-action misalignment, +17.1\% average accuracy improvement across 9 settings (3 models $\times$ 3 benchmarks), and successful transfer to environments never seen during training---including RoboQuest where no exact posterior is available. The key mechanistic insight is that RLVB teaches agents \emph{when to stop gathering evidence}, not \emph{what to believe}: belief accuracy does not improve, but the alignment between beliefs and actions improves dramatically. At 1.6$\times$ fewer GPU-hours than judge-based RL and requiring no external critic, RLVB demonstrates that verifiable, evidence-grounded rewards can be both more effective and more efficient than outcome-based or judge-based alternatives for training patient, evidence-driven agents.
+
+\begin{thebibliography}{1}
+\bibitem{sin2026rlvb}
+R.~Sin, P.~Feng, W.~Wang, and S.~Poria,
+``Lazy Agents Answer Against Their Own Beliefs: Reinforcement Learning with Verifiable Beliefs Teaches Them to Act on What They Believe,''
+\textit{arXiv preprint arXiv:2611.32884}, 2026.
+\end{thebibliography}
+
+\end{document}
