@@ -1,0 +1,94 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[margin=1in]{geometry}
+
+\title{Daily Paper Review: Beyond Self-Consistency ---\\Recursive Self-Improvement at Test Time}
+\author{Auto-generated Report}
+\date{November 26, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Paper Summary}
+
+\subsection{Problem and Motivation}
+Current test-time compute scaling for LLMs relies heavily on self-consistency via majority voting, which suffers from two interconnected failures: (1)~\textbf{inefficient inference}---each attempt starts from scratch, leaving earlier reasoning unused, so additional compute yields more independent samples rather than progressively better reasoning; and (2)~\textbf{unreliable supervision}---majority voting rewards whichever answer the model already produces most often, reinforcing errors when that majority is wrong. Wu et al.~\cite{wu2026ttrsi} observe that all existing label-free test-time training methods (TTRL, TTPO, CANON, U-OPSD) rely on majority voting as a pseudo-label, making them fundamentally unable to escape incorrect majorities. The paper proposes \textbf{TT-RSI (Test-Time Recursive Self-Improvement)}: an ``amplify-then-distill'' loop where the model builds on its own prior solutions through sequential refinement and distillation, rather than merely sampling independently and voting.
+
+\subsection{Method}
+TT-RSI consists of two complementary components.
+
+\textbf{In-Context RSI (inference-time).} Instead of generating independent samples, the model generates a chain of solutions where each attempt uses the full previous solution as a reference: $a_1 \sim \pi_\theta(\cdot \mid q)$, then $a_{k+1} \sim \pi_\theta(\cdot \mid q, a_k)$ for $k = 1, \ldots, l{-}1$, returning the answer from $a_l$ (chain length $l{=}11$). The prompt presents the previous solution as ``a previous attempt'' and instructs the model to ``solve the problem independently''---crucially, \emph{not} directing it to correct errors, which preserves exploration while enabling autonomous reuse of verified reasoning steps.
+
+\textbf{Fix/break model (theoretical framework).} Refinement is modeled as a Markov chain with constant fix rate $f$ (probability of correcting a wrong answer) and break rate $b$ (probability of breaking a correct answer). The accuracy at step $k{+}1$ follows $\text{acc}_{k+1} = f + (1 - f - b)\,\text{acc}_k$, converging to the balance point $f/(f+b)$. Empirically, In-Context RSI achieves $f{=}3.84\%$, $b{=}1.96\%$, yielding a balance point of \textbf{65.42\%}---the highest among all variants, including final-answer-only reference (60.55\%), directed correction (59.97\%), and unrelated reference (49.57\%, below baseline).
+
+\textbf{In-Weight RSI (weight-update component).} This distills improvements discovered during In-Context RSI back into the model weights via three objectives built on on-policy self-distillation (OPSD):
+
+(1)~\emph{Answer distillation}: $\mathcal{L}_{\text{ans}} = D\bigl(\mathrm{sg}[\pi_{\theta_0}(\cdot \mid q, a_1)] \,\|\, \pi_\theta(\cdot \mid q)\bigr)$, compressing one improvement step into the first attempt.
+
+(2)~\emph{Refinement distillation}: $\mathcal{L}_{\text{ref}} = D\bigl(\mathrm{sg}[\pi_{\theta_0}(\cdot \mid q, a_2)] \,\|\, \pi_\theta(\cdot \mid q, a_1)\bigr)$, training the refinement step itself to incorporate further improvement.
+
+(3)~\emph{Accelerated distillation}: Token-level adaptive weighting based on teacher guidance shift $d_t = \text{TV}(\pi_{\theta_0}(\cdot \mid q, a_1), \pi_{\theta_0}(\cdot \mid q, a_2))$ at position $t$, with weight $\omega_t = 1 - \alpha + 2\alpha d_t/(d_t + \tau)$ ($\alpha{=}0.5$, $\tau{=}10^{-4}$). This upweights tokens where the two references produce maximal teacher disagreement: $\mathcal{L}_{\text{Acc}} = D_\omega\bigl(\mathrm{sg}[\pi_{\theta_0}(\cdot \mid q, a_2)] \,\|\, \pi_\theta(\cdot \mid q)\bigr)$.
+
+The combined loss is $\mathcal{L} = \mathcal{L}_{\text{ans}} + \mathcal{L}_{\text{ref}} + \mathcal{L}_{\text{Acc}}$, using forward KL divergence with temperature 1.1 and per-token clipping at 0.05. Training uses LoRA (rank 64) for 100 updates at $\text{lr}{=}5{\times}10^{-6}$.
+
+\textbf{Theorem~1 (compression and amplification).} After $n$ exact distributional backups, the model's $k$-th attempt matches the initial model's $(n{+}1)k$-th attempt in distribution. With accelerated distillation (parameter $\gamma$), the equivalent attempt index grows quadratically: $1 + n + \gamma n(n{+}1)/2$. Convergence is geometric: $\text{acc}(\mu_n) - \text{acc}_\infty = (\text{acc}(\mu_0) - \text{acc}_\infty)\, \lambda^n \prod_{i=1}^{n} \bigl((1{-}\gamma) + \gamma\lambda^i\bigr)$.
+
+A critical design choice: using the \emph{current model} (updated weights) rather than a fixed initial policy for generating references creates a virtuous cycle---improved weights generate better references, enabling further improvement (AIME26: 83.33\% vs.\ 74.44\% with fixed policy).
+
+\subsection{Results}
+Evaluated on five competition math benchmarks (AIME~2025/2026, HMMT~Feb~2025/2026, BRUMO~2025) with Qwen3-1.7B/4B/8B.
+
+\begin{itemize}
+  \item \textbf{Average gains:} TT-RSI achieves \textbf{+13.89\%} over base across all scales: Qwen3-1.7B 34.84\%$\rightarrow$50.48\% (+15.64), Qwen3-4B 55.76\%$\rightarrow$69.64\% (+13.88), Qwen3-8B 60.10\%$\rightarrow$72.24\% (+12.14). Outperforms the best baseline (TTPO+SC) by \textbf{+4.79\%} under equivalent compute.
+  \item \textbf{Escaping wrong majorities:} On 6 AIME26 questions where the base model's majority vote is wrong, In-Weight RSI achieves \textbf{12.76\%} accuracy (+7.03 over base 5.73\%), while all majority-voting methods (TTRL, TTPO, CANON) remain at 2--5\%---fundamentally stuck.
+  \item \textbf{Token efficiency:} In-Context RSI matches 10-sample self-consistency accuracy at its 5th attempt while generating \textbf{68.6\% fewer tokens}. At comparable token cost, it maintains a +2.13\% accuracy advantage.
+  \item \textbf{Training efficiency:} In-Weight RSI takes \textbf{8.53 min/update} vs.\ 22.08--45.73 for baselines (2.29--5.36$\times$ faster), consuming only 0.95M tokens vs.\ up to 11.74M.
+  \item \textbf{Ablations:} Full-solution reference outperforms final-answer-only by +4.28\%; independent solving beats directed correction by +3.16\%; unrelated reference degrades below baseline (confirming genuine content use). Recursive distillation ($\mathcal{L}_{\text{ans}} + \mathcal{L}_{\text{ref}}$) outperforms either component alone; accelerated distillation adds further gains. Using current-model references versus fixed-initial improves AIME26 from 74.44\% to 83.33\%.
+  \item \textbf{Cross-task transfer:} Training on AIME26 and evaluating on HMMT/BRUMO yields +2.37\% average over base, outperforming all baselines, demonstrating that improvements are not pure memorization.
+\end{itemize}
+
+\subsection{Limitations}
+Evaluation is restricted to mathematical reasoning (competition problems with verifiable answers); applicability to open-ended tasks, natural language understanding, or coding is untested. Only the Qwen3 family (up to 8B) is evaluated. The method requires gradient computation at test time (LoRA adaptation), not just inference. In-Context RSI requires sequential generation (each attempt depends on the previous), precluding the parallelization available to independent sampling. The fix/break model assumes constant rates, simplifying real dynamics. Small benchmark sizes (30 questions for AIME) may lead to high variance. Extension to settings where improvement must be retained across tasks (not just within a single test instance) is acknowledged as an open direction.
+
+\subsection{Relevance to My Research}
+This paper is directly relevant to \emph{continual learning for LLM agents} (Topic~3) and connects to \emph{reinforcement learning} (Topic~2) through its self-distillation training framework. The core paradigm---recursive self-improvement through sequential refinement and self-distillation---addresses a fundamental limitation of existing test-time methods that our prior reviews have documented: majority-voting-based pseudo-labels (used by TTRL, TTPO) can reinforce errors, analogous to how Criteria Exposure (Review~\#148) showed verifier overfitting via Goodhart's Law. TT-RSI breaks this cycle by building on \emph{solution content} rather than \emph{outcome votes}. The fix/break model provides a principled framework for understanding when refinement improves versus degrades performance, connecting to our review of Self-Improvement Memory (Review~\#151, SIM) which studied how to structure optimization process records for transfer. The ``amplify-then-distill'' loop---where In-Context RSI amplifies reasoning quality and In-Weight RSI compresses it into weights---formalizes the relationship between inference-time and training-time self-improvement that has been implicit in many prior methods. The current-model reference policy creating a virtuous improvement cycle is particularly relevant to recursive self-improvement: the model's own updated weights generate better references, which enable further weight updates, creating exactly the recursive loop that our Topic~3 research investigates.
+
+\section{Follow-up Research Directions}
+
+\subsection{Direction 1: TT-RSI with Persistent Memory for Multi-Task Continual Improvement}
+\textbf{Gap:} TT-RSI operates on individual test instances: the model improves on a single problem through refinement and distillation, but improvements are not structured for transfer to future problems. The authors acknowledge that extending to settings ``where improvement unfolds over interactions and must be retained across tasks'' is open. When the model encounters a new problem, it starts the refinement chain from scratch, potentially rediscovering reasoning patterns it has already learned and distilled for similar problems.
+
+\textbf{Approach:} Integrate TT-RSI with a Self-Improvement Memory (SIM) bank that stores structured records of successful refinement episodes: for each problem where In-Context RSI improved the answer, record (1)~the initial error pattern, (2)~the key reasoning step that enabled the fix, (3)~the fix/break rates observed, and (4)~the problem category. When encountering a new problem, retrieve relevant past refinement records and provide them as additional context alongside the previous attempt. This creates a \emph{memory-augmented refinement chain}: $a_{k+1} \sim \pi_\theta(\cdot \mid q, a_k, m_{\text{retrieved}})$, where $m_{\text{retrieved}}$ contains relevant past refinement strategies. The In-Weight RSI component is extended to also distill the memory retrieval skill: the accelerated distillation upweights tokens where the memory-augmented teacher diverges from the memory-free teacher, training the model to internalize the cross-problem refinement patterns. Over time, the model accumulates a growing library of refinement strategies that transfer across problems.
+
+\textbf{Feasibility:} High. The memory bank is a straightforward extension of the existing In-Context RSI framework (adding retrieved records to the prompt). The main challenge is retrieval quality: determining which past refinement records are relevant to a new problem requires embedding-based similarity over problem structures rather than surface features. The fix/break framework provides a natural quality filter: only store records where $f > b$ (net improvement). Expected to reduce the number of refinement steps needed for convergence on new problems by bootstrapping from past successes.
+
+\subsection{Direction 2: Recursive Self-Improvement for Agentic Multi-Step Tasks}
+\textbf{Gap:} TT-RSI is designed for single-turn mathematical reasoning where the entire solution is generated in one pass and can be provided as reference for the next attempt. Multi-step agentic tasks (tool use, web navigation, code debugging) produce \emph{trajectories} of interleaved actions and observations, where the model cannot simply re-read a previous trajectory and ``solve independently'' because the environment state depends on the specific actions taken. The fix/break model assumes a static problem, but agentic tasks have dynamic state that changes with each action.
+
+\textbf{Approach:} Adapt TT-RSI to agentic settings by decomposing trajectories into \emph{decision points} and applying refinement at each decision point rather than at the full-trajectory level. At each step $t$ in a trajectory, the model receives the history up to that point plus the \emph{remainder of a previous trajectory} as reference (analogous to the full-solution reference in In-Context RSI). The model decides whether to follow the reference trajectory or deviate based on its own reasoning. The In-Weight RSI component distills the improved decision-point policies back into the model, with the accelerated distillation focusing on decision points where the teacher's guidance shifts most between seeing the original trajectory versus a refined trajectory. The fix/break model extends to per-step rates: $f_t$ and $b_t$ may vary across trajectory positions, with early steps having higher break rates (small errors cascade) and later steps having higher fix rates (more context available).
+
+\textbf{Feasibility:} Moderate. The decision-point decomposition is well-defined for structured agentic tasks (each tool call or action is a decision point). The main challenge is computational cost: generating multiple full trajectories for refinement in an interactive environment is expensive compared to re-generating text solutions. A practical mitigation is to cache environment states at decision points (checkpointing), enabling rollback-and-retry without full re-simulation. Our prior reviews of agentic RL methods (RAGEN-2, ABSeeker, SEED) provide existing infrastructure for trajectory-level credit assignment that could be combined with TT-RSI's refinement approach.
+
+\subsection{Direction 3: Accelerated Distillation for Diffusion Language Models}
+\textbf{Gap:} TT-RSI's accelerated distillation identifies tokens where teacher guidance shifts most between two reference solutions and upweights their contribution to the loss. In diffusion language models (DLMs), which generate text through iterative denoising rather than sequential token prediction, the analogous question is: at which \emph{denoising steps} and \emph{token positions} does the guidance from a refined solution differ most from the original? DLMs face their own version of the fix/break problem during denoising: each step can fix corrupted tokens or break already-correct ones, and the balance determines generation quality.
+
+\textbf{Approach:} Adapt TT-RSI's accelerated distillation to the denoising process. For each problem, generate two denoised solutions: one using the standard denoising trajectory and one using a refined trajectory (where the DLM is conditioned on a previous solution, analogous to In-Context RSI). Compute the guidance shift $d_{t,s}$ at each token position $t$ and denoising step $s$ as the total variation distance between the two denoising distributions. Apply step-and-position-aware weighting: $\omega_{t,s} = 1 - \alpha + 2\alpha d_{t,s}/(d_{t,s} + \tau)$. This creates a 2D attention map over (position, step) that focuses distillation on the specific denoising moments where the refinement produces the largest behavioral change. The fix/break model extends naturally: at each denoising step, tokens have step-specific fix and break rates, and the theoretical convergence analysis (Theorem~1) applies with step-averaged rates. This bridges TT-RSI's sequential refinement paradigm with the parallel denoising paradigm of DLMs.
+
+\textbf{Feasibility:} Moderate. The guidance shift computation requires running two parallel denoising trajectories per problem, doubling the inference cost but adding no architectural changes. The main uncertainty is whether DLMs exhibit sufficient ``refinement sensitivity''---whether conditioning on a previous solution meaningfully changes the denoising distribution at specific steps. Our prior reviews of DLM denoising dynamics (entropy spikes in StepRefine, false confidence in SAFE) suggest that denoising is indeed non-uniform across steps, making step-aware distillation potentially high-impact. A proof-of-concept on a masked diffusion LM (e.g., MDLM) with math reasoning would validate the approach.
+
+\section{Conclusion}
+Wu et al.\ introduce TT-RSI, a test-time recursive self-improvement framework that breaks the reliance on majority voting through two complementary mechanisms: In-Context RSI (sequential refinement where each attempt builds on the full previous solution) and In-Weight RSI (self-distillation with accelerated token-level weighting that compresses refinement improvements into model weights). The fix/break theoretical framework reveals that In-Context RSI achieves a 65.42\% balance point ($f{=}3.84\%$, $b{=}1.96\%$)---the highest among all refinement variants---while the current-model reference policy creates a virtuous improvement cycle (83.33\% on AIME26 vs.\ 74.44\% with fixed policy). The most striking result: on questions where base majority voting is wrong, In-Weight RSI achieves +7.03\% accuracy while all majority-voting methods remain stuck at 2--5\%. Combined with 68.6\% token reduction over self-consistency and 2.29--5.36$\times$ training speedup, TT-RSI establishes recursive refinement-and-distillation as a principled alternative to independent sampling for test-time compute scaling---one that can escape the fundamental ceiling imposed by incorrect majorities.
+
+\begin{thebibliography}{1}
+\bibitem{wu2026ttrsi}
+J.~Wu, Y.~Wang, E.~Su, J.~Zhang, P.~Li, L.~Wang, C.~Tang, A.~Wang, W.~Ouyang, and S.~Tang,
+``Beyond Self-Consistency: Recursive Self-Improvement at Test Time,''
+\textit{arXiv preprint arXiv:2611.30965}, 2026.
+\end{thebibliography}
+
+\end{document}
